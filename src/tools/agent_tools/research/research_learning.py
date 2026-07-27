@@ -442,6 +442,180 @@ def _clean_execution_token(value: Any, default: str = "unknown") -> str:
     return "".join(ch for ch in text if ch.isalnum() or ch in {"_", "-"})
 
 
+def _valid_execution_retrieval_key(value: Any) -> str:
+    key = str(value or "").strip()
+    parts = [part.strip() for part in key.split("|")]
+    if len(parts) != 4 or parts[-1].lower() != "execution":
+        return ""
+    if any(part.lower() in {"", "*", "unknown"} for part in parts[:-1]):
+        return ""
+    return key
+
+
+def _valid_fac_setup_type(value: Any) -> str:
+    setup_type = str(value or "").strip()
+    if setup_type.lower() in {"", "*", "unknown", "generic_trade_setup"}:
+        return ""
+    return setup_type
+
+
+def _table_columns(cursor: sqlite3.Cursor, table_name: str) -> set[str]:
+    try:
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return {str(row[1]) for row in cursor.fetchall()}
+    except Exception:
+        return set()
+
+
+def _opening_fac_setup_type(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    ticker: str,
+    trading_date: str,
+    current_lots: int,
+) -> str:
+    """Resolve the pre-decision open position to its original strategy FAC setup."""
+
+    current_side = "long" if int(current_lots or 0) > 0 else "short" if int(current_lots or 0) < 0 else ""
+    decision_day = str(trading_date or "")[:10]
+    if not config_id or not ticker or not current_side or not decision_day:
+        raise RuntimeError("research_opening_fac_context_inputs_missing")
+    transaction_columns = _table_columns(cursor, "futures_transactions")
+    recommendation_columns = _table_columns(cursor, "futures_recommendation")
+    required_transaction_columns = {
+        "id",
+        "config_id",
+        "recommendation_id",
+        "trading_date",
+        "ticker",
+        "action",
+        "lots",
+        "source_type",
+        "created_at",
+    }
+    required_recommendation_columns = {
+        "id",
+        "signal_snapshot",
+    }
+    if not required_transaction_columns.issubset(transaction_columns) or not required_recommendation_columns.issubset(recommendation_columns):
+        raise RuntimeError("research_opening_fac_lineage_schema_missing")
+    cursor.execute(
+        """
+        SELECT *
+        FROM futures_transactions
+        WHERE config_id = ?
+          AND UPPER(ticker) = UPPER(?)
+          AND substr(trading_date, 1, 10) < ?
+        ORDER BY substr(trading_date, 1, 10),
+                 created_at,
+                 CASE
+                     WHEN lower(COALESCE(source_type, '')) = 'rollover'
+                          AND lower(action) IN ('close_long', 'close_short') THEN 0
+                     WHEN lower(COALESCE(source_type, '')) = 'rollover'
+                          AND lower(action) IN ('open_long', 'open_short') THEN 1
+                     ELSE 0
+                 END,
+                 id
+        """,
+        (config_id, ticker, decision_day),
+    )
+    active: Dict[str, List[Dict[str, Any]]] = {"long": [], "short": []}
+    rollover_transfers: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+
+    def consume_active(side: str, lots: int) -> List[Dict[str, Any]]:
+        consumed_segments: List[Dict[str, Any]] = []
+        remaining = lots
+        while remaining > 0 and active[side]:
+            first = active[side][0]
+            consumed = min(remaining, int(first.get("remaining_lots") or 0))
+            consumed_segments.append({
+                "remaining_lots": consumed,
+                "row": dict(first.get("row") or {}),
+            })
+            first["remaining_lots"] = int(first.get("remaining_lots") or 0) - consumed
+            remaining -= consumed
+            if int(first.get("remaining_lots") or 0) <= 0:
+                active[side].pop(0)
+        if remaining > 0:
+            raise RuntimeError("research_opening_fac_lineage_missing")
+        return consumed_segments
+
+    for raw_row in cursor.fetchall():
+        row = dict(raw_row)
+        source_type = str(row.get("source_type") or "strategy").strip().lower()
+        action = str(row.get("action") or "").strip().lower()
+        lots = max(0, abs(_review_helpers._safe_int(row.get("lots"), 0)))
+        if lots <= 0:
+            continue
+        if action in {"open_long", "open_short"}:
+            side = "long" if action == "open_long" else "short"
+            if source_type == "rollover":
+                recommendation_id = str(row.get("recommendation_id") or "").strip()
+                transfer_queue = rollover_transfers.get((recommendation_id, side)) or []
+                origin_row = dict(
+                    (transfer_queue[0].get("row") if transfer_queue else {}) or {}
+                )
+                if not recommendation_id or not origin_row:
+                    raise RuntimeError("research_rollover_open_lineage_missing")
+                remaining = lots
+                while remaining > 0 and transfer_queue:
+                    first = transfer_queue[0]
+                    transferred = min(remaining, int(first.get("remaining_lots") or 0))
+                    active[side].append({
+                        "remaining_lots": transferred,
+                        "row": dict(first.get("row") or {}),
+                    })
+                    first["remaining_lots"] = int(first.get("remaining_lots") or 0) - transferred
+                    remaining -= transferred
+                    if int(first.get("remaining_lots") or 0) <= 0:
+                        transfer_queue.pop(0)
+                if remaining > 0:
+                    active[side].append({
+                        "remaining_lots": remaining,
+                        "row": origin_row,
+                    })
+                continue
+            if source_type == "strategy":
+                active[side].append({"remaining_lots": lots, "row": row})
+            continue
+        if action not in {"close_long", "close_short"}:
+            continue
+        side = "long" if action == "close_long" else "short"
+        consumed_segments = consume_active(side, lots)
+        if source_type == "rollover":
+            recommendation_id = str(row.get("recommendation_id") or "").strip()
+            if not recommendation_id:
+                raise RuntimeError("research_rollover_recommendation_missing")
+            rollover_transfers.setdefault((recommendation_id, side), []).extend(consumed_segments)
+
+    candidates = [item for item in active[current_side] if int(item.get("remaining_lots") or 0) > 0]
+    if not candidates:
+        raise RuntimeError("research_opening_fac_lineage_missing")
+    recommendation_id = str((candidates[0].get("row") or {}).get("recommendation_id") or "").strip()
+    if not recommendation_id:
+        raise RuntimeError("research_opening_fac_recommendation_missing")
+    select_columns = ["signal_snapshot"]
+    for column in ("signal_snapshot_artifact_path", "signal_snapshot_sha256"):
+        if column in recommendation_columns:
+            select_columns.append(column)
+    cursor.execute(
+        f"SELECT {', '.join(select_columns)} FROM futures_recommendation WHERE id = ?",
+        (recommendation_id,),
+    )
+    raw_recommendation = cursor.fetchone()
+    if raw_recommendation is None:
+        raise RuntimeError("research_opening_fac_recommendation_missing")
+    recommendation = dict(raw_recommendation)
+    opening_snapshot = _review_helpers._recommendation_snapshot(recommendation)
+    opening_setup_type = _valid_fac_setup_type(
+        _review_helpers._fac_setup_type(opening_snapshot)
+    )
+    if not opening_setup_type:
+        raise RuntimeError("research_opening_fac_setup_type_missing")
+    return opening_setup_type
+
+
 def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Extract Trader execution feedback for Phase4 action-value learning.
 
@@ -454,6 +628,9 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
     setup_learning = _dict_or_empty(phase2.get("setup_execution_learning"))
     translation = _dict_or_empty(snapshot.get("execution_translation"))
     execution_result = _dict_or_empty(snapshot.get("execution_result"))
+    execution_learning_trace = _dict_or_empty(
+        execution_result.get("execution_learning_trace")
+    )
     final_contract = _dict_or_empty(snapshot.get("final_action_contract"))
 
     intraday_selection = (
@@ -521,6 +698,9 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
         "setup_execution_learning": setup_learning,
         "intraday_selection": intraday_selection,
         "execution_result": execution_result,
+        "execution_retrieval_key": str(
+            execution_learning_trace.get("execution_retrieval_key") or ""
+        ).strip(),
         "semantic_state": semantic_state,
         "trigger_checked": bool(intraday_selection.get("trigger_checked")),
         "trigger_passed": bool(intraday_selection.get("trigger_passed")),
@@ -751,7 +931,7 @@ def write_alpha_setup_profiles(
         txs = transactions_by_recommendation.get(rec_id, [])
         horizon = _review_helpers._horizon_class(_review_helpers._expected_horizon_days(snapshot, side), snapshot)
         regime = _review_helpers._market_regime(snapshot)
-        template = _review_helpers._fac_setup_type(snapshot)
+        template = _valid_fac_setup_type(_review_helpers._fac_setup_type(snapshot))
         if not template:
             continue
         data_usage = data_usage_from_snapshot(snapshot)
@@ -791,6 +971,14 @@ def write_alpha_setup_profiles(
         sector = _review_helpers._sector_for_ticker(cfg, ticker)
         planned_target_lots = _review_helpers._safe_int(semantic_state.get("target_lots"))
         current_lots = _review_helpers._safe_int(semantic_state.get("current_lots"), 0)
+        if current_lots != 0:
+            setup_type = _opening_fac_setup_type(
+                cursor,
+                config_id=config_id,
+                ticker=ticker,
+                trading_date=trading_date,
+                current_lots=current_lots,
+            )
         contract_intent = recommendation_intent_from_lots(
             current_lots=current_lots,
             target_lots=planned_target_lots,
@@ -940,27 +1128,28 @@ def write_alpha_setup_profiles(
                 "profile_state_hint": result.get("profile_state_hint"),
             })
         execution_learning = _execution_learning_from_snapshot(snapshot)
-        if execution_learning:
-            execution_setup_type = (
-                "execution_"
-                + _clean_execution_token(execution_learning.get("execution_profile"), "timing")
-                + "_setup"
-            )
-            execution_data_combo = f"{data_combo}|execution:{_clean_execution_token(execution_learning.get('execution_profile'), 'unknown')}"
+        execution_retrieval_key = _valid_execution_retrieval_key(
+            execution_learning.get("execution_retrieval_key")
+            if execution_learning
+            else ""
+        )
+        if execution_learning and execution_retrieval_key:
+            execution_data_combo = f"execution:{execution_retrieval_key}|{data_combo}"
             execution_scope_key = build_alpha_setup_scope_key(
                 ticker=ticker,
                 side=side,
                 horizon_class=horizon,
                 market_regime=regime,
-                setup_type=execution_setup_type,
+                setup_type=setup_type,
                 data_combo=execution_data_combo,
             )
             execution_sample = {
                 **sample,
                 "source_type": "execution",
-                "setup_type": execution_setup_type,
+                "setup_type": setup_type,
                 "data_combo": execution_data_combo,
                 "scope_key": execution_scope_key,
+                "execution_retrieval_key": execution_retrieval_key,
                 "action_taken": execution_learning["action_taken"],
                 "pm_action": execution_learning.get("execution_profile") or sample.get("pm_action"),
                 "trader_status": ":".join(
@@ -1024,7 +1213,7 @@ def write_alpha_setup_profiles(
                 samples.append({
                     "ticker": ticker,
                     "side": side,
-                    "setup_type": execution_setup_type,
+                    "setup_type": setup_type,
                     "scope_key": execution_scope_key,
                     "source_type": "execution",
                     "lifecycle_state": execution_result.get("lifecycle_state"),
@@ -1426,10 +1615,14 @@ def _write_alpha_setup_policy_state(
         profit_factor = _review_helpers._safe_float(profile.get("profit_factor"))
         confidence = _review_helpers._safe_float(profile.get("confidence_score"))
         max_position_impact = _review_helpers._safe_float(profile.get("max_position_impact"))
+        profile_setup_type = _valid_fac_setup_type(profile.get("setup_type"))
+        if not profile_setup_type:
+            skipped += 1
+            continue
         scope = {
             "ticker": ticker,
             "side": side,
-            "setup_type": "*",
+            "setup_type": profile_setup_type,
             "horizon_class": str(profile.get("horizon_class") or "*"),
             "market_regime": str(profile.get("market_regime") or "*"),
         }
@@ -1526,6 +1719,7 @@ def _write_alpha_setup_policy_state(
             config_id=config_id,
             ticker=ticker,
             side=side,
+            setup_type=profile_setup_type,
             horizon_class=scope["horizon_class"],
             market_regime=scope["market_regime"],
             policy_type=policy_type,

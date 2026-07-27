@@ -415,12 +415,17 @@ def _learning_retrieval_keys(
     regime = _clean_token(profile_scope.get("market_regime"), "*")
     setup_type = _clean_token(profile_scope.get("setup_type"), "*")
     lane = _clean_token(action_value_lane or action_name, "*")
-    execution_profile = _clean_token(profile_scope.get("execution_profile"), "*")
-    trigger_reason = _clean_token(profile_scope.get("trigger_reason"), "*")
+    exact_execution_retrieval_key = str(
+        profile_scope.get("execution_retrieval_key") or ""
+    ).strip()
     return {
         "retrieval_key": "|".join([ticker, side, horizon, regime, setup_type, lane]),
         "fallback_retrieval_key": "|".join([ticker, side, horizon, lane]),
-        "execution_retrieval_key": "|".join([ticker, execution_profile, trigger_reason, lane]),
+        "execution_retrieval_key": (
+            exact_execution_retrieval_key
+            if lane == "execution"
+            else ""
+        ),
     }
 
 
@@ -1122,6 +1127,9 @@ def upsert_alpha_setup_sample_and_profile(
             "market_regime": regime,
             "setup_type": setup_type,
             "data_combo": data_combo,
+            "execution_retrieval_key": str(
+                sample.get("execution_retrieval_key") or ""
+            ).strip(),
         },
         trading_date=str(trading_date)[:10],
         rows=rows,

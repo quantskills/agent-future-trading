@@ -102,7 +102,6 @@ from tools.common.signal_evidence_collection import (
 from tools.common.execution_trigger_semantics import (
     entry_invalidation_contract_error,
     execution_profile_allowed_for_analyst,
-    execution_profile_from_learning_setup,
     execution_trigger_contract_error,
     normalize_execution_profile,
     normalize_trigger_confirmation_adjustment,
@@ -5260,7 +5259,16 @@ def _action_value_can_support_real_amplification(row: dict, ticker: str | None, 
 def _execution_profile_from_action_value(row: dict) -> str:
     if not isinstance(row, dict):
         return ""
-    return execution_profile_from_learning_setup(row.get("setup_type"))
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    retrieval_key = str(
+        row.get("execution_retrieval_key")
+        or payload.get("execution_retrieval_key")
+        or ""
+    ).strip()
+    parts = retrieval_key.split("|")
+    if len(parts) == 4 and str(parts[-1]).strip().lower() == "execution":
+        return normalize_execution_profile(parts[1])
+    return ""
 
 
 def _execution_action_value_preference(

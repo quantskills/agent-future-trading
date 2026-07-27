@@ -676,6 +676,21 @@ def _normalize_pm_consumable_action_value_record(record: Mapping[str, Any]) -> D
     payload["canonical_action_family"] = family
     payload["action_value_lane"] = normalized["action_value_lane"]
     payload["learning_lane"] = normalized["learning_lane"]
+    if str(lane or "").strip().lower() == "execution":
+        execution_retrieval_key = str(
+            normalized.get("execution_retrieval_key")
+            or payload.get("execution_retrieval_key")
+            or ""
+        ).strip()
+        parts = [part.strip() for part in execution_retrieval_key.split("|")]
+        if (
+            len(parts) != 4
+            or parts[-1].lower() != "execution"
+            or any(part.lower() in {"", "*", "unknown"} for part in parts[:-1])
+        ):
+            raise ValueError("execution_action_value_retrieval_key_invalid")
+        normalized["execution_retrieval_key"] = execution_retrieval_key
+        payload["execution_retrieval_key"] = execution_retrieval_key
     canonical_preference = canonical_action_preference_for_action_value(normalized)
     current_preference = str(
         normalized.get("action_preference")
@@ -6502,6 +6517,7 @@ def _upsert_alpha_setup_policy_state(
     config_id: str,
     ticker: str,
     side: str,
+    setup_type: str,
     horizon_class: str,
     market_regime: str,
     policy_type: str,
@@ -6548,7 +6564,7 @@ def _upsert_alpha_setup_policy_state(
             config_id,
             ticker,
             side,
-            "*",
+            setup_type,
             horizon_class,
             market_regime,
             policy_type,

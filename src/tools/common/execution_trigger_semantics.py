@@ -79,13 +79,6 @@ _TRIGGER_SOURCES_BY_PROFILE = {
 }
 
 
-_EXECUTION_LEARNING_SETUP_TO_PROFILE = {
-    "execution_breakout_setup": "breakout",
-    "execution_pullback_setup": "pullback",
-    "execution_vwap_confirmed_setup": "vwap_confirmed",
-}
-
-
 def normalize_execution_profile(value: Any) -> str:
     profile = str(value or "").strip().lower()
     return profile if profile in CANONICAL_EXECUTION_PROFILES else ""
@@ -98,14 +91,6 @@ def normalize_trigger_confirmation_adjustment(value: Any) -> str:
 
 def requires_stronger_trigger_confirmation(value: Any) -> bool:
     return normalize_trigger_confirmation_adjustment(value) in STRONGER_CONFIRMATION_ADJUSTMENTS
-
-
-def execution_profile_from_learning_setup(value: Any) -> str:
-    """Read only the registered execution-learning setup, never arbitrary text."""
-    return _EXECUTION_LEARNING_SETUP_TO_PROFILE.get(
-        str(value or "").strip().lower(),
-        "",
-    )
 
 
 def canonical_entry_trigger(profile: Any, side: Any) -> str:
