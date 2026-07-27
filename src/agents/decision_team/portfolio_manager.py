@@ -6105,22 +6105,6 @@ def _market_regime_from_signals(analyst_signals: list, target_side: str) -> str:
     return "unknown"
 
 
-def _setup_type_from_signals(target_side: str, analyst_signals: list, signal_combo: tuple[str, str, str]) -> str:
-    for signal in analyst_signals or []:
-        if _signal_side_text(getattr(signal, "signal", None)) != target_side:
-            continue
-        setup_type = str(getattr(signal, "setup_type", "") or "").strip()
-        if setup_type and setup_type != "unknown":
-            horizon = str(
-                getattr(signal, "analyst_horizon", None)
-                or getattr(signal, "horizon_class", None)
-                or "unknown"
-            )
-            return f"{target_side}_{setup_type}_{horizon}"[:160]
-    normalized_combo = "_".join(str(item).lower() for item in signal_combo)
-    return f"{target_side}_{normalized_combo}"[:160]
-
-
 def _current_canonical_setup_type_from_signals(
     target_side: str,
     analyst_signals: list,
@@ -6372,35 +6356,89 @@ def _load_opening_fac_context(
             WHERE ft.config_id = ?
               AND upper(ft.ticker) = upper(?)
               AND substr(ft.trading_date, 1, 10) < ?
-            ORDER BY substr(ft.trading_date, 1, 10), ft.created_at, ft.id
+            ORDER BY substr(ft.trading_date, 1, 10),
+                     ft.created_at,
+                     CASE
+                         WHEN lower(COALESCE(ft.source_type, '')) = 'rollover'
+                              AND lower(ft.action) IN ('close_long', 'close_short') THEN 0
+                         WHEN lower(COALESCE(ft.source_type, '')) = 'rollover'
+                              AND lower(ft.action) IN ('open_long', 'open_short') THEN 1
+                         ELSE 0
+                     END,
+                     ft.id
             ''',
             (config_id, ticker, decision_day),
         )
         active: dict[str, list[dict]] = {"long": [], "short": []}
+        rollover_transfers: dict[tuple[str, str], list[dict]] = {}
+
+        def consume_active(side: str, lots: int) -> list[dict]:
+            consumed_segments: list[dict] = []
+            remaining = lots
+            while remaining > 0 and active[side]:
+                first = active[side][0]
+                consumed = min(remaining, int(first.get("remaining_lots") or 0))
+                consumed_segments.append({
+                    "remaining_lots": consumed,
+                    "row": dict(first.get("row") or {}),
+                })
+                first["remaining_lots"] = int(first.get("remaining_lots") or 0) - consumed
+                remaining -= consumed
+                if int(first.get("remaining_lots") or 0) <= 0:
+                    active[side].pop(0)
+            if remaining > 0:
+                raise RuntimeError("pm_opening_fac_lineage_missing")
+            return consumed_segments
+
         for raw_row in cursor.fetchall():
             row = dict(raw_row)
             source_type = str(row.get("source_type") or "strategy").strip().lower()
             action = str(row.get("action") or "").strip().lower()
             lots = max(0, abs(_safe_int(row.get("lots"), 0)))
-            if lots <= 0 or source_type == "rollover":
+            if lots <= 0:
                 continue
             if action in {"open_long", "open_short"}:
+                side = "long" if action == "open_long" else "short"
+                if source_type == "rollover":
+                    recommendation_id = str(row.get("recommendation_id") or "").strip()
+                    if not recommendation_id:
+                        raise RuntimeError("pm_rollover_recommendation_missing")
+                    transfer_key = (recommendation_id, side)
+                    transfer_queue = rollover_transfers.get(transfer_key) or []
+                    origin_row = dict((transfer_queue[0].get("row") if transfer_queue else {}) or {})
+                    if not origin_row:
+                        raise RuntimeError("pm_rollover_open_lineage_missing")
+                    remaining = lots
+                    while remaining > 0 and transfer_queue:
+                        first = transfer_queue[0]
+                        transferred = min(remaining, int(first.get("remaining_lots") or 0))
+                        active[side].append({
+                            "remaining_lots": transferred,
+                            "row": dict(first.get("row") or {}),
+                        })
+                        first["remaining_lots"] = int(first.get("remaining_lots") or 0) - transferred
+                        remaining -= transferred
+                        if int(first.get("remaining_lots") or 0) <= 0:
+                            transfer_queue.pop(0)
+                    if remaining > 0:
+                        active[side].append({
+                            "remaining_lots": remaining,
+                            "row": origin_row,
+                        })
+                    continue
                 if source_type != "strategy":
                     continue
-                side = "long" if action == "open_long" else "short"
                 active[side].append({"remaining_lots": lots, "row": row})
                 continue
             if action not in {"close_long", "close_short"}:
                 continue
             side = "long" if action == "close_long" else "short"
-            remaining = lots
-            while remaining > 0 and active[side]:
-                first = active[side][0]
-                consumed = min(remaining, int(first.get("remaining_lots") or 0))
-                first["remaining_lots"] = int(first.get("remaining_lots") or 0) - consumed
-                remaining -= consumed
-                if int(first.get("remaining_lots") or 0) <= 0:
-                    active[side].pop(0)
+            consumed_segments = consume_active(side, lots)
+            if source_type == "rollover":
+                recommendation_id = str(row.get("recommendation_id") or "").strip()
+                if not recommendation_id:
+                    raise RuntimeError("pm_rollover_recommendation_missing")
+                rollover_transfers.setdefault((recommendation_id, side), []).extend(consumed_segments)
         candidates = [item for item in active[current_side] if int(item.get("remaining_lots") or 0) > 0]
         if not candidates:
             raise RuntimeError("pm_opening_fac_lineage_missing")
@@ -6884,8 +6922,7 @@ def _apply_adaptive_policy_position_control(
         return position_ratio, reasons, notes, diagnostics
     horizon = _resolve_decision_horizon(analyst_signals, 1 if target_side == "long" else -1)
     regime = _market_regime_from_signals(analyst_signals, target_side)
-    combo = _analyst_signal_combo(analyst_signals)
-    template = _setup_type_from_signals(target_side, analyst_signals, combo)
+    template = _current_canonical_setup_type_from_signals(target_side, analyst_signals)
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
     matching: list[dict] = []
     for row in adaptive_policy_state or []:
@@ -11197,10 +11234,9 @@ def _run_pm_six_step_decision(state: FundState):
                 1 if pm_risk_gate_side == "long" else -1,
             )
             market_regime_key = _market_regime_from_signals(analyst_signals, pm_risk_gate_side)
-            setup_type_key = _setup_type_from_signals(
+            setup_type_key = _current_canonical_setup_type_from_signals(
                 pm_risk_gate_side,
                 analyst_signals,
-                signal_combo,
             )
             recent_side_performance = db.get_futures_trade_pair_performance(
                 config_id=config_id,

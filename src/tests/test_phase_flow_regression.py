@@ -13102,6 +13102,84 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             if os.path.exists(path):
                 os.remove(path)
 
+    def test_opening_fac_lineage_continues_full_rollover_and_resets_after_close_only(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "CREATE TABLE futures_transactions (id TEXT, config_id TEXT, ticker TEXT, "
+                "trading_date TEXT, action TEXT, lots INTEGER, source_type TEXT, "
+                "recommendation_id TEXT, execution_price REAL, price REAL, created_at TEXT)"
+            )
+            conn.execute(
+                "CREATE TABLE futures_recommendation (id TEXT, signal_snapshot TEXT, "
+                "signal_snapshot_artifact_path TEXT, signal_snapshot_sha256 TEXT)"
+            )
+            conn.execute("CREATE TABLE portfolio (id TEXT, config_id TEXT)")
+            conn.execute("CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT)")
+
+            def snapshot(setup_type, invalidation):
+                return json.dumps({
+                    "final_action_contract": {
+                        "final_action": "open_probe",
+                        "expected_horizon_days": 5,
+                        "position_invalidation_level": invalidation,
+                        "atr_stop_distance": 10.0,
+                        "setup_type": setup_type,
+                    }
+                })
+
+            conn.executemany(
+                "INSERT INTO futures_recommendation VALUES (?, ?, NULL, NULL)",
+                [
+                    ("old-open", snapshot("old_setup", 110.0)),
+                    ("new-open", snapshot("new_setup", 95.0)),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO futures_transactions VALUES (?, 'cfg', 'ZZ', ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("old-open-tx", "2025-03-03", "open_short", 2, "strategy", "old-open", 100.0, 100.0, "2025-03-03T09:31:00"),
+                    ("z-roll-close", "2025-03-10", "close_short", 2, "rollover", "roll-full", 98.0, 98.0, "2025-03-10T09:31:00"),
+                    ("a-roll-open", "2025-03-10", "open_short", 3, "rollover", "roll-full", 97.0, 97.0, "2025-03-10T09:31:00"),
+                    ("close-only", "2025-03-12", "close_short", 3, "rollover", "roll-close-only", 96.0, 96.0, "2025-03-12T09:31:00"),
+                    ("new-open-tx", "2025-03-13", "open_short", 2, "strategy", "new-open", 94.0, 94.0, "2025-03-13T09:31:00"),
+                ],
+            )
+            conn.execute("INSERT INTO portfolio VALUES ('pf', 'cfg')")
+            conn.executemany(
+                "INSERT INTO daily_settlement VALUES ('pf', ?)",
+                [(day,) for day in ("2025-03-03", "2025-03-04", "2025-03-05", "2025-03-06", "2025-03-07", "2025-03-10", "2025-03-11", "2025-03-12", "2025-03-13")],
+            )
+            conn.commit()
+            conn.close()
+
+            class _DB:
+                def _get_connection(self):
+                    connection = sqlite3.connect(path)
+                    connection.row_factory = sqlite3.Row
+                    return connection
+
+                def _deserialize_external_json(self, row, field):
+                    return json.loads(row.get(field) or "{}")
+
+            continued = _load_opening_fac_context(
+                db=_DB(), config_id="cfg", ticker="ZZ", trading_date="2025-03-12", current_lots=-3,
+            )
+            self.assertEqual(continued["recommendation_id"], "old-open")
+            self.assertEqual(continued["setup_type"], "old_setup")
+
+            reset = _load_opening_fac_context(
+                db=_DB(), config_id="cfg", ticker="ZZ", trading_date="2025-03-14", current_lots=-2,
+            )
+            self.assertEqual(reset["recommendation_id"], "new-open")
+            self.assertEqual(reset["setup_type"], "new_setup")
+            self.assertEqual(reset["held_trading_days"], 1)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
     def test_new_loss_revalidation_bypasses_cooling_period_deferral(self):
         self.assertTrue(
             _is_lifecycle_exit_required_reason(["new_position_loss_revalidation_failed"])

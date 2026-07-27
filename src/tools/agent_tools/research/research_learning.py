@@ -31,7 +31,6 @@ from tools.common.signal_evidence_collection import (
 )
 from tools.common.alpha_setup import (
     build_scope_key as build_alpha_setup_scope_key,
-    infer_setup_type,
     upsert_alpha_setup_sample_and_profile,
 )
 from tools.agent_tools.analysis.analyst_data_usage import data_usage_from_snapshot
@@ -614,7 +613,9 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
         source_type = "counterfactual_missed_alpha" if classification == "missed_opportunity" else "counterfactual_reasonable_avoidance"
         horizon = str(row.get("horizon_class") or "unknown")
         regime = str(row.get("market_regime") or "unknown")
-        setup_type = str(row.get("setup_type") or "")
+        setup_type = str(row.get("setup_type") or "").strip()
+        if setup_type.lower() in {"", "unknown", "*", "generic_trade_setup"}:
+            continue
         signal_combo = row.get("signal_combo")
         if isinstance(signal_combo, str):
             parsed_combo = _review_helpers._json_loads(signal_combo)
@@ -623,11 +624,6 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
             combo_items = signal_combo
         else:
             combo_items = []
-        setup_type = infer_setup_type(
-            setup_type=setup_type,
-            opportunity_type=row.get("opportunity_type"),
-            opportunity_state=row.get("opportunity_state"),
-        )
         combo_key = "_".join(str(item).lower() for item in combo_items[:4]) or "unknown_combo"
         data_combo = f"counterfactual_no_trade_{classification}_{combo_key}"[:160]
         scope_key = build_alpha_setup_scope_key(
@@ -645,7 +641,6 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
             "sector": row.get("sector") or _review_helpers._sector_for_ticker(cfg, ticker),
             "horizon_class": horizon,
             "market_regime": regime,
-            "setup_type": setup_type,
             "setup_type": setup_type,
             "data_combo": data_combo,
             "scope_key": scope_key,
@@ -754,10 +749,11 @@ def write_alpha_setup_profiles(
             continue
         rec_id = str(recommendation.get("id") or "")
         txs = transactions_by_recommendation.get(rec_id, [])
-        combo = _review_helpers._signal_combo_from_snapshot(snapshot)
         horizon = _review_helpers._horizon_class(_review_helpers._expected_horizon_days(snapshot, side), snapshot)
         regime = _review_helpers._market_regime(snapshot)
-        template = _review_helpers._setup_type(side, combo, snapshot)
+        template = _review_helpers._fac_setup_type(snapshot)
+        if not template:
+            continue
         data_usage = data_usage_from_snapshot(snapshot)
         data_combo = _review_helpers._data_combo_key(data_usage)
         analyst_payloads = _review_helpers._analyst_payloads(snapshot)
@@ -791,12 +787,7 @@ def write_alpha_setup_profiles(
         opportunity_type = _review_helpers._primary_opportunity_type(snapshot, side)
         opportunity_state = _review_helpers._primary_opportunity_state(snapshot, side)
         opportunity_contract_summary = _review_helpers._opportunity_contract_summary(snapshot)
-        setup_type = infer_setup_type(
-            snapshot=snapshot,
-            setup_type=template,
-            opportunity_type=opportunity_type,
-            opportunity_state=opportunity_state,
-        )
+        setup_type = template
         sector = _review_helpers._sector_for_ticker(cfg, ticker)
         planned_target_lots = _review_helpers._safe_int(semantic_state.get("target_lots"))
         current_lots = _review_helpers._safe_int(semantic_state.get("current_lots"), 0)
@@ -884,7 +875,6 @@ def write_alpha_setup_profiles(
             "sector": sector,
             "horizon_class": horizon,
             "market_regime": regime,
-            "setup_type": template,
             "setup_type": setup_type,
             "data_combo": data_combo,
             "scope_key": scope_key,
@@ -1223,13 +1213,8 @@ def _episode_alpha_setup_samples(
         )
         opportunity_type = str(payload.get("opportunity_type") or "")
         opportunity_state = str(payload.get("opportunity_state") or "")
-        setup_type = str(
-            final_contract.get("setup_type")
-            or payload.get("setup_type")
-            or row.get("setup_type")
-            or ""
-        ).strip()
-        if not setup_type or setup_type.lower() in {"unknown", "*"}:
+        setup_type = str(final_contract.get("setup_type") or "").strip()
+        if setup_type.lower() in {"", "unknown", "*", "generic_trade_setup"}:
             continue
         entry_trigger = str(
             final_contract.get("entry_trigger")

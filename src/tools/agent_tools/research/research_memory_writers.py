@@ -1059,10 +1059,13 @@ def _write_opportunity_ranking_learning_events(
         ticker = str(pair.get("ticker") or "").upper()
         if not ticker or side not in {"long", "short"}:
             continue
+        setup_type = str(payload.get("setup_type") or "").strip()
+        if setup_type.lower() in {"", "unknown", "*", "generic_trade_setup"}:
+            continue
         key = (
             ticker,
             side,
-            str(payload.get("opportunity_type") or _setup_type(side, _signal_combo_from_snapshot(payload.get("signal_snapshot") or {}), payload.get("signal_snapshot") or {}) or "unknown"),
+            setup_type,
             str(payload.get("opportunity_state") or "unknown"),
             str((payload.get("signal_snapshot") or {}).get("market_regime") or "unknown"),
         )
@@ -1190,7 +1193,7 @@ def _write_signal_context_history(
         side = _recommendation_side(recommendation, snapshot)
         combo = _signal_combo_from_snapshot(snapshot)
         expected_days = _expected_horizon_days(snapshot, side)
-        template = _setup_type(side, combo, snapshot)
+        template = _fac_setup_type(snapshot)
         row_id = str(uuid.uuid4())
         ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
         analyst_ext = externalize_json_for_db(
@@ -1315,7 +1318,9 @@ def _write_template_and_analyst_learning(
         expected_days = _expected_horizon_days(snapshot, side)
         horizon = _horizon_class(expected_days, snapshot)
         regime = _market_regime(snapshot)
-        template = _setup_type(side, combo, snapshot)
+        template = _fac_setup_type(snapshot)
+        if not template:
+            continue
         item = dict(pair)
         item["setup_type"] = template
         item["signal_combo"] = combo
@@ -2174,15 +2179,13 @@ def _write_trade_episode_memory(
         horizon = _horizon_class(expected_days, snapshot)
         regime = _market_regime(snapshot)
         final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-        template = str(final_contract.get("setup_type") or "").strip()
-        if not template or template.lower() in {"unknown", "*"}:
-            # A completed strategy episode must keep the setup identity frozen by
-            # the opening FAC.  Do not infer a replacement from the surrounding
-            # SCC, because unrelated news/fundamental evidence can then relabel a
-            # technical entry.  A missing identity remains generic, so it can
-            # be retained as an episode fact without becoming canonical setup
-            # learning.
-            template = "generic_trade_setup"
+        template = _fac_setup_type(snapshot)
+        if not template:
+            logger.warning(
+                "Skip completed strategy episode with missing canonical opening FAC setup: "
+                f"ticker={ticker}, recommendation_id={pair.get('open_recommendation_id')}"
+            )
+            continue
         entry_trigger = str(final_contract.get("entry_trigger") or "").strip()
         trigger_source = str(final_contract.get("trigger_source") or "").strip()
         sector = _sector_for_ticker(cfg, ticker)
@@ -2700,7 +2703,9 @@ def _write_research_position_feedback(
         combo = _signal_combo_from_snapshot(snapshot)
         horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
         regime = _market_regime(snapshot)
-        template = _setup_type(side, combo, snapshot)
+        template = _fac_setup_type(snapshot)
+        if not template:
+            continue
         rec_id = str(recommendation.get("id") or "")
         txs = transactions_by_recommendation.get(rec_id, [])
         executed_lots = sum(abs(_safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
@@ -3035,7 +3040,9 @@ def _write_loss_template_observation_research(
         combo = _signal_combo_from_snapshot(snapshot)
         horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
         regime = _market_regime(snapshot)
-        template = _setup_type(side, combo, snapshot)
+        template = _fac_setup_type(snapshot)
+        if not template:
+            continue
         key = (ticker, side, template, horizon, regime)
         grouped[key].append(pair)
         representative_snapshot.setdefault(key, snapshot)
@@ -3438,7 +3445,9 @@ def _write_fast_loss_sentinel_state(
         combo = _signal_combo_from_snapshot(snapshot)
         horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
         regime = _market_regime(snapshot)
-        template = _setup_type(side, combo, snapshot)
+        template = _fac_setup_type(snapshot)
+        if not template:
+            continue
         key = (ticker, side, template, horizon, regime)
         groups[key].append(pair)
         snapshots.setdefault(key, snapshot)
@@ -3625,7 +3634,7 @@ def _write_no_trade_opportunity_memory(
         no_trade_category = categorize_no_trade_reason(normalized_reason)
         if lots > 0 and action not in {"hold", "none"} and not limit_locked_execution and not execution_no_trade_reason:
             continue
-        fac_identity = _fac_no_trade_learning_identity(snapshot)
+        fac_identity = _fac_learning_identity(snapshot)
         if not fac_identity.get("complete"):
             logger.warning(
                 "Skip no-trade opportunity memory with incomplete FAC identity: "
@@ -4082,7 +4091,7 @@ def _write_missed_alpha_accountability_state(
             if isinstance(payload, dict) and isinstance(payload.get("final_action_contract"), dict)
             else {}
         )
-        fac_identity = _fac_no_trade_learning_identity({"final_action_contract": final_contract})
+        fac_identity = _fac_learning_identity({"final_action_contract": final_contract})
         execution_profile = str(final_contract.get("execution_profile") or "").strip()
         trigger_source = str(final_contract.get("trigger_source") or "").strip().lower()
         execution_basis_complete = all(
@@ -4606,7 +4615,9 @@ def _learning_mechanism_policy_groups(
         expected_days = _expected_horizon_days(snapshot, side)
         horizon = _horizon_class(expected_days, snapshot)
         regime = _market_regime(snapshot)
-        template = _setup_type(side, combo, snapshot)
+        template = _fac_setup_type(snapshot)
+        if not template:
+            continue
         item = dict(pair)
         item["setup_type"] = template
         item["signal_combo"] = combo
@@ -5307,7 +5318,9 @@ def _write_tail_loss_sentinel_state(
             position_type = str(pnl_row.get("position_type") or "").lower()
             side = "short" if "short" in position_type else "long"
         combo = _signal_combo_from_snapshot(snapshot)
-        template = _setup_type(side, combo, snapshot)
+        template = _fac_setup_type(snapshot)
+        if not template:
+            continue
         horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
         regime = _market_regime(snapshot)
         evidence = {
@@ -5740,10 +5753,13 @@ def _write_contextual_rule_calibration_state(
             continue
         side = _recommendation_side(recommendation, snapshot)
         combo = _signal_combo_from_snapshot(snapshot)
+        setup_type = _fac_setup_type(snapshot)
+        if not setup_type:
+            continue
         scope = {
             "ticker": recommendation.get("underlying_code"),
             "side": side,
-            "setup_type": _setup_type(side, combo, snapshot),
+            "setup_type": setup_type,
             "horizon_class": _horizon_class(_expected_horizon_days(snapshot, side), snapshot),
             "market_regime": _market_regime(snapshot),
         }

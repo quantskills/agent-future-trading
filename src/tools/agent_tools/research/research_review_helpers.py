@@ -1127,8 +1127,17 @@ def _recommendation_side(recommendation: Dict[str, Any], snapshot: Dict[str, Any
     return "unknown"
 
 
-def _fac_no_trade_learning_identity(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the complete FAC identity required by no-trade learning."""
+def _fac_setup_type(snapshot: Dict[str, Any]) -> str:
+    """Return the canonical setup identity frozen by the recommendation FAC."""
+    contract = final_action_contract_from_snapshot(snapshot)
+    setup_type = str(contract.get("setup_type") or "").strip()
+    if setup_type.lower() in {"", "unknown", "*", "generic_trade_setup"}:
+        return ""
+    return setup_type
+
+
+def _fac_learning_identity(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the complete FAC identity required by formal learning."""
     contract = final_action_contract_from_snapshot(snapshot)
     semantic_side = _final_action_semantic_view(contract).get("contract_side")
     evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
@@ -1137,7 +1146,7 @@ def _fac_no_trade_learning_identity(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         side = str(evidence.get("scorecard_preferred_side") or "").strip().lower()
     identity = {
         "side": side,
-        "setup_type": str(contract.get("setup_type") or "").strip(),
+        "setup_type": _fac_setup_type(snapshot),
         "entry_trigger": str(contract.get("entry_trigger") or "").strip(),
         "horizon_class": str(contract.get("horizon_class") or "").strip(),
         "market_regime": str(contract.get("market_regime") or "").strip(),
@@ -1155,19 +1164,6 @@ def _fac_no_trade_learning_identity(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "missing_fields": sorted(missing_fields),
         "source": "final_action_contract",
     }
-
-
-def _setup_type(side: str, combo: Iterable[str], snapshot: Dict[str, Any]) -> str:
-    for analyst, payload in _analyst_payloads(snapshot).items():
-        if _signal_side(payload.get("signal")) == side:
-            setup_type = str(payload.get("setup_type") or "").strip()
-            if setup_type and setup_type != "unknown":
-                horizon = str(payload.get("analyst_horizon") or payload.get("horizon_class") or "unknown")
-                return f"{side}_{setup_type}_{horizon}"[:160]
-    trigger = _entry_trigger_label(snapshot, side)
-    regime = _market_regime(snapshot).lower().replace(" ", "_")
-    normalized_combo = "_".join(str(item).lower() for item in combo)
-    return f"{side}_{trigger}_{regime}_{normalized_combo}"[:160]
 
 
 def _data_combo_key(data_usage: Dict[str, Any]) -> str:
@@ -1734,10 +1730,11 @@ def _completed_pairs_for_scope(
             continue
         recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
         snapshot = _recommendation_snapshot(recommendation or {})
-        combo = _signal_combo_from_snapshot(snapshot)
         horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
         regime = _market_regime(snapshot)
-        template = _setup_type(side, combo, snapshot)
+        template = _fac_setup_type(snapshot)
+        if not template:
+            continue
         if (
             template == expected["setup_type"]
             and horizon == expected["horizon_class"]
@@ -2060,14 +2057,15 @@ def _template_groups_from_completed_pairs(
         snapshot = _recommendation_snapshot(recommendation or {})
         ticker = str(pair.get("ticker") or "").upper()
         side = str(pair.get("side") or "").lower()
-        combo = _signal_combo_from_snapshot(snapshot)
         expected_days = _expected_horizon_days(snapshot, side)
         horizon = _horizon_class(expected_days, snapshot)
         regime = _market_regime(snapshot)
-        template = _setup_type(side, combo, snapshot)
+        template = _fac_setup_type(snapshot)
+        if not template:
+            continue
         item = dict(pair)
         item["setup_type"] = template
-        item["signal_combo"] = combo
+        item["signal_combo"] = _signal_combo_from_snapshot(snapshot)
         groups[(ticker, side, template, horizon, regime)].append(item)
     return groups
 

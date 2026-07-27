@@ -159,15 +159,16 @@ def learned_effect_underperformance_groups(
         snapshot = _review_helpers._recommendation_snapshot(recommendation or {})
         ticker = str(pair.get("ticker") or "").upper()
         side = str(pair.get("side") or "").lower()
-        combo = _review_helpers._signal_combo_from_snapshot(snapshot)
         expected_days = _review_helpers._expected_horizon_days(snapshot, side)
         horizon = _review_helpers._horizon_class(expected_days, snapshot)
         regime = _review_helpers._market_regime(snapshot)
-        template = _review_helpers._setup_type(side, combo, snapshot)
+        template = _review_helpers._fac_setup_type(snapshot)
+        if not template:
+            continue
         key = (ticker, side, template, horizon, regime)
         item = dict(pair)
         item["setup_type"] = template
-        item["signal_combo"] = combo
+        item["signal_combo"] = _review_helpers._signal_combo_from_snapshot(snapshot)
         if recommendation:
             tags, effects = _review_helpers._learning_attribution_from_recommendation(recommendation)
             item["learning_tags"] = tags

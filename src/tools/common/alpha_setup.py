@@ -323,68 +323,6 @@ def build_product_learning_performance_key(
     }
 
 
-def infer_setup_type(
-    *,
-    snapshot: Optional[Mapping[str, Any]] = None,
-    setup_type: Optional[str] = None,
-    opportunity_type: Optional[str] = None,
-    opportunity_state: Optional[str] = None,
-) -> str:
-    snapshot = snapshot if isinstance(snapshot, Mapping) else {}
-    final_contract = (
-        snapshot.get("final_action_contract")
-        if isinstance(snapshot.get("final_action_contract"), Mapping)
-        else {}
-    )
-    explicit_setup = _first_text(
-        final_contract.get("setup_type"),
-        setup_type,
-        default="",
-    )
-    if explicit_setup:
-        normalized = _clean_token(explicit_setup, "")
-        if normalized not in {"", "*", "unknown", "generic_trade_setup"}:
-            return normalized
-    # Setup identity for executed episodes is owned by the opening FAC.  SCC
-    # sources are deliberately not rescanned here: news and fundamental
-    # evidence support the decision but cannot rename the traded setup.
-    raw_parts: List[str] = [
-        str(final_contract.get("entry_trigger") or ""),
-        str(final_contract.get("market_regime") or ""),
-        str(opportunity_type or ""),
-        str(opportunity_state or ""),
-    ]
-    if not final_contract:
-        scc = (
-            snapshot.get("signal_collection_contract")
-            if isinstance(snapshot.get("signal_collection_contract"), Mapping)
-            else {}
-        )
-        for source in scc.get("source_contracts") or []:
-            if not isinstance(source, Mapping):
-                continue
-            contract = source.get("action_evidence_contract")
-            if not isinstance(contract, Mapping):
-                continue
-            raw_parts.extend(
-                [
-                    str(contract.get("setup_type") or ""),
-                    str(contract.get("entry_trigger") or ""),
-                    str(contract.get("opportunity_type") or ""),
-                ]
-            )
-    text = " ".join(raw_parts).lower()
-    if any(token in text for token in ("news", "event", "catalyst")):
-        return "news_event_setup"
-    if any(token in text for token in ("breakout", "trend", "continuation", "momentum", "tradeable_candidate", "probe_candidate")):
-        return "trend_breakout_setup"
-    if any(token in text for token in ("fundamental", "basis", "inventory", "supply", "demand")):
-        return "fundamental_timing_setup"
-    if any(token in text for token in ("reversal", "mean", "range", "choppy")):
-        return "range_reversal_setup"
-    return "generic_trade_setup"
-
-
 def classify_action(action: Any, *, target_lots: int = 0, current_lots: int = 0) -> str:
     text = _clean_token(action, "")
     explicit_family = canonical_action_family(text)
