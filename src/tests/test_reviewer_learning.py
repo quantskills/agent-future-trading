@@ -6811,7 +6811,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(result["rows"], 2)
             rows = cursor.execute(
                 """
-                SELECT ticker, side, setup_type, policy_type, policy_action, multiplier, payload_json
+                SELECT ticker, side, setup_type, policy_type, policy_action, multiplier,
+                       source_event_id, source_trading_date, payload_json
                 FROM adaptive_policy_state
                 WHERE config_id = ?
                 ORDER BY ticker
@@ -6823,6 +6824,12 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(by_ticker["BU"]["policy_type"], "learning_mechanism:alpha_setup_ev")
             self.assertEqual(by_ticker["BU"]["policy_action"], "protect")
             self.assertEqual(by_ticker["BU"]["setup_type"], "trend_breakout_setup")
+            self.assertEqual(by_ticker["BU"]["source_trading_date"], "2025-03-10")
+            event_date = cursor.execute(
+                "SELECT trading_date FROM learning_event_log WHERE id = ?",
+                (by_ticker["BU"]["source_event_id"],),
+            ).fetchone()[0]
+            self.assertEqual(by_ticker["BU"]["source_trading_date"], event_date)
             self.assertEqual(by_ticker["ZN"]["policy_action"], "cap")
             self.assertEqual(by_ticker["ZN"]["setup_type"], "news_event_setup")
             self.assertLess(by_ticker["ZN"]["multiplier"], 1.0)

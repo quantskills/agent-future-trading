@@ -344,6 +344,24 @@ def _insert_learning_event(
     return event_id
 
 
+def _upsert_adaptive_policy_source_trading_date(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    source_event_id: str,
+    source_trading_date: str,
+) -> None:
+    """Attach the policy refresh day to the row written by the same event."""
+    cursor.execute(
+        """
+        UPDATE adaptive_policy_state
+        SET source_trading_date = ?
+        WHERE config_id = ? AND source_event_id = ?
+        """,
+        (str(source_trading_date)[:10], config_id, source_event_id),
+    )
+
+
 def _insert_researcher_learning_completion_event(
     cursor: sqlite3.Cursor,
     *,
@@ -891,6 +909,12 @@ def _insert_contextual_rule_calibration(
             _valid_until(trading_date, valid_days),
             _json_dumps(payload),
         ),
+    )
+    _upsert_adaptive_policy_source_trading_date(
+        cursor,
+        config_id=config_id,
+        source_event_id=event_id,
+        source_trading_date=trading_date,
     )
     return 1
 
@@ -3415,6 +3439,12 @@ def _write_loss_template_observation_research(
                     _json_dumps(policy_payload),
                 ),
             )
+            _upsert_adaptive_policy_source_trading_date(
+                cursor,
+                config_id=config_id,
+                source_event_id=policy_event_id,
+                source_trading_date=trading_date,
+            )
             policy_inserted += 1
     setattr(_write_loss_template_observation_research, "last_policy_rows", policy_inserted)
     return inserted
@@ -3597,6 +3627,12 @@ def _write_fast_loss_sentinel_state(
                     },
                 }),
             ),
+        )
+        _upsert_adaptive_policy_source_trading_date(
+            cursor,
+            config_id=config_id,
+            source_event_id=event_id,
+            source_trading_date=trading_date,
         )
         inserted += 1
     return inserted
@@ -4319,6 +4355,12 @@ def _write_missed_alpha_accountability_state(
                 }),
             ),
         )
+        _upsert_adaptive_policy_source_trading_date(
+            cursor,
+            config_id=config_id,
+            source_event_id=event_id,
+            source_trading_date=trading_date,
+        )
         inserted += 1
 
     if not inserted and candidates:
@@ -4532,6 +4574,12 @@ def _write_validated_causal_policy_rules(
                     valid_until,
                     _json_dumps(payload),
                 ),
+            )
+            _upsert_adaptive_policy_source_trading_date(
+                cursor,
+                config_id=config_id,
+                source_event_id=event_id,
+                source_trading_date=trading_date,
             )
             inserted += 1
             candidate_rules.append(
@@ -4887,6 +4935,12 @@ def _write_learning_mechanism_policy_state(
                 _json_dumps(policy_payload),
             ),
         )
+        _upsert_adaptive_policy_source_trading_date(
+            cursor,
+            config_id=config_id,
+            source_event_id=event_id,
+            source_trading_date=trading_date,
+        )
         inserted += 1
     return {"rows": inserted, "guarded_rows": guarded, "status": "applied", "candidate_rows": len(policy_rows)}
 
@@ -5033,6 +5087,12 @@ def _write_learned_vs_unlearned_policy_state(
                 valid_until,
                 _json_dumps(payload),
             ),
+        )
+        _upsert_adaptive_policy_source_trading_date(
+            cursor,
+            config_id=config_id,
+            source_event_id=event_id,
+            source_trading_date=trading_date,
         )
         inserted += 1
     return {
@@ -5258,6 +5318,12 @@ def _write_adaptive_policy_state(
                 _json_dumps(policy_payload),
             ),
         )
+        _upsert_adaptive_policy_source_trading_date(
+            cursor,
+            config_id=config_id,
+            source_event_id=event_id,
+            source_trading_date=trading_date,
+        )
         count += 1
     return count
 
@@ -5418,6 +5484,12 @@ def _write_tail_loss_sentinel_state(
                 _json_dumps(policy_payload),
             ),
         )
+        _upsert_adaptive_policy_source_trading_date(
+            cursor,
+            config_id=config_id,
+            source_event_id=event_id,
+            source_trading_date=trading_date,
+        )
         inserted += 1
     return inserted
 
@@ -5557,6 +5629,12 @@ def _write_alpha_promotion_state(
                 _json_dumps(policy_payload),
             ),
         )
+        _upsert_adaptive_policy_source_trading_date(
+            cursor,
+            config_id=config_id,
+            source_event_id=event_id,
+            source_trading_date=trading_date,
+        )
         inserted += 1
 
     counterfactual_min_pnl = _safe_float(alpha_cfg.get("min_counterfactual_pnl"), min_net_pnl)
@@ -5677,6 +5755,12 @@ def _write_alpha_promotion_state(
                 valid_until,
                 _json_dumps(policy_payload),
             ),
+        )
+        _upsert_adaptive_policy_source_trading_date(
+            cursor,
+            config_id=config_id,
+            source_event_id=event_id,
+            source_trading_date=trading_date,
         )
         inserted += 1
     return inserted
@@ -6527,6 +6611,7 @@ def _upsert_alpha_setup_policy_state(
     sample_count: int,
     reason: str,
     source_event_id: str,
+    source_trading_date: str,
     created_at: str,
     valid_until: str,
     payload_json: str,
@@ -6536,8 +6621,8 @@ def _upsert_alpha_setup_policy_state(
         INSERT INTO adaptive_policy_state (
             id, config_id, ticker, side, setup_type, horizon_class, market_regime,
             policy_type, policy_action, multiplier, confidence_score, sample_count,
-            reason, source_event_id, created_at, valid_until, payload_json, active
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            reason, source_event_id, source_trading_date, created_at, valid_until, payload_json, active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         ON CONFLICT(config_id, ticker, side, setup_type, horizon_class, market_regime, policy_type)
         DO UPDATE SET
             policy_action=excluded.policy_action,
@@ -6554,6 +6639,7 @@ def _upsert_alpha_setup_policy_state(
             END,
             reason=excluded.reason,
             source_event_id=excluded.source_event_id,
+            source_trading_date=excluded.source_trading_date,
             created_at=excluded.created_at,
             valid_until=excluded.valid_until,
             payload_json=excluded.payload_json,
@@ -6574,6 +6660,7 @@ def _upsert_alpha_setup_policy_state(
             sample_count,
             reason,
             source_event_id,
+            str(source_trading_date)[:10],
             created_at,
             valid_until,
             payload_json,

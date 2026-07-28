@@ -1729,6 +1729,7 @@ def _write_alpha_setup_policy_state(
             sample_count=sample_count,
             reason=reason,
             source_event_id=event_id,
+            source_trading_date=trading_day,
             created_at=now,
             valid_until=valid_until,
             payload_json=_review_helpers._json_dumps(payload),
