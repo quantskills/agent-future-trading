@@ -2870,6 +2870,7 @@ class SQLiteDB(BaseDB):
         side: Optional[str] = None,
         horizon_class: Optional[str] = None,
         market_regime: Optional[str] = None,
+        setup_type: Optional[str] = None,
         trading_date=None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
@@ -2903,6 +2904,9 @@ class SQLiteDB(BaseDB):
             if market_regime and str(market_regime) != "*":
                 where.append("market_regime IN (?, '*')")
                 params.append(str(market_regime))
+            if setup_type and str(setup_type) != "*":
+                where.append("setup_type = ?")
+                params.append(str(setup_type))
             trading_day_value = self._normalize_trading_day_value(trading_date)
             if trading_day_value:
                 where.append("last_sample_date IS NOT NULL")

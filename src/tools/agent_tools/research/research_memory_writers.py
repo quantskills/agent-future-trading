@@ -2214,15 +2214,27 @@ def _write_trade_episode_memory(
         ticker = str(pair.get("ticker") or "").upper()
         side = str(pair.get("side") or "").lower()
         combo = _signal_combo_from_snapshot(snapshot)
-        expected_days = _expected_horizon_days(snapshot, side)
-        horizon = _horizon_class(expected_days, snapshot)
-        regime = _market_regime(snapshot)
         final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-        template = _fac_setup_type(snapshot)
-        if not template:
+        template = str(final_contract.get("setup_type") or "").strip()
+        horizon = str(final_contract.get("horizon_class") or "").strip()
+        expected_days = _safe_int(final_contract.get("expected_horizon_days"), 0)
+        regime = str(final_contract.get("market_regime") or "").strip()
+        missing_identity = [
+            key
+            for key, value in {
+                "setup_type": template,
+                "horizon_class": horizon,
+                "expected_horizon_days": expected_days,
+                "market_regime": regime,
+            }.items()
+            if value in (None, "", 0)
+            or str(value).strip().lower() in {"*", "unknown"}
+        ]
+        if missing_identity:
             logger.warning(
-                "Skip completed strategy episode with missing canonical opening FAC setup: "
-                f"ticker={ticker}, recommendation_id={pair.get('open_recommendation_id')}"
+                "Skip completed strategy episode with incomplete opening FAC identity: "
+                f"ticker={ticker}, recommendation_id={pair.get('open_recommendation_id')}, "
+                f"missing={missing_identity}"
             )
             continue
         entry_trigger = str(final_contract.get("entry_trigger") or "").strip()
@@ -2295,6 +2307,7 @@ def _write_trade_episode_memory(
             "created_from": "phase4_reviewer",
             "episode_date": episode_date,
             "review_trading_date": trading_date,
+            "expected_horizon_days": expected_days,
         }
         payload = attach_next_round_memory_contract(
             payload,

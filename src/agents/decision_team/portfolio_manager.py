@@ -1004,6 +1004,7 @@ def _final_contract_scope_from_scc(
     target_lots: int,
     final_action: str,
     execution_contract_fields: dict | None = None,
+    opening_fac_context: dict | None = None,
 ) -> dict:
     """Select final execution-scope facts from direction-aligned formal AECs."""
     execution_fields = (
@@ -1022,6 +1023,20 @@ def _final_contract_scope_from_scc(
             "exit_hint": execution_fields.get("exit_hint"),
             "atr_stop_distance": execution_fields.get("atr_stop_distance"),
         }
+    opening_context = (
+        opening_fac_context
+        if isinstance(opening_fac_context, dict)
+        else {}
+    )
+    opening_identity = {
+        key: opening_context.get(key)
+        for key in (
+            "setup_type",
+            "horizon_class",
+            "expected_horizon_days",
+            "market_regime",
+        )
+    }
     side = "long" if target_lots > 0 else "short" if target_lots < 0 else ""
     if not side and final_action in {"reduce", "exit"}:
         side = "long" if current_lots > 0 else "short" if current_lots < 0 else ""
@@ -1044,10 +1059,10 @@ def _final_contract_scope_from_scc(
             )
         )
     if not aligned:
-        return {}
+        return opening_identity
     aligned.sort(key=lambda row: (row[1], row[0]))
     primary = aligned[0][2]
-    return {
+    scope = {
         "setup_type": primary.get("setup_type"),
         "horizon_class": primary.get("horizon_class"),
         "expected_horizon_days": primary.get("expected_horizon_days"),
@@ -1057,6 +1072,8 @@ def _final_contract_scope_from_scc(
         "exit_hint": primary.get("exit_hint"),
         "atr_stop_distance": primary.get("atr_stop_distance"),
     }
+    scope.update(opening_identity)
+    return scope
 
 
 def _build_pm_memory_state_update(
@@ -1496,6 +1513,7 @@ def _sign_pm_memory_state(pm_state: dict) -> FuturesRecommendation:
         target_lots=target_lots,
         final_action=final_action,
         execution_contract_fields=execution_fields,
+        opening_fac_context=pm_state.get("opening_fac_context"),
     )
     contract_inputs = {
         "ticker": str(pm_state.get("ticker") or ""),
@@ -4428,6 +4446,16 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
         "sample_count": row.get("sample_count"),
         "reward_sum": row.get("reward_sum"),
         "reward_mean": row.get("reward_mean"),
+        "mean_return_on_notional": (
+            row.get("mean_return_on_notional")
+            if row.get("mean_return_on_notional") is not None
+            else payload.get("mean_return_on_notional")
+        ),
+        "worst_return_on_notional": (
+            row.get("worst_return_on_notional")
+            if row.get("worst_return_on_notional") is not None
+            else payload.get("worst_return_on_notional")
+        ),
         "win_rate": row.get("win_rate"),
         "confidence_score": row.get("confidence_score"),
         "action_preference": _action_value_preference(row),
@@ -4645,6 +4673,9 @@ def _normalize_alpha_setup_action_value(row: dict) -> dict:
         "last_sample_date",
         "valid_until",
         "worst_reward",
+        "mean_return_on_notional",
+        "worst_return_on_notional",
+        "episode_return_on_notional_count",
         "tail_loss_count",
         "real_trade_reward_count",
         "counterfactual_reward_count",
@@ -4726,6 +4757,19 @@ class _ExplicitPMLearningScopeDBView:
             scoped_rows.append(row)
         return scoped_rows
 
+    def get_alpha_setup_profiles(self, **kwargs):
+        rows = self._db.get_alpha_setup_profiles(**kwargs)
+        requested_setup = str(kwargs.get("setup_type") or "").strip().lower()
+        if not requested_setup or requested_setup == "*":
+            return []
+        return [
+            row
+            for row in rows or []
+            if isinstance(row, dict)
+            and str(row.get("setup_type") or "").strip().lower()
+            == requested_setup
+        ]
+
 
 def _is_pm_learning_action_value(row: dict) -> bool:
     if not isinstance(row, dict):
@@ -4760,7 +4804,7 @@ def _pm_canonical_action_value_rank(row: dict) -> tuple[int, int, int, int, int,
         0 if scope == "exact_real_state" else 1 if scope == "partial_real_state" else 2 if scope == "similar_sql_prior" else 3,
         0 if preference else 1,
         0 if match_level == "exact_state" else 1 if match_level == "same_ticker_side_horizon" else 2 if match_level == "same_ticker_side" else 3,
-        -abs(_safe_float(normalized.get("reward_sum"), 0.0)),
+        -abs(_safe_float(normalized.get("mean_return_on_notional"), 0.0)),
         -int(_safe_int(normalized.get("sample_count"), 0)),
     )
 
@@ -6146,6 +6190,47 @@ def _current_canonical_setup_type_from_signals(
     return ""
 
 
+def _formal_learning_identity_for_side(
+    *,
+    side: str,
+    analyst_signals: list,
+    current_lots: int,
+    opening_fac_context: dict | None,
+) -> dict:
+    normalized_side = str(side or "").strip().lower()
+    current_side = "long" if current_lots > 0 else "short" if current_lots < 0 else ""
+    opening_context = (
+        opening_fac_context
+        if isinstance(opening_fac_context, dict)
+        else {}
+    )
+    if normalized_side == current_side and current_side:
+        return {
+            "setup_type": str(opening_context.get("setup_type") or ""),
+            "horizon_class": str(opening_context.get("horizon_class") or ""),
+            "expected_horizon_days": _safe_int(
+                opening_context.get("expected_horizon_days"),
+                0,
+            ),
+            "market_regime": str(opening_context.get("market_regime") or ""),
+            "source": "opening_final_action_contract",
+        }
+    signed_side = 1 if normalized_side == "long" else -1 if normalized_side == "short" else 0
+    return {
+        "setup_type": _current_canonical_setup_type_from_signals(
+            normalized_side,
+            analyst_signals,
+        ),
+        "horizon_class": _resolve_decision_horizon(analyst_signals, signed_side),
+        "expected_horizon_days": 0,
+        "market_regime": _market_regime_from_signals(
+            analyst_signals,
+            normalized_side,
+        ),
+        "source": "current_signal_collection_contract",
+    }
+
+
 def _target_side_from_ratio(position_ratio: float) -> str:
     return _position_target_side_from_ratio(position_ratio)
 
@@ -6469,6 +6554,15 @@ def _load_opening_fac_context(
         opening_execution_price = _safe_float(opening_row.get("execution_price"), 0.0)
         if opening_execution_price <= 0.0:
             raise RuntimeError("pm_opening_fac_execution_price_missing")
+        opening_identity = {
+            "setup_type": str(contract.get("setup_type") or "").strip(),
+            "horizon_class": str(contract.get("horizon_class") or "").strip(),
+            "expected_horizon_days": _safe_int(
+                contract.get("expected_horizon_days"),
+                0,
+            ),
+            "market_regime": str(contract.get("market_regime") or "").strip(),
+        }
         opening_day = _normalize_trading_day_value(opening_row.get("trading_date"))
         held_trading_days = 0
         best_prior_settlement_price = 0.0
@@ -6512,7 +6606,7 @@ def _load_opening_fac_context(
             "recommendation_id": str(opening_row.get("recommendation_id") or ""),
             "opening_trading_date": opening_day,
             "held_trading_days": held_trading_days,
-            "expected_horizon_days": _safe_int(contract.get("expected_horizon_days"), 0),
+            **opening_identity,
             "position_invalidation_level": _safe_float(
                 contract.get("position_invalidation_level"),
                 0.0,
@@ -6521,7 +6615,6 @@ def _load_opening_fac_context(
             "atr_stop_distance": _safe_float(contract.get("atr_stop_distance"), 0.0),
             "opening_execution_price": opening_execution_price,
             "best_prior_settlement_price": best_prior_settlement_price,
-            "setup_type": str(contract.get("setup_type") or ""),
             "final_action": str(contract.get("final_action") or ""),
         }
     except RuntimeError:
@@ -7255,6 +7348,7 @@ def _apply_alpha_setup_ev_position_control(
     market_confirmation: dict,
     full_config: dict,
     max_position_ratio: float,
+    formal_setup_by_side: dict | None = None,
 ) -> tuple[float, list[str], list[str], dict]:
     """Translate setup expectancy into PM sizing without hard product rules.
 
@@ -7272,9 +7366,22 @@ def _apply_alpha_setup_ev_position_control(
     ev_cfg = (pm_config.get("alpha_setup_ev_fusion") or {})
     if not bool(ev_cfg.get("enabled", True)):
         return position_ratio, reasons, notes, diagnostics
+    formal_setup = str(
+        (formal_setup_by_side or {}).get(target_side) or ""
+    ).strip().lower()
+    enforce_formal_setup = formal_setup_by_side is not None
     profiles = [
         row for row in (alpha_setup_profiles or [])
-        if isinstance(row, dict) and str(row.get("side") or "*").lower() in {target_side, "*"}
+        if isinstance(row, dict)
+        and str(row.get("side") or "*").lower() in {target_side, "*"}
+        and (
+            not enforce_formal_setup
+            or (
+                formal_setup
+                and str(row.get("setup_type") or "").strip().lower()
+                == formal_setup
+            )
+        )
     ]
     action_values = [
         row for row in (alpha_setup_action_values or [])
@@ -9492,7 +9599,6 @@ def _apply_holding_rebalance_control(
     loss_revalidation_failed = (
         loss_revalidation_due
         and not loss_revalidated
-        and explicit_lifecycle_break
     )
     new_loss_revalidation_due = (
         lifecycle_enabled
@@ -9628,10 +9734,8 @@ def _apply_holding_rebalance_control(
     )
     loss_revalidation_exit = (
         loss_revalidation_failed
-        and (
-            position_pnl_ratio <= float(lifecycle_config.get("loss_revalidation_exit_ratio", -0.04))
-            or confirmation_score <= float(lifecycle_config.get("loss_revalidation_exit_confirmation_score", 0.45))
-        )
+        and position_pnl_ratio
+        <= float(lifecycle_config.get("loss_revalidation_exit_ratio", -0.04))
     )
     probe_expired = (
         lifecycle_enabled
@@ -10649,6 +10753,15 @@ def _run_pm_six_step_decision(state: FundState):
         trading_date=trading_date,
         current_lots=current_lots_for_control,
     )
+    formal_learning_identity_by_side = {
+        side: _formal_learning_identity_for_side(
+            side=side,
+            analyst_signals=analyst_signals,
+            current_lots=current_lots_for_control,
+            opening_fac_context=opening_fac_context,
+        )
+        for side in ("long", "short")
+    }
     pre_control_ratio = position_risk.optimal_position_ratio
 
     bq_ratio, bq_reasons, bq_notes, bq_diagnostics = _apply_business_quality_position_gate(
@@ -10709,6 +10822,10 @@ def _run_pm_six_step_decision(state: FundState):
         alpha_setup_profiles=alpha_setup_profiles,
         alpha_setup_action_values=scorecard_alpha_setup_action_values,
         signal_collection_contract=signal_collection_contract,
+        formal_setup_by_side={
+            side: identity.get("setup_type")
+            for side, identity in formal_learning_identity_by_side.items()
+        },
         decision_date=trading_date,
         config=opportunity_scorecard_cfg,
     )
@@ -10776,15 +10893,10 @@ def _run_pm_six_step_decision(state: FundState):
     state["full_config"] = full_config
     step4_memory_side = preferred_side if preferred_side in {"long", "short"} else ""
     if step4_memory_side:
-        early_horizon = _resolve_decision_horizon(
-            analyst_signals,
-            1 if step4_memory_side == "long" else -1,
-        )
-        early_market_regime = _market_regime_from_signals(analyst_signals, step4_memory_side)
-        early_setup_type = _current_canonical_setup_type_from_signals(
-            step4_memory_side,
-            analyst_signals,
-        )
+        early_identity = formal_learning_identity_by_side[step4_memory_side]
+        early_horizon = str(early_identity.get("horizon_class") or "")
+        early_market_regime = str(early_identity.get("market_regime") or "")
+        early_setup_type = str(early_identity.get("setup_type") or "")
     if db and config_id and step4_memory_side:
         try:
             early_memory_result = retrieve_pm_memory(
@@ -10847,6 +10959,10 @@ def _run_pm_six_step_decision(state: FundState):
         alpha_setup_profiles=alpha_setup_profiles,
         alpha_setup_action_values=scorecard_alpha_setup_action_values,
         signal_collection_contract=signal_collection_contract,
+        formal_setup_by_side={
+            side: identity.get("setup_type")
+            for side, identity in formal_learning_identity_by_side.items()
+        },
         decision_date=trading_date,
         config=opportunity_scorecard_cfg,
     )
@@ -10908,15 +11024,10 @@ def _run_pm_six_step_decision(state: FundState):
             exact_alpha_action_values: list[dict] = []
             exact_side_details: list[dict] = []
             for exact_side in candidate_sides_for_exact:
-                exact_horizon = _resolve_decision_horizon(
-                    analyst_signals,
-                    1 if exact_side == "long" else -1,
-                )
-                exact_regime = _market_regime_from_signals(analyst_signals, exact_side)
-                exact_setup_type = _current_canonical_setup_type_from_signals(
-                    exact_side,
-                    analyst_signals,
-                )
+                exact_identity = formal_learning_identity_by_side[exact_side]
+                exact_horizon = str(exact_identity.get("horizon_class") or "")
+                exact_regime = str(exact_identity.get("market_regime") or "")
+                exact_setup_type = str(exact_identity.get("setup_type") or "")
                 side_memory_result = retrieve_pm_memory(
                     db=pm_memory_db,
                     config_id=config_id,
@@ -11085,6 +11196,10 @@ def _run_pm_six_step_decision(state: FundState):
         alpha_setup_profiles=alpha_setup_profiles,
         alpha_setup_action_values=scorecard_alpha_setup_action_values,
         signal_collection_contract=signal_collection_contract,
+        formal_setup_by_side={
+            side: identity.get("setup_type")
+            for side, identity in formal_learning_identity_by_side.items()
+        },
         decision_date=trading_date,
         config=opportunity_scorecard_cfg,
     )
@@ -11266,14 +11381,17 @@ def _run_pm_six_step_decision(state: FundState):
         recent_side_performance = {}
         recent_conditional_performance = {}
         if db and config_id and pm_risk_gate_side in {"long", "short"}:
-            decision_horizon = _resolve_decision_horizon(
-                analyst_signals,
-                1 if pm_risk_gate_side == "long" else -1,
+            pm_risk_gate_identity = formal_learning_identity_by_side[
+                pm_risk_gate_side
+            ]
+            decision_horizon = str(
+                pm_risk_gate_identity.get("horizon_class") or ""
             )
-            market_regime_key = _market_regime_from_signals(analyst_signals, pm_risk_gate_side)
-            setup_type_key = _current_canonical_setup_type_from_signals(
-                pm_risk_gate_side,
-                analyst_signals,
+            market_regime_key = str(
+                pm_risk_gate_identity.get("market_regime") or ""
+            )
+            setup_type_key = str(
+                pm_risk_gate_identity.get("setup_type") or ""
             )
             recent_side_performance = db.get_futures_trade_pair_performance(
                 config_id=config_id,
@@ -11583,6 +11701,10 @@ def _run_pm_six_step_decision(state: FundState):
         current_ratio=current_ticker_exposure,
         opportunity_scorecard=opportunity_scorecard,
         alpha_setup_profiles=alpha_setup_profiles,
+        formal_setup_by_side={
+            side: identity.get("setup_type")
+            for side, identity in formal_learning_identity_by_side.items()
+        },
         alpha_setup_action_values=alpha_setup_action_values,
         analyst_signals=analyst_signals,
         market_confirmation=market_confirmation,
@@ -12608,6 +12730,7 @@ def _run_pm_six_step_decision(state: FundState):
             "opportunity_scorecard": opportunity_scorecard,
             "market_confirmation": market_confirmation,
             "alpha_setup_action_values": alpha_setup_action_values,
+            "opening_fac_context": dict(opening_fac_context or {}),
             "execution_contract_fields": dict(plan_snapshot),
         }
     )

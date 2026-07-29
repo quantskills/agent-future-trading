@@ -432,9 +432,12 @@ def _action_value_learning_summary(
         "observation_only": 0.25,
         "unknown": 0.45,
     }
-    reward_unit = max(1.0, _safe_float(config.get("learning_reward_unit"), 4000.0))
+    execution_reward_unit = max(1.0, _safe_float(config.get("learning_reward_unit"), 4000.0))
     full_sample_count = max(1, _safe_int(config.get("learning_full_weight_sample_count"), 3))
-    tail_loss_threshold = _safe_float(config.get("tail_loss_reward_threshold"), -1000.0)
+    execution_tail_loss_threshold = _safe_float(
+        config.get("tail_loss_reward_threshold"),
+        -1000.0,
+    )
     positive_learning_signal = 0.0
     negative_learning_signal = 0.0
     execution_signal = 0.0
@@ -570,25 +573,70 @@ def _action_value_learning_summary(
         reward_mean = _safe_float(_row_value(row, payload, "reward_mean", "avg_reward", default=0.0), 0.0)
         reward_sum = _safe_float(_row_value(row, payload, "reward_sum", "total_reward", default=0.0), 0.0)
         worst_reward = _safe_float(_row_value(row, payload, "worst_reward", "min_reward", default=reward_mean), reward_mean)
-        reward_magnitude = max(abs(reward_mean), abs(reward_sum) / max(1, sample_count), abs(worst_reward))
-        magnitude_weight = _bounded(reward_magnitude / reward_unit, 0.25, 1.0)
-        strength = scope_weight * source_weight * recency_weight * sample_weight * confidence_weight * magnitude_weight
-        tail_loss_count = _safe_int(_row_value(row, payload, "tail_loss_count", default=0), 0)
-        is_tail_loss = (
-            action_preference == "tail_loss_protect"
-            or tail_loss_count > 0
-            or worst_reward <= tail_loss_threshold
-            or reward_mean <= tail_loss_threshold
+        quality_weight = (
+            scope_weight
+            * source_weight
+            * recency_weight
+            * sample_weight
+            * confidence_weight
         )
-        is_positive = action_preference in _POSITIVE_ACTION_PREFERENCES
-        is_negative = action_preference in PROTECTIVE_ACTION_PREFERENCES
+        tail_loss_count = _safe_int(_row_value(row, payload, "tail_loss_count", default=0), 0)
         if lane_is_execution_profile:
             ignored_lanes.add("execution")
+            reward_magnitude = max(
+                abs(reward_mean),
+                abs(reward_sum) / max(1, sample_count),
+                abs(worst_reward),
+            )
+            execution_magnitude_weight = _bounded(
+                reward_magnitude / execution_reward_unit,
+                0.25,
+                1.0,
+            )
+            execution_strength = quality_weight * execution_magnitude_weight
+            is_negative = action_preference in PROTECTIVE_ACTION_PREFERENCES
+            is_tail_loss = (
+                action_preference == "tail_loss_protect"
+                or tail_loss_count > 0
+                or worst_reward <= execution_tail_loss_threshold
+                or reward_mean <= execution_tail_loss_threshold
+            )
             if action_preference == "positive_candidate_execution":
-                execution_signal += strength
+                execution_signal += execution_strength
             elif is_negative:
-                execution_signal -= strength * (1.20 if is_tail_loss else 1.0)
+                execution_signal -= execution_strength * (1.20 if is_tail_loss else 1.0)
             continue
+        mean_return_value = _row_value(
+            row,
+            payload,
+            "mean_return_on_notional",
+            default=None,
+        )
+        if (
+            reward_source not in {"trade_episode", "episode_trade"}
+            or mean_return_value is None
+        ):
+            ignored_lanes.add("missing_episode_return_on_notional")
+            continue
+        mean_return_on_notional = _safe_float(mean_return_value, 0.0)
+        worst_return_on_notional = _safe_float(
+            _row_value(
+                row,
+                payload,
+                "worst_return_on_notional",
+                default=mean_return_on_notional,
+            ),
+            mean_return_on_notional,
+        )
+        positive_return = max(mean_return_on_notional, 0.0)
+        negative_return = max(-mean_return_on_notional, 0.0)
+        tail_return = max(-worst_return_on_notional, 0.0)
+        positive_strength = quality_weight * positive_return
+        negative_strength = quality_weight * negative_return
+        tail_strength = quality_weight * tail_return
+        is_positive = positive_return > 0.0
+        is_negative = negative_return > 0.0
+        is_tail_loss = tail_return > 0.0
         used_lanes.add(lane or "unknown")
         if scope == "exact_real_state":
             exact_real_count += 1
@@ -601,21 +649,23 @@ def _action_value_learning_summary(
             "reward_source": reward_source or "unknown",
             "sample_count": sample_count,
             "reward_mean": round(reward_mean, 4),
-            "weight": round(strength, 4),
+            "mean_return_on_notional": round(mean_return_on_notional, 8),
+            "worst_return_on_notional": round(worst_return_on_notional, 8),
+            "weight": round(
+                positive_strength if is_positive else negative_strength,
+                8,
+            ),
         }
         if is_positive:
             positive_count += 1
-            positive_learning_signal += strength
-            if not strongest_positive or strength > _safe_float(strongest_positive.get("weight"), 0.0):
+            positive_learning_signal += positive_strength
+            if not strongest_positive or positive_strength > _safe_float(strongest_positive.get("weight"), 0.0):
                 strongest_positive = summary_ref
         if is_negative:
             negative_count += 1
-            negative_strength = strength * (1.30 if is_tail_loss else 1.0)
-            if action_preference == "negative_hold_revalidate":
-                negative_strength *= 0.75
             negative_learning_signal += negative_strength
             if is_tail_loss:
-                recent_tail_loss_signal += strength * 1.35
+                recent_tail_loss_signal += tail_strength
             if not strongest_negative or negative_strength > _safe_float(strongest_negative.get("weight"), 0.0):
                 strongest_negative = {
                     **summary_ref,
@@ -623,15 +673,30 @@ def _action_value_learning_summary(
                     "tail_loss": is_tail_loss,
                 }
         if entry_quality_outcome:
-            entry_penalty_weight = _safe_float(entry_quality_outcome.get("penalty_weight"), 0.0)
-            trigger_support_weight = _safe_float(entry_quality_outcome.get("support_weight"), 0.0)
+            entry_penalty_weight = _safe_float(
+                entry_quality_outcome.get("penalty_weight"),
+                0.0,
+            )
+            trigger_support_weight = _safe_float(
+                entry_quality_outcome.get("support_weight"),
+                0.0,
+            )
             if bool(entry_quality_outcome.get("positive_entry_episode")):
-                trigger_quality_positive_signal += strength * max(0.25, trigger_support_weight)
+                trigger_quality_positive_signal += positive_strength * max(
+                    0.25,
+                    trigger_support_weight,
+                )
             if bool(entry_quality_outcome.get("loss_episode")):
-                entry_quality_loss_signal += strength * max(0.35, entry_penalty_weight)
+                entry_quality_loss_signal += negative_strength * max(
+                    0.35,
+                    entry_penalty_weight,
+                )
             if bool(entry_quality_outcome.get("tail_loss_episode")):
-                trigger_quality_loss_signal += strength * max(0.55, entry_penalty_weight)
-                recent_tail_loss_signal += strength * 0.35
+                trigger_quality_loss_signal += tail_strength * max(
+                    0.55,
+                    entry_penalty_weight,
+                )
+                recent_tail_loss_signal += tail_strength * 0.35
     positive_learning_signal = _bounded(positive_learning_signal)
     negative_learning_signal = _bounded(negative_learning_signal)
     execution_signal = _bounded(execution_signal, -1.0, 1.0)
@@ -785,6 +850,7 @@ def build_opportunity_scorecard(
     alpha_setup_profiles: Iterable[Mapping[str, Any]] | None = None,
     alpha_setup_action_values: Iterable[Mapping[str, Any]] | None = None,
     signal_collection_contract: Mapping[str, Any] | None = None,
+    formal_setup_by_side: Mapping[str, Any] | None = None,
     decision_date: Any = None,
     config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -842,16 +908,31 @@ def build_opportunity_scorecard(
         elif action in {"cap", "demote", "block"}:
             policy_counts["negative"] = policy_counts.get("negative", 0) + 1
 
+    setup_by_side = {
+        side: str((formal_setup_by_side or {}).get(side) or "").strip().lower()
+        for side in ("long", "short")
+    }
+    enforce_formal_setup = formal_setup_by_side is not None
     alpha_profiles_by_side: dict[str, list[Mapping[str, Any]]] = {"long": [], "short": []}
     for profile in alpha_setup_profiles or []:
         if not isinstance(profile, Mapping):
             continue
         profile_side = str(profile.get("side") or "*").lower()
-        if profile_side in {"long", "short"}:
-            alpha_profiles_by_side[profile_side].append(profile)
-        elif profile_side == "*":
-            alpha_profiles_by_side["long"].append(profile)
-            alpha_profiles_by_side["short"].append(profile)
+        profile_setup = str(profile.get("setup_type") or "").strip().lower()
+        target_sides = (
+            (profile_side,)
+            if profile_side in {"long", "short"}
+            else ("long", "short")
+            if profile_side == "*"
+            else ()
+        )
+        for target_side in target_sides:
+            required_setup = setup_by_side[target_side]
+            if enforce_formal_setup and (
+                not required_setup or profile_setup != required_setup
+            ):
+                continue
+            alpha_profiles_by_side[target_side].append(profile)
 
     side_rows: dict[str, dict[str, Any]] = {}
     for side in ("long", "short"):

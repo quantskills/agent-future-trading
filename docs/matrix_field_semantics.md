@@ -684,6 +684,9 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `hit_rate` | analyst performance | 命中率。 |
 | `reward_sum` | action-value | 奖励总和。 |
 | `reward_mean` | action-value | 平均奖励。 |
+| `mean_return_on_notional` | action-value payload | 同一正式作用域内完整策略 episode 的平均名义收益率；PM Rank 的正负学习强度只使用该收益率，不使用人民币奖励大小。人民币奖励继续服务既有 action-value 生命周期分类、升层门槛和审计。 |
+| `worst_return_on_notional` | action-value payload | 同一正式作用域内完整策略 episode 的最差名义收益率；PM 尾部 Rank 信号只使用该值。 |
+| `episode_return_on_notional_count` | action-value payload | 参与平均及最差名义收益率聚合的完整策略 episode 数量。 |
 | `gross_profit` | setup profile | 总盈利。 |
 | `gross_loss` | setup profile | 总亏损。 |
 | `net_pnl` | 学习 / 复盘 / 评估 | 净盈亏。 |
@@ -917,7 +920,7 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `final_action_contract.learning_used` | PM 唯一合约 | PM Step4 消费并由 Step6 安全落入最终合约的学习事实。 |
 | `learning_used.alpha_setup_action_values[]` | PM 正式学习 | 通过 canonical、consumer_scope、日期和生命周期过滤，并且实际改变最终授权范围内决策的正式 action-value 列表；`hold/reduce/exit`必须与最终`decision_learning_rows`按精确ID一致。负向hold造成真实软减仓时保留原hold family/lane与精确ID，不重标为reduce；结构/ATR止损、技术反转、基本面反向等独立规则不得写入。 |
 | `alpha_setup_action_values[].action_value_id` / `scope_key` / `canonical_action_family` / `learning_lane` / `action_value_lane` / `action_preference` / `memory_side_role` | PM 正式学习行 | action-value 身份、范围、canonical 家族、lane、偏好和方向角色。 |
-| `alpha_setup_action_values[].reward_mean` / `reward_sum` / `win_rate` / `sample_count` / `last_sample_date` / `retrieval_match_level` | PM 正式学习行 | 历史收益、胜率、样本、最后日期和检索匹配层级。 |
+| `alpha_setup_action_values[].reward_mean` / `reward_sum` / `mean_return_on_notional` / `worst_return_on_notional` / `win_rate` / `sample_count` / `last_sample_date` / `retrieval_match_level` | PM 正式学习行 | 人民币奖励保留既有学习生命周期与审计用途但不进入 Rank；平均及最差名义收益率供 Rank；其余字段记录胜率、样本、最后日期和检索匹配层级。 |
 | `learning_used.memory_requirements.contract` / `action_lifecycle` / `action` / `current_position_side` / `target_side` / `contract_side_role` | PM 记忆要求 | 最终动作生命周期、动作和当前/目标方向角色。 |
 | `memory_requirements.required_memory_lanes` / `required_memory_side_roles` / `required_pm_memory` / `must_land_in_pm_contract` / `audit_only_memory` | PM 记忆要求 | 必需 lane、方向角色、必须落入合约和仅审计记忆集合。 |
 | `required_pm_memory[].lane` / `learning_lane` / `action_value_lane` / `side` / `memory_side_role` / `must_land_in_pm_contract` / `reason` | PM 单条记忆要求 | 单条正式记忆要求的 lane、方向、落地要求和原因。 |

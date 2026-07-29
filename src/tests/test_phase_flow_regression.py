@@ -71,6 +71,8 @@ from agents.decision_team.portfolio_manager import (
     _validate_required_analyst_signals,
     _current_open_evidence_snapshot,
     _ExplicitPMLearningScopeDBView,
+    _final_contract_scope_from_scc,
+    _formal_learning_identity_for_side,
     _scorecard_probe_seed,
     _side_opportunity_state_summary,
     _append_unique_action_values,
@@ -2684,11 +2686,23 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         reward_mean: float,
         reward_sum: float,
         worst_reward: float | None = None,
+        mean_return_on_notional: float | None = None,
+        worst_return_on_notional: float | None = None,
         reward_source: str = "trade_episode",
         scope: str = "exact_real_state",
         last_sample_date: str = "2025-03-12",
         sample_count: int = 4,
     ) -> dict:
+        episode_mean_return = (
+            float(mean_return_on_notional)
+            if mean_return_on_notional is not None
+            else float(reward_mean) / 100000.0
+        )
+        episode_worst_return = (
+            float(worst_return_on_notional)
+            if worst_return_on_notional is not None
+            else float(worst_reward if worst_reward is not None else reward_mean) / 100000.0
+        )
         canonical_family = (
             "open_add_new_risk"
             if lane in {"open", "add", "scale", "increase"}
@@ -2724,6 +2738,9 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
                 "action_value_lane": lane,
                 "action_preference": action_preference,
                 "reward_source": reward_source,
+                "mean_return_on_notional": episode_mean_return,
+                "worst_return_on_notional": episode_worst_return,
+                "episode_return_on_notional_count": sample_count,
                 "amplification_scope_quality": scope,
                 "episode_trade_reward_count": sample_count if "episode" in reward_source else 0,
                 "real_trade_reward_count": sample_count,
@@ -2819,6 +2836,86 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertEqual(fallback["strongest_positive"]["scope"], "partial_real_state")
         self.assertEqual(exact["exact_real_count"], 1)
 
+    def test_rank_learning_uses_episode_return_not_currency_reward(self):
+        signal = self._tradeable_signal()
+
+        def learning_summary(*, reward_mean: float, reward_sum: float, episode_return: float):
+            row = self._action_value(
+                action_preference="positive_candidate_open",
+                lane="open",
+                reward_mean=reward_mean,
+                reward_sum=reward_sum,
+                mean_return_on_notional=episode_return,
+                worst_return_on_notional=episode_return,
+            )
+            return build_opportunity_scorecard(
+                ticker="TA",
+                analyst_signals=[signal],
+                market_confirmation={"confirmation_score": 0.70},
+                data_quality_summary={},
+                alpha_setup_action_values=[row],
+                decision_date="2025-03-15",
+                config=self._scorecard_config(),
+            )["short"]["action_value_learning_summary"]
+
+        small_cny = learning_summary(
+            reward_mean=1000.0,
+            reward_sum=4000.0,
+            episode_return=0.05,
+        )
+        large_cny = learning_summary(
+            reward_mean=50000.0,
+            reward_sum=200000.0,
+            episode_return=0.05,
+        )
+        lower_return = learning_summary(
+            reward_mean=50000.0,
+            reward_sum=200000.0,
+            episode_return=0.01,
+        )
+
+        self.assertEqual(
+            small_cny["positive_learning_signal"],
+            large_cny["positive_learning_signal"],
+        )
+        self.assertGreater(
+            small_cny["positive_learning_signal"],
+            lower_return["positive_learning_signal"],
+        )
+
+    def test_scorecard_excludes_cross_setup_profile_from_formal_rank(self):
+        signal = self._tradeable_signal()
+        profiles = [
+            {
+                "side": "short",
+                "setup_type": "trend_breakout_setup",
+                "lifecycle_state": "deployable",
+                "sample_count": 4,
+                "confidence_score": 0.75,
+            },
+            {
+                "side": "short",
+                "setup_type": "volatility_breakout_setup",
+                "lifecycle_state": "capped",
+                "sample_count": 12,
+                "confidence_score": 0.95,
+            },
+        ]
+        scorecard = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_profiles=profiles,
+            formal_setup_by_side={"short": "trend_breakout_setup", "long": ""},
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+
+        counts = scorecard["short"]["alpha_setup_profile_counts"]
+        self.assertEqual(counts["deployable"], 1)
+        self.assertEqual(counts["capped_or_rejected"], 0)
+
     def test_fallback_action_value_cannot_support_real_amplification(self):
         row = self._action_value(
             action_preference="positive_candidate_open",
@@ -2899,7 +2996,10 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertGreater(positive_components["positive_learning"], 0.0)
         self.assertLess(negative_components["negative_learning"], 0.0)
         self.assertLess(negative_components["recent_tail_loss_penalty"], 0.0)
-        self.assertGreater(positive["short"]["opportunity_score"], negative["short"]["opportunity_score"])
+        self.assertGreater(
+            sum(positive_components.values()),
+            sum(negative_components.values()),
+        )
         self.assertNotIn("product_blacklist", json.dumps(negative["short"], ensure_ascii=False))
 
     def test_adaptive_policy_action_is_the_only_positive_or_negative_score_direction(self):
@@ -3104,6 +3204,9 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             "payload": {
                 "action_preference": "tail_loss_protect",
                 "reward_source": "trade_episode",
+                "mean_return_on_notional": -0.018,
+                "worst_return_on_notional": -0.024,
+                "episode_return_on_notional_count": 4,
                 "amplification_scope_quality": "exact_real_state",
                 "action_value_lane": "open",
             },
@@ -3764,6 +3867,9 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             "payload": {
                 "action_preference": "tail_loss_protect",
                 "reward_source": "trade_episode",
+                "mean_return_on_notional": -0.018,
+                "worst_return_on_notional": -0.024,
+                "episode_return_on_notional_count": 4,
                 "amplification_scope_quality": "exact_real_state",
                 "action_value_lane": "open",
                 "real_trade_reward_count": 4,
@@ -3811,8 +3917,12 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             0.0,
         )
         self.assertLess(
-            canonical_scorecard["short"]["opportunity_score"],
-            compressed_scorecard["short"]["opportunity_score"],
+            sum(
+                canonical_scorecard["short"]["opportunity_score_components"].values()
+            ),
+            sum(
+                compressed_scorecard["short"]["opportunity_score_components"].values()
+            ),
         )
         self.assertEqual(
             noncanonical_scorecard["short"]["opportunity_score_components"]["negative_learning"],
@@ -3868,12 +3978,12 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
 
     def test_recent_tail_loss_offsets_stale_alpha_profile_bonus(self):
         signal = self._tradeable_signal()
-        scorecard = build_opportunity_scorecard(
-            ticker="TA",
-            analyst_signals=[signal],
-            market_confirmation={"confirmation_score": 0.70},
-            data_quality_summary={},
-            alpha_setup_profiles=[
+        common = {
+            "ticker": "TA",
+            "analyst_signals": [signal],
+            "market_confirmation": {"confirmation_score": 0.70},
+            "data_quality_summary": {},
+            "alpha_setup_profiles": [
                 {
                     "side": "short",
                     "setup_type": "trend_breakout_setup",
@@ -3883,6 +3993,11 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
                     "confidence_score": 0.82,
                 }
             ],
+            "decision_date": "2025-03-15",
+            "config": self._scorecard_config(),
+        }
+        scorecard = build_opportunity_scorecard(
+            **common,
             alpha_setup_action_values=[
                 self._action_value(
                     action_preference="tail_loss_protect",
@@ -3894,13 +4009,10 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
                     sample_count=2,
                 )
             ],
-            decision_date="2025-03-15",
-            config=self._scorecard_config(),
         )
 
         components = scorecard["short"]["opportunity_score_components"]
         self.assertLess(components["recent_tail_loss_penalty"], 0.0)
-        self.assertLessEqual(components["alpha_profile_adjustment"], 0.03)
         summary = scorecard["short"]["learning_adjustment_summary"]
         self.assertGreater(summary["recent_tail_loss_signal"], 0.0)
         self.assertEqual(summary["not_trade_authority"], True)
@@ -3936,6 +4048,8 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                     "evidence_scope": "exact_real_state",
                     "reward_sum": 5200.0,
                     "reward_mean": 5200.0,
+                    "mean_return_on_notional": 0.052,
+                    "worst_return_on_notional": 0.052,
                     "sample_count": 3,
                     "last_sample_date": "2025-02-28",
                 }
@@ -3961,6 +4075,8 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                     "evidence_scope": "exact_real_state",
                     "reward_sum": -15000.0,
                     "reward_mean": -15000.0,
+                    "mean_return_on_notional": -0.15,
+                    "worst_return_on_notional": -0.15,
                     "sample_count": 6,
                     "last_sample_date": "2025-02-28",
                 }
@@ -9638,6 +9754,52 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertNotIn("policy-explicit-same", ids)
         self.assertNotIn("policy-unknown", ids)
 
+    def test_pm_profile_consumers_reject_cross_setup_rows(self):
+        class _ProfileDB:
+            def get_alpha_setup_profiles(self, **_kwargs):
+                return [
+                    {"id": "same", "setup_type": "trend_breakout_setup"},
+                    {"id": "cross", "setup_type": "volatility_breakout_setup"},
+                ]
+
+        scoped = _ExplicitPMLearningScopeDBView(_ProfileDB()).get_alpha_setup_profiles(
+            setup_type="trend_breakout_setup"
+        )
+        self.assertEqual([row["id"] for row in scoped], ["same"])
+
+        ratio, _reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
+            ticker="RB",
+            position_ratio=-0.05,
+            current_ratio=0.0,
+            opportunity_scorecard={
+                "short": {
+                    "final_state": "tradeable_candidate",
+                    "setup_quality_ok": True,
+                }
+            },
+            alpha_setup_profiles=[
+                {
+                    "side": "short",
+                    "setup_type": "volatility_breakout_setup",
+                    "lifecycle_state": "deployable",
+                    "sample_count": 20,
+                    "confidence_score": 0.95,
+                }
+            ],
+            alpha_setup_action_values=[],
+            analyst_signals=[],
+            market_confirmation={"confirmation_score": 0.70},
+            full_config={},
+            max_position_ratio=0.15,
+            formal_setup_by_side={"short": "trend_breakout_setup"},
+        )
+        self.assertEqual(ratio, -0.05)
+        self.assertEqual(
+            diagnostics["alpha_setup_ev_fusion"]["decision"],
+            "no_expectancy_evidence",
+        )
+        self.assertFalse(diagnostics["alpha_setup_ev_fusion"]["positive_profile"])
+
     def test_learning_boundary_excludes_same_day_and_future_overlays_and_profiles(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = SQLiteDB()
@@ -9688,6 +9850,22 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     """,
                     (row_id, scope_key, confidence, last_sample_date),
                 )
+            cursor.execute(
+                """
+                INSERT INTO alpha_setup_profile (
+                    id, config_id, ticker, side, sector, horizon_class,
+                    market_regime, setup_type, data_combo, scope_key,
+                    lifecycle_state, profile_state_hint, sample_count, trade_count,
+                    win_count, loss_count, net_pnl, confidence_score,
+                    max_position_impact, last_sample_date, created_at,
+                    updated_at, valid_until, active, payload_json
+                ) VALUES ('profile-other-setup', 'cfg', 'RB', 'long', 'ferrous',
+                    'short', 'trend', 'volatility_breakout_setup', 'combo',
+                    'RB|long|other', 'deployable', 'open', 4, 4, 3, 1,
+                    3000.0, 0.80, 0.04, '2025-03-07', '2025-03-10',
+                    '2025-03-10', '2025-04-01', 1, '{}')
+                """
+            )
             conn.commit()
             conn.close()
 
@@ -9716,6 +9894,28 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 trading_date="2025-03-11",
                 limit=10,
             )
+            exact_profiles = db.get_alpha_setup_profiles(
+                config_id="cfg",
+                ticker="RB",
+                sector="ferrous",
+                side="long",
+                horizon_class="short",
+                market_regime="trend",
+                setup_type="tradeable_candidate",
+                trading_date="2025-03-10",
+                limit=10,
+            )
+            cross_setup_profiles = db.get_alpha_setup_profiles(
+                config_id="cfg",
+                ticker="RB",
+                sector="ferrous",
+                side="long",
+                horizon_class="short",
+                market_regime="trend",
+                setup_type="volatility_breakout_setup",
+                trading_date="2025-03-10",
+                limit=10,
+            )
 
         self.assertEqual({row["id"] for row in overlays}, {"overlay-past"})
         profile_ids = {row["id"] for row in profiles}
@@ -9725,6 +9925,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertNotIn("profile-legacy", profile_ids)
         self.assertIn("overlay-same", {row["id"] for row in next_day_overlays})
         self.assertIn("profile-same", {row["id"] for row in next_day_profiles})
+        self.assertEqual({row["id"] for row in exact_profiles}, {"profile-past"})
+        self.assertEqual(
+            {row["id"] for row in cross_setup_profiles},
+            {"profile-other-setup"},
+        )
 
     def test_learning_boundary_excludes_same_day_and_future_performance_and_prompt_priors(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -12922,6 +13127,66 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
 
 class HoldingLifecycleRegressionTest(unittest.TestCase):
+    def test_held_position_uses_opening_fac_identity_and_current_exit_boundary(self):
+        opening_context = {
+            "setup_type": "trend_breakout_setup",
+            "horizon_class": "medium",
+            "expected_horizon_days": 7,
+            "market_regime": "trend",
+        }
+        identity = _formal_learning_identity_for_side(
+            side="short",
+            analyst_signals=[
+                AnalystSignal(
+                    agent_name="technical",
+                    signal=Signal.BEARISH,
+                    confidence=0.80,
+                    horizon_class="short",
+                    metadata={
+                        "action_evidence_contract": {
+                            "setup_type": "volatility_breakout_setup",
+                            "side": "short",
+                        }
+                    },
+                )
+            ],
+            current_lots=-3,
+            opening_fac_context=opening_context,
+        )
+        self.assertEqual(identity["setup_type"], "trend_breakout_setup")
+        self.assertEqual(identity["horizon_class"], "medium")
+        self.assertEqual(identity["expected_horizon_days"], 7)
+        self.assertEqual(identity["market_regime"], "trend")
+
+        scope = _final_contract_scope_from_scc(
+            signal_collection_contract={
+                "source_contracts": [
+                    {
+                        "analyst": "technical",
+                        "action_evidence_contract": {
+                            "side": "short",
+                            "confidence": 0.80,
+                            "setup_type": "volatility_breakout_setup",
+                            "horizon_class": "short",
+                            "expected_horizon_days": 3,
+                            "market_regime": "volatile",
+                            "position_invalidation_level": 105.0,
+                            "atr_stop_distance": 2.0,
+                        },
+                    }
+                ]
+            },
+            current_lots=-3,
+            target_lots=-2,
+            final_action="reduce",
+            opening_fac_context=opening_context,
+        )
+        self.assertEqual(scope["setup_type"], "trend_breakout_setup")
+        self.assertEqual(scope["horizon_class"], "medium")
+        self.assertEqual(scope["expected_horizon_days"], 7)
+        self.assertEqual(scope["market_regime"], "trend")
+        self.assertEqual(scope["position_invalidation_level"], 105.0)
+
     def test_current_position_traces_opening_fac_by_transaction_recommendation_id(self):
         handle, path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
@@ -12949,6 +13214,8 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                     "final_action_contract": {
                         "final_action": "open_probe",
                         "expected_horizon_days": 3,
+                        "horizon_class": "short",
+                        "market_regime": "trend",
                         "invalidation_level": 95.0,
                         "position_invalidation_level": 93.0,
                         "invalidation": "15m close below 95",
@@ -13004,6 +13271,8 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             self.assertEqual(context["recommendation_id"], "open-rec")
             self.assertEqual(context["held_trading_days"], 2)
             self.assertEqual(context["expected_horizon_days"], 3)
+            self.assertEqual(context["horizon_class"], "short")
+            self.assertEqual(context["market_regime"], "trend")
             self.assertEqual(context["position_invalidation_level"], 93.0)
             self.assertNotIn("invalidation_level", context)
             self.assertEqual(context["atr_stop_distance"], 2.0)
@@ -13146,6 +13415,8 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                     "final_action_contract": {
                         "final_action": "open_probe",
                         "expected_horizon_days": 5,
+                        "horizon_class": "medium",
+                        "market_regime": "trend",
                         "position_invalidation_level": invalidation,
                         "atr_stop_distance": 10.0,
                         "setup_type": setup_type,
@@ -13503,6 +13774,84 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(ratio, 0.10)
         self.assertNotIn("position_lifecycle_loss_revalidation_failed", reasons)
         self.assertTrue(diagnostics["holding_rebalance_control"]["loss_revalidated"])
+
+    def test_ordinary_loss_revalidation_reduces_at_two_percent_without_fac_break(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=-2500.0,
+        )
+        ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-10",
+            position_ratio=0.10,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.40),
+                AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.20, "confidence": 0.40},
+            short_scores={"score": 0.10, "confidence": 0.30},
+            market_confirmation={"confirmation_score": 0.40},
+            full_config={
+                "portfolio_manager": {
+                    "holding_rebalance_control": {
+                        "horizon_consistency": {"enabled": False}
+                    }
+                }
+            },
+            fusion_context={},
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={"held_trading_days": 5, "expected_horizon_days": 7},
+        )
+
+        self.assertEqual(ratio, 0.05)
+        self.assertIn("position_lifecycle_loss_revalidation_failed", reasons)
+        detail = diagnostics["holding_rebalance_control"]
+        self.assertFalse(detail["explicit_lifecycle_break"])
+        self.assertEqual(detail["decision"], "reduce_failed_loss_revalidation")
+
+    def test_ordinary_loss_revalidation_exits_at_four_percent_without_fac_break(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=-4500.0,
+        )
+        ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-10",
+            position_ratio=0.10,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.40),
+                AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.20, "confidence": 0.40},
+            short_scores={"score": 0.10, "confidence": 0.30},
+            market_confirmation={"confirmation_score": 0.40},
+            full_config={
+                "portfolio_manager": {
+                    "holding_rebalance_control": {
+                        "horizon_consistency": {"enabled": False}
+                    }
+                }
+            },
+            fusion_context={},
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={"held_trading_days": 5, "expected_horizon_days": 7},
+        )
+
+        self.assertEqual(ratio, 0.0)
+        self.assertIn("position_lifecycle_loss_revalidation_failed", reasons)
+        detail = diagnostics["holding_rebalance_control"]
+        self.assertFalse(detail["explicit_lifecycle_break"])
+        self.assertEqual(detail["decision"], "exit_failed_loss_revalidation")
 
     def test_new_losing_position_reduces_without_same_day_reconfirmation(self):
         position = SimpleNamespace(

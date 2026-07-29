@@ -18,6 +18,7 @@ from agents.decision_team.portfolio_manager import (
     _ExplicitPMLearningScopeDBView,
     _build_execution_contract_fields,
     _current_canonical_setup_type_from_signals,
+    _formal_learning_identity_for_side,
 )
 from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
 from tools.agent_tools.decision.pm_invalidation_policy import (
@@ -189,40 +190,45 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertEqual(exact_attempt["row_count"], 0)
         self.assertIn("simulated exact query failure", exact_attempt["error"])
 
-    def test_pm_exact_setup_key_uses_only_current_scc_execution_setup(self):
+    def test_pm_formal_learning_identity_uses_current_scc_for_new_and_opening_fac_for_held(self):
         technical = _signal(
             "technical",
             Signal.BULLISH,
             0.72,
             setup_type="trend_breakout_setup",
+            market_regime="volatile",
         )
-        fundamental = _signal(
-            "fundamental",
-            Signal.BULLISH,
-            0.88,
-            setup_type="fundamental_timing_setup",
-        )
+        technical.analyst_horizon = "short"
+        technical.horizon_class = "short"
+        technical.market_regime = "volatile"
 
-        self.assertEqual(
-            _current_canonical_setup_type_from_signals(
-                "long",
-                [fundamental, technical],
-            ),
-            "trend_breakout_setup",
+        new_opportunity_identity = _formal_learning_identity_for_side(
+            side="long",
+            analyst_signals=[technical],
+            current_lots=0,
+            opening_fac_context=None,
         )
-        self.assertEqual(
-            _current_canonical_setup_type_from_signals("short", [fundamental, technical]),
-            "",
-        )
+        self.assertEqual(new_opportunity_identity["setup_type"], "trend_breakout_setup")
+        self.assertEqual(new_opportunity_identity["horizon_class"], "short")
+        self.assertEqual(new_opportunity_identity["market_regime"], "volatile")
+        self.assertEqual(new_opportunity_identity["source"], "current_signal_collection_contract")
 
-        source = (
-            SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py"
-        ).read_text(encoding="utf-8-sig")
-        exact_start = source.index("exact_setup_type = _current_canonical_setup_type_from_signals")
-        exact_end = source.index("side_memory_result = retrieve_pm_memory", exact_start)
-        exact_key_block = source[exact_start:exact_end]
-        self.assertNotIn("best_alpha_setup_profile", exact_key_block)
-        self.assertNotIn("final_state", exact_key_block)
+        held_position_identity = _formal_learning_identity_for_side(
+            side="long",
+            analyst_signals=[technical],
+            current_lots=3,
+            opening_fac_context={
+                "setup_type": "opening_breakout_setup",
+                "horizon_class": "medium",
+                "expected_horizon_days": 8,
+                "market_regime": "trend",
+            },
+        )
+        self.assertEqual(held_position_identity["setup_type"], "opening_breakout_setup")
+        self.assertEqual(held_position_identity["horizon_class"], "medium")
+        self.assertEqual(held_position_identity["expected_horizon_days"], 8)
+        self.assertEqual(held_position_identity["market_regime"], "trend")
+        self.assertEqual(held_position_identity["source"], "opening_final_action_contract")
 
         class SetupMemoryDB:
             def get_alpha_setup_action_values(self, **_kwargs):
@@ -1143,6 +1149,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "evidence_scope": "exact_real_state",
                     "reward_sum": 6000,
                     "reward_mean": 6000,
+                    "mean_return_on_notional": 0.02,
+                    "worst_return_on_notional": 0.01,
                     "sample_count": 3,
                     "last_sample_date": "2025-03-04",
                 }
@@ -1172,6 +1180,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "evidence_scope": "exact_real_state",
                     "reward_sum": -6000,
                     "reward_mean": -6000,
+                    "mean_return_on_notional": -0.02,
+                    "worst_return_on_notional": -0.03,
                     "sample_count": 3,
                     "last_sample_date": "2025-03-04",
                 },
@@ -1628,6 +1638,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 "evidence_scope": "exact_real_state",
                 "reward_sum": 6000,
                 "reward_mean": 6000,
+                "mean_return_on_notional": 0.02,
+                "worst_return_on_notional": 0.01,
                 "sample_count": 3,
                 "last_sample_date": "2025-03-04",
             }

@@ -895,7 +895,7 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 
 Step4 还必须在 Step5 之前确定新增风险候选的最终资金层和层内计划比例。冷启动或未验证机会保持 `exploration_probe`；正式 canonical open/add 正向学习只有与当日完整证据、technical 触发和失效边界同时成立时才可升为 `real_budget_entry`，中期基本面明确反向时仍只能保留 probe；成熟重复正收益、强确认、失效边界和合格同向基本面支持同时成立时才可升为 `alpha_scale_entry`。计划保证金比例由最终 `candidate_quality` 在现有区间内连续映射：probe `0.008-0.015`、real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130`。这是新增风险仓位的唯一软计划；Step4输出后只允许可用保证金、单品种保证金硬线、总保证金硬线、净敞口、市场最小手数和手数取整收缩，不得再用日盈亏或名义仓位软比例二次改写。`risk_control.max_single_position_ratio`保留为Step4前的名义风险锚，不是Step4后的第二资金所有者。Step4 不读取或等待尚未生成的 `opportunity_rank`。
 
-现有持仓通过真实 transaction 的 `recommendation_id` 追溯原开仓 FAC，并按已结算交易日计算持有天数。没有新的入场 trigger 只表示不增加风险，不等于持仓失效；PM只读取原 FAC 的 `position_invalidation_level`、原始ATR14、期限和持仓依据，绝不复用入场`invalidation_level`。结构位在开仓FAC组装时按盘前参考价校验，次日消费时再按真实开仓成交价校验；合法结构位与`开仓价±ATR×当前真实命中的default/sector倍数`分别计算后取OR，任一触发均形成唯一exit。明确技术反转形成exit，基本面中期反向按既有规则形成reduce，期限到达只用当日技术与基本面强制复评，不自动退出；其余保持既有hold/生命周期判断。现有template/setup ATR覆盖只有setup键精确匹配时才生效，不宣称普遍命中。
+现有持仓通过真实 transaction 的 `recommendation_id` 追溯原开仓 FAC，并按已结算交易日计算持有天数。持仓期间正式学习检索以及 hold/reduce/exit FAC 的 `setup_type/horizon_class/expected_horizon_days/market_regime` 始终继承原开仓 FAC；当天 SCC 继续提供最新行情、确认分、结构失效和退出证据。没有新的入场 trigger 只表示不增加风险，不等于持仓失效；PM只读取原 FAC 的 `position_invalidation_level`、原始ATR14、期限和持仓依据，绝不复用入场`invalidation_level`。结构位、初始 ATR 及移动保护任一触发均形成唯一exit；原 FAC 未失效时，普通持仓浮亏达到2%且当日同向证据再验证失败则减仓50%，达到4%则退出，同向证据通过则继续持仓。明确技术反转形成exit，基本面中期反向按既有规则形成reduce，期限到达只用当日技术与基本面强制复评，不自动退出。
 
 当最终生命周期结论为 hold、目标比例与当前比例相同且没有硬风险或真实 reduce/exit 覆盖时，PM直接保留 `current_lots`。不得把旧价格下的持仓比例按新价格重新换算并向零取整，从而制造没有策略依据的减仓。
 
@@ -1095,6 +1095,8 @@ rank_score =
 #### 5.6 action-value 与已验证经验如何影响排名
 
 只有第 4 步接收的完整 canonical action-value，并且在本步匹配 `open`、`add`、`scale`、`increase` 新增风险 lane，才允许影响排名。
+
+正负学习强度直接来自完整 episode 的 `mean_return_on_notional`，尾部学习强度来自 `worst_return_on_notional`；`reward_sum/reward_mean/worst_reward` 的人民币数值保留既有 action-value 生命周期分类、升层门槛及审计用途，但不进入 Rank 分值或 Rank 行排序。相同收益率在不同合约、手数和人民币盈亏下形成相同学习强度。PM 正式 Profile 查询还必须精确匹配当前正式 setup：新机会使用当天 SCC setup，已有持仓使用原开仓 FAC setup；跨 setup Profile 不得进入 Rank、仓位和放大。
 
 已验证的产品、方向、setup 和 trigger 经验通过两条路径自然提高资金优先级：
 

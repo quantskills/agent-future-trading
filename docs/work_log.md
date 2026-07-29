@@ -22,3 +22,11 @@
 （2）[自适应政策来源交易日落库] `research_learning.py`在alpha setup政策写入时传递本次Phase4刷新交易日，`research_memory_writers.py`让全部`adaptive_policy_state`生产路径在同一学习事件落库后写入该事件的真实`trading_date`，并在alpha政策UPSERT中原子更新该字段；回归核对政策来源日等于关联学习事件日期。原因：补齐政策状态表已登记的标准日期字段，使每次Phase4自动刷新自身可追溯，不改变PM的T+1读取、政策有效期及刷新机制。
 
 （3）[日频止盈与新仓快速止损] `portfolio_manager.py`按原开仓FAC追溯开仓日至T-1已完成结算价，盈利达到1个原始ATR后启用相距1个原始ATR且只能收紧的移动保护，并让新仓前两个交易日亏损达到0.5%且当日同向证据再验证失败时减仓50%、亏损达到2%时退出；`trader_execution_exit_policy.py`统一初始ATR止损与移动保护的确定性计算；`test_phase_flow_regression.py`与`test_pre_backtest_pm_workflow_contracts.py`覆盖多空移动保护、激活边界、T-1结算价、真实PM持仓链及新仓减仓/退出。原因：减少已形成浮盈的回吐，并让原FAC尚未失效但快速亏损且当日证据失效的新仓及时降险。
+
+==========2026年07月29日==========
+
+（1）[持仓学习身份与Profile精确作用域] `portfolio_manager.py`让持仓正式学习检索及hold/reduce/exit FAC继承原开仓FAC的setup、horizon、expected days和regime，同时保留当天SCC的行情、确认及退出证据；`sqlite_helper.py`、`pm_decision_memory_retrieval.py`与`pm_signal_fusion.py`让PM Profile按正式setup精确查询并在Rank和仓位端复核。原因：修复持仓周期身份漂移及跨setup Profile进入Rank、仓位和放大的问题，不改变分析师宽范围探索读取、换约和资金参数。
+
+（2）[完整episode身份、普通亏损复评与收益率Rank] `research_memory_writers.py`让完整episode的四项身份直接继承原开仓FAC，身份缺失时不写正式episode；`portfolio_manager.py`让原FAC未失效的普通持仓在浮亏2%且证据失败时减仓50%、浮亏4%时退出；`alpha_setup.py`与`pm_signal_fusion.py`把完整episode的平均及最差名义收益率写入action-value并用于Rank，人民币奖励保留审计。`test_phase_flow_regression.py`与`test_reviewer_learning.py`覆盖开仓身份、跨setup隔离、2%/4%复评、相同收益率同分及完整episode收益率聚合。原因：恢复持仓学习周期的一致身份、激活既有普通亏损保护，并消除不同合约和手数按人民币盈亏比较的不公平。
+
+（3）[决策工具旧测试契约同步] `test_decision_workflow_tools.py`把PM学习身份的源码字符串断言改为新机会读取当天SCC、已持仓读取原开仓FAC的行为测试，并为排名正负学习与权重测试补齐完整周期平均及最差名义收益率，人民币盈亏仅保留为审计样本。原因：同步本日持仓身份和收益率Rank生产契约，防止旧测试反向要求已删除实现或缺失正式排名输入。

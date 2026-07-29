@@ -714,6 +714,18 @@ def _reward_signal_for_row(row: Mapping[str, Any]) -> tuple[float | None, str]:
     return None, "ignored"
 
 
+def _episode_return_on_notional_for_row(row: Mapping[str, Any]) -> float | None:
+    source_type = str(row.get("source_type") or "").strip().lower()
+    if source_type not in {"trade_episode", "episode_trade"}:
+        return None
+    result_value = _sample_row_value(row, "result", {})
+    result = result_value if isinstance(result_value, Mapping) else {}
+    value = result.get("return_on_notional")
+    if value is None:
+        return None
+    return _safe_float(value)
+
+
 def _prefer_episode_reward_rows(rows: List[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
     episode_recommendations = {
         str(row.get("recommendation_id") or "")
@@ -1172,6 +1184,7 @@ def _upsert_action_values(
     for action_name, raw_action_rows in grouped.items():
         action_rows = _prefer_episode_reward_rows(raw_action_rows)
         reward_values: List[float] = []
+        return_on_notional_values: List[float] = []
         reward_rows: List[Mapping[str, Any]] = []
         real_trade_reward_count = 0
         episode_trade_reward_count = 0
@@ -1186,6 +1199,9 @@ def _upsert_action_values(
             if reward_source == "episode_trade":
                 real_trade_reward_count += 1
                 episode_trade_reward_count += 1
+                episode_return = _episode_return_on_notional_for_row(row)
+                if episode_return is not None:
+                    return_on_notional_values.append(episode_return)
             elif reward_source == "real_trade":
                 real_trade_reward_count += 1
             elif reward_source == "counterfactual_prior":
@@ -1200,6 +1216,16 @@ def _upsert_action_values(
         loss_reward_count = sum(1 for value in reward_values if value < 0)
         tail_loss_count = sum(1 for value in reward_values if value <= -1000.0)
         worst_reward = min(reward_values) if reward_values else 0.0
+        mean_return_on_notional = (
+            sum(return_on_notional_values) / len(return_on_notional_values)
+            if return_on_notional_values
+            else None
+        )
+        worst_return_on_notional = (
+            min(return_on_notional_values)
+            if return_on_notional_values
+            else None
+        )
         state_completeness = _alpha_state_completeness(profile_scope, action_name)
         if episode_trade_reward_count > 0 and not bool(state_completeness.get("complete")):
             continue
@@ -1308,6 +1334,9 @@ def _upsert_action_values(
             "sample_count": sample_count,
             "reward_sum": reward_sum,
             "reward_mean": reward_mean,
+            "mean_return_on_notional": mean_return_on_notional,
+            "worst_return_on_notional": worst_return_on_notional,
+            "episode_return_on_notional_count": len(return_on_notional_values),
             "win_rate": win_rate,
             "profile_lifecycle": dict(action_profile_lifecycle),
             "source": "alpha_setup_profile_action_value",

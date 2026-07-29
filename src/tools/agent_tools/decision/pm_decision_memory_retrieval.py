@@ -86,6 +86,7 @@ def _key(row: Mapping[str, Any]) -> tuple:
 
 
 def _quality_rank(row: Mapping[str, Any]) -> tuple:
+    payload = _payload(row)
     match = _text(row.get("retrieval_match_level"), "weak_prior").lower()
     reward_source = _text(row.get("reward_source") or _payload(row).get("reward_source")).lower()
     evidence_scope = _text(row.get("evidence_scope") or _payload(row).get("evidence_scope")).lower()
@@ -96,7 +97,13 @@ def _quality_rank(row: Mapping[str, Any]) -> tuple:
         0 if evidence_scope == "exact_real_state" else 1 if evidence_scope == "partial_real_state" else 2 if evidence_scope == "similar_sql_prior" else 3,
         0 if _has_preference(row) else 1,
         _MATCH_PRIORITY.get(match, 9),
-        -abs(_float(row.get("reward_sum"))),
+        -abs(
+            _float(
+                row.get("mean_return_on_notional")
+                if row.get("mean_return_on_notional") is not None
+                else payload.get("mean_return_on_notional")
+            )
+        ),
         -_int(row.get("sample_count")),
         _text(row.get("last_sample_date") or row.get("sample_end_date")),
     )
@@ -313,6 +320,7 @@ def retrieve_pm_memory(
             side=side,
             horizon_class=horizon_class,
             market_regime=market_regime,
+            setup_type=setup_type,
             trading_date=trading_date,
             limit=max(1, min(int(limit), 8)),
         )

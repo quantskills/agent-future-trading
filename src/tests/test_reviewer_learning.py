@@ -1449,7 +1449,8 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 "lots_delta": 1,
                 "target_position_ratio": 0.08,
                 "setup_type": "trend_breakout_setup",
-                "horizon_class": "short",
+                "horizon_class": "medium",
+                "expected_horizon_days": 7,
                 "market_regime": "trend",
             },
         }
@@ -1498,6 +1499,9 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertTrue(item["first_seen_at"])
         self.assertTrue(item["last_reviewed_at"])
         self.assertEqual(item["outcome_label"], "winner")
+        self.assertEqual(item["setup_type"], "trend_breakout_setup")
+        self.assertEqual(item["horizon_class"], "medium")
+        self.assertEqual(item["market_regime"], "trend")
         self.assertIn("BU long winner", item["lesson_text"])
         payload = load_externalized_json(item["payload_json"])
         contract = payload[CONTRACT_KEY]
@@ -1568,6 +1572,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 "entry_trigger": "breakout above opening range",
                 "trigger_source": "technical",
                 "horizon_class": "short",
+                "expected_horizon_days": 3,
                 "market_regime": "trend",
             },
         }
@@ -2048,7 +2053,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 justification, signal_snapshot, status, created_at
             ) VALUES ('rec-open', 'cfg', 'pf', '2025-03-10', '2025-03-10',
              'strategy', 'BU', 'bu2506', 'open_long', 1, 3200,
-                'open long', '{"final_action_contract":{"final_action":"open_probe","current_lots":0,"target_lots":1,"lots_delta":1,"setup_type":"trend_breakout_setup","horizon_class":"short","market_regime":"trend"}}', 'pending',
+                'open long', '{"final_action_contract":{"final_action":"open_probe","current_lots":0,"target_lots":1,"lots_delta":1,"setup_type":"trend_breakout_setup","horizon_class":"short","expected_horizon_days":3,"market_regime":"trend"}}', 'pending',
                 '2025-03-10T09:00:00')
             """
         )
@@ -9293,6 +9298,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             sample_payload = load_externalized_json(sample["payload_json"])
             self.assertEqual(sample_payload["result"]["episode_net_pnl"], 14640.0)
             self.assertEqual(sample_payload["result"]["episode_reward_source"], "trade_episode_memory")
+            self.assertEqual(sample_payload["result"]["return_on_notional"], 0.03)
 
             row = cursor.execute(
                 """
@@ -9309,6 +9315,9 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(payload["action_preference"], "positive_candidate_open")
             self.assertEqual(payload["episode_trade_reward_count"], 1)
             self.assertEqual(payload["real_trade_reward_count"], 1)
+            self.assertEqual(payload["mean_return_on_notional"], 0.03)
+            self.assertEqual(payload["worst_return_on_notional"], 0.03)
+            self.assertEqual(payload["episode_return_on_notional_count"], 1)
         finally:
             conn.close()
 
