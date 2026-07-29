@@ -163,7 +163,10 @@ from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trad
 from util.trading_calendar import get_previous_trading_day, map_datetime_to_futures_trading_day
 from run.validate_phase_flow import _expected_settlement_balance_change
 from tools.agent_tools.research.research_review_helpers import _expected_settlement_equity_change
-from tools.agent_tools.execution.trader_execution_exit_policy import evaluate_exit_policy
+from tools.agent_tools.execution.trader_execution_exit_policy import (
+    evaluate_exit_policy,
+    resolve_atr_protection,
+)
 from tools.common.order_semantics import (
     build_lot_intent_consistency,
     phase2_order_intent_from_lots,
@@ -12937,6 +12940,10 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             conn.execute(
                 "CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT)"
             )
+            conn.execute(
+                "CREATE TABLE ticker_daily_pnl (portfolio_id TEXT, trading_date TEXT, "
+                "ticker TEXT, settle_price REAL)"
+            )
             snapshot = json.dumps(
                 {
                     "final_action_contract": {
@@ -12966,6 +12973,14 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                 "INSERT INTO daily_settlement VALUES (?, ?)",
                 [("pf", "2025-03-20"), ("pf", "2025-03-21")],
             )
+            conn.executemany(
+                "INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?)",
+                [
+                    ("pf", "2025-03-20", "ZZ", 100.0),
+                    ("pf", "2025-03-21", "ZZ", 103.0),
+                    ("pf", "2025-03-24", "ZZ", 150.0),
+                ],
+            )
             conn.commit()
             conn.close()
 
@@ -12993,6 +13008,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             self.assertNotIn("invalidation_level", context)
             self.assertEqual(context["atr_stop_distance"], 2.0)
             self.assertEqual(context["opening_execution_price"], 100.0)
+            self.assertEqual(context["best_prior_settlement_price"], 103.0)
 
             atr_only_context = dict(context)
             atr_only_context["position_invalidation_level"] = 0.0
@@ -13022,6 +13038,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
 
             invalid_structure = dict(context)
             invalid_structure["position_invalidation_level"] = 105.0
+            invalid_structure["best_prior_settlement_price"] = 0.0
             self.assertTrue(
                 _opening_fac_position_invalidation_breached(
                     opening_fac_context=invalid_structure,
@@ -13119,6 +13136,10 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             )
             conn.execute("CREATE TABLE portfolio (id TEXT, config_id TEXT)")
             conn.execute("CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT)")
+            conn.execute(
+                "CREATE TABLE ticker_daily_pnl (portfolio_id TEXT, trading_date TEXT, "
+                "ticker TEXT, settle_price REAL)"
+            )
 
             def snapshot(setup_type, invalidation):
                 return json.dumps({
@@ -13187,7 +13208,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         )
         self.assertFalse(_is_lifecycle_exit_required_reason(["cooling_period"]))
 
-    def test_losing_position_without_explicit_invalidation_stays_held(self):
+    def test_new_losing_position_without_same_day_revalidation_exits_at_two_percent(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -13213,10 +13234,10 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             risk_level=RiskLevel.SAFE,
         )
 
-        self.assertEqual(ratio, 0.10)
-        self.assertIn("holding_lifecycle_not_invalidated", reasons)
+        self.assertEqual(ratio, 0.0)
+        self.assertIn("new_position_loss_revalidation_failed", reasons)
         detail = diagnostics["holding_rebalance_control"]
-        self.assertEqual(detail["decision"], "keep_current_without_lifecycle_break")
+        self.assertEqual(detail["decision"], "exit_failed_new_loss_revalidation")
         self.assertFalse(detail["loss_revalidated"])
 
     def test_opening_fac_numeric_invalidation_can_release_the_position(self):
@@ -13264,7 +13285,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             shares=10,
             entry_date="2025-03-03",
             margin_used=100000.0,
-            unrealized_pnl=-500.0,
+            unrealized_pnl=-400.0,
         )
         ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
             ticker="ZZ",
@@ -13301,7 +13322,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             ]
         )
 
-    def test_losing_position_without_new_trigger_neither_adds_nor_exits(self):
+    def test_new_losing_position_without_new_trigger_exits_at_two_percent(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -13327,11 +13348,11 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             risk_level=RiskLevel.SAFE,
         )
 
-        self.assertEqual(ratio, 0.10)
-        self.assertIn("holding_add_requires_current_technical_trigger", reasons)
+        self.assertEqual(ratio, 0.0)
+        self.assertIn("new_position_loss_revalidation_failed", reasons)
         self.assertEqual(
             diagnostics["holding_rebalance_control"]["decision"],
-            "keep_current_without_add_trigger",
+            "exit_failed_new_loss_revalidation",
         )
 
     def test_unconfirmed_probe_without_lifecycle_break_is_not_reduced(self):
@@ -13483,7 +13504,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         self.assertNotIn("position_lifecycle_loss_revalidation_failed", reasons)
         self.assertTrue(diagnostics["holding_rebalance_control"]["loss_revalidated"])
 
-    def test_new_losing_position_is_not_exited_only_for_missing_reconfirmation(self):
+    def test_new_losing_position_reduces_without_same_day_reconfirmation(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -13513,10 +13534,12 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             risk_level=RiskLevel.SAFE,
         )
 
-        self.assertEqual(ratio, 0.10)
-        self.assertNotIn("new_position_loss_revalidation_failed", reasons)
+        self.assertEqual(ratio, 0.05)
+        self.assertIn("new_position_loss_revalidation_failed", reasons)
         detail = diagnostics["holding_rebalance_control"]
-        self.assertFalse(detail["new_loss_revalidation_failed"])
+        self.assertTrue(detail["new_loss_revalidation_failed"])
+        self.assertFalse(detail["new_loss_revalidation_exit"])
+        self.assertEqual(detail["decision"], "reduce_failed_new_loss_revalidation")
         self.assertIn("current_signal_neutral_or_absent", detail["new_loss_revalidation_failures"])
         self.assertIn(
             "missing_position_exit_boundary",
@@ -13586,7 +13609,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             ],
             long_scores={"score": 0.20, "confidence": 0.40},
             short_scores={"score": 0.10, "confidence": 0.30},
-            market_confirmation={"confirmation_score": 0.42},
+            market_confirmation={"confirmation_score": 0.50},
             full_config={},
             fusion_context={
                 "analyst_quality": {
@@ -13603,7 +13626,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         self.assertNotIn("new_position_loss_revalidation_failed", reasons)
         detail = diagnostics["holding_rebalance_control"]
         self.assertTrue(detail["fundamental_supports_current"])
-        self.assertFalse(detail["loss_revalidated"])
+        self.assertTrue(detail["loss_revalidated"])
         self.assertEqual(detail["decision"], "keep_current_small_delta")
 
     def test_profitable_supported_hold_defers_plain_exit(self):
@@ -18520,6 +18543,58 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertFalse(result["exit_required"])
         self.assertEqual(result["target_lots"], 12)
         self.assertTrue(result["same_direction_supported"])
+
+    def test_atr_profit_trailing_uses_best_completed_settlement(self):
+        long_protection = resolve_atr_protection(
+            current_lots=3,
+            current_price=108.0,
+            entry_price=100.0,
+            atr_distance=10.0,
+            atr_multiplier=1.8,
+            best_prior_settlement_price=120.0,
+        )
+        self.assertTrue(long_protection["activated"])
+        self.assertEqual(long_protection["initial_stop_level"], 82.0)
+        self.assertEqual(long_protection["trailing_stop_level"], 110.0)
+        self.assertTrue(long_protection["breached"])
+        tighter_long_protection = resolve_atr_protection(
+            current_lots=3,
+            current_price=112.0,
+            entry_price=100.0,
+            atr_distance=10.0,
+            atr_multiplier=1.8,
+            best_prior_settlement_price=125.0,
+        )
+        self.assertGreater(
+            tighter_long_protection["effective_stop_level"],
+            long_protection["effective_stop_level"],
+        )
+
+        short_protection = resolve_atr_protection(
+            current_lots=-3,
+            current_price=92.0,
+            entry_price=100.0,
+            atr_distance=10.0,
+            atr_multiplier=1.8,
+            best_prior_settlement_price=80.0,
+        )
+        self.assertTrue(short_protection["activated"])
+        self.assertEqual(short_protection["initial_stop_level"], 118.0)
+        self.assertEqual(short_protection["trailing_stop_level"], 90.0)
+        self.assertTrue(short_protection["breached"])
+
+    def test_atr_profit_trailing_waits_for_one_atr_profit(self):
+        protection = resolve_atr_protection(
+            current_lots=3,
+            current_price=90.0,
+            entry_price=100.0,
+            atr_distance=10.0,
+            atr_multiplier=1.8,
+            best_prior_settlement_price=109.0,
+        )
+        self.assertFalse(protection["activated"])
+        self.assertEqual(protection["effective_stop_level"], 82.0)
+        self.assertFalse(protection["breached"])
 
     def test_time_stop_flattens_unvalidated_probe_without_same_direction_support(self):
         current_position = SimpleNamespace(entry_date="2025-02-10", entry_price=3000.0)

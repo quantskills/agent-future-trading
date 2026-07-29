@@ -67,7 +67,10 @@ from tools.agent_tools.decision.pm_reason_effects import (
 )
 from tools.agent_tools.decision.pm_risk_controls import business_quality_position_gate
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
-from tools.agent_tools.execution.trader_execution_exit_policy import resolve_exit_policy_config
+from tools.agent_tools.execution.trader_execution_exit_policy import (
+    resolve_atr_protection,
+    resolve_exit_policy_config,
+)
 from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     CAPITAL_LAYER_ALPHA_SCALE,
     CAPITAL_LAYER_EXPLORATION,
@@ -6468,6 +6471,7 @@ def _load_opening_fac_context(
             raise RuntimeError("pm_opening_fac_execution_price_missing")
         opening_day = _normalize_trading_day_value(opening_row.get("trading_date"))
         held_trading_days = 0
+        best_prior_settlement_price = 0.0
         if opening_day and opening_day < decision_day:
             cursor.execute(
                 '''
@@ -6482,6 +6486,28 @@ def _load_opening_fac_context(
             )
             day_row = cursor.fetchone()
             held_trading_days = 1 + int((day_row["day_count"] if day_row else 0) or 0)
+            cursor.execute(
+                '''
+                SELECT MAX(tdp.settle_price) AS highest_settlement,
+                       MIN(tdp.settle_price) AS lowest_settlement
+                FROM ticker_daily_pnl tdp
+                JOIN portfolio p ON tdp.portfolio_id = p.id
+                WHERE p.config_id = ?
+                  AND upper(tdp.ticker) = upper(?)
+                  AND substr(tdp.trading_date, 1, 10) >= ?
+                  AND substr(tdp.trading_date, 1, 10) < ?
+                  AND tdp.settle_price > 0
+                ''',
+                (config_id, ticker, opening_day, decision_day),
+            )
+            settlement_row = cursor.fetchone()
+            if settlement_row:
+                settlement_value = (
+                    settlement_row["highest_settlement"]
+                    if current_side == "long"
+                    else settlement_row["lowest_settlement"]
+                )
+                best_prior_settlement_price = _safe_float(settlement_value, 0.0)
         return {
             "recommendation_id": str(opening_row.get("recommendation_id") or ""),
             "opening_trading_date": opening_day,
@@ -6494,6 +6520,7 @@ def _load_opening_fac_context(
             "exit_hint": str(contract.get("exit_hint") or ""),
             "atr_stop_distance": _safe_float(contract.get("atr_stop_distance"), 0.0),
             "opening_execution_price": opening_execution_price,
+            "best_prior_settlement_price": best_prior_settlement_price,
             "setup_type": str(contract.get("setup_type") or ""),
             "final_action": str(contract.get("final_action") or ""),
         }
@@ -6536,11 +6563,19 @@ def _opening_fac_position_invalidation_breached(
             ticker,
             str(context.get("setup_type") or ""),
         )
-        stop_distance = atr_distance * _safe_float(policy.get("atr_multiplier"), 1.8)
-        if current_side == "long":
-            atr_breached = price <= entry_price - stop_distance
-        elif current_side == "short":
-            atr_breached = price >= entry_price + stop_distance
+        signed_lots = 1 if current_side == "long" else -1 if current_side == "short" else 0
+        atr_protection = resolve_atr_protection(
+            current_lots=signed_lots,
+            current_price=price,
+            entry_price=entry_price,
+            atr_distance=atr_distance,
+            atr_multiplier=_safe_float(policy.get("atr_multiplier"), 1.8),
+            best_prior_settlement_price=_safe_float(
+                context.get("best_prior_settlement_price"),
+                0.0,
+            ),
+        )
+        atr_breached = bool(atr_protection.get("breached"))
     return bool(structure_breached or atr_breached)
 
 
@@ -9498,17 +9533,11 @@ def _apply_holding_rebalance_control(
     new_loss_revalidation_failed = (
         new_loss_revalidation_due
         and bool(new_loss_failures)
-        and explicit_lifecycle_break
+        and not loss_revalidated
     )
     new_loss_revalidation_exit = (
         new_loss_revalidation_failed
-        and (
-            position_pnl_ratio <= float(lifecycle_config.get("new_loss_revalidation_exit_ratio", -0.02))
-            or (
-                "missing_position_exit_boundary" in new_loss_failures
-                and "current_signal_neutral_or_absent" in new_loss_failures
-            )
-        )
+        and position_pnl_ratio <= float(lifecycle_config.get("new_loss_revalidation_exit_ratio", -0.02))
     )
     scorecard = fusion_context.get("opportunity_scorecard") if isinstance(fusion_context, dict) else {}
     current_scorecard = (

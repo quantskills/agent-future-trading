@@ -501,6 +501,12 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
                 );
                 CREATE TABLE portfolio (id TEXT PRIMARY KEY, config_id TEXT);
                 CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT);
+                CREATE TABLE ticker_daily_pnl (
+                    portfolio_id TEXT,
+                    trading_date TEXT,
+                    ticker TEXT,
+                    settle_price REAL
+                );
                 """
             )
             opening_contract = {
@@ -528,6 +534,13 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
             conn.executemany(
                 "INSERT INTO daily_settlement VALUES (?, ?)",
                 [("held-portfolio", day) for day in ("2025-03-20", "2025-03-21", "2025-03-24")],
+            )
+            conn.executemany(
+                "INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?)",
+                [
+                    ("held-portfolio", "2025-03-20", "BU", 3500.0),
+                    ("held-portfolio", "2025-03-21", "BU", 3520.0),
+                ],
             )
             conn.commit()
             conn.close()

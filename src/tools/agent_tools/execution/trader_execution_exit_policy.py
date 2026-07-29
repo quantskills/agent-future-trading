@@ -66,6 +66,66 @@ def resolve_exit_policy_config(config: Dict[str, Any], ticker: str, setup_type: 
     return resolved
 
 
+def resolve_atr_protection(
+    *,
+    current_lots: int,
+    current_price: float,
+    entry_price: float,
+    atr_distance: float,
+    atr_multiplier: float,
+    best_prior_settlement_price: float = 0.0,
+) -> Dict[str, Any]:
+    """Resolve the initial ATR stop and the activated profit trailing stop.
+
+    The favorable settlement is restricted by the caller to completed sessions
+    before the decision date.  The initial stop keeps the configured sector or
+    setup multiplier; the profit trail activates after a one-ATR favorable move
+    and then stays one raw ATR behind the best completed settlement.
+    """
+    lots = int(current_lots or 0)
+    price = _safe_float(current_price, 0.0)
+    entry = _safe_float(entry_price, 0.0)
+    atr = _safe_float(atr_distance, 0.0)
+    multiplier = _safe_float(atr_multiplier, 0.0)
+    best_settlement = _safe_float(best_prior_settlement_price, 0.0)
+    result: Dict[str, Any] = {
+        "enabled": bool(lots and price > 0.0 and entry > 0.0 and atr > 0.0 and multiplier > 0.0),
+        "activated": False,
+        "initial_stop_level": None,
+        "trailing_stop_level": None,
+        "effective_stop_level": None,
+        "best_prior_settlement_price": best_settlement if best_settlement > 0.0 else None,
+        "breached": False,
+        "mode": "none",
+    }
+    if not result["enabled"]:
+        return result
+
+    initial_distance = atr * multiplier
+    if lots > 0:
+        initial_stop = entry - initial_distance
+        activated = best_settlement >= entry + atr
+        trailing_stop = best_settlement - atr if activated else None
+        effective_stop = max(initial_stop, trailing_stop) if trailing_stop is not None else initial_stop
+        breached = price <= effective_stop
+    else:
+        initial_stop = entry + initial_distance
+        activated = 0.0 < best_settlement <= entry - atr
+        trailing_stop = best_settlement + atr if activated else None
+        effective_stop = min(initial_stop, trailing_stop) if trailing_stop is not None else initial_stop
+        breached = price >= effective_stop
+
+    result.update({
+        "activated": bool(activated),
+        "initial_stop_level": float(initial_stop),
+        "trailing_stop_level": float(trailing_stop) if trailing_stop is not None else None,
+        "effective_stop_level": float(effective_stop),
+        "breached": bool(breached),
+        "mode": "profit_trailing" if activated else "initial",
+    })
+    return result
+
+
 def evaluate_exit_policy(
     *,
     ticker: str,
@@ -108,11 +168,22 @@ def evaluate_exit_policy(
     atr_distance = _safe_float(lifecycle.get("atr_stop_distance"), 0.0)
     entry_price = _safe_float(getattr(current_position, "entry_price", None), 0.0)
     if atr_distance > 0 and entry_price > 0:
-        stop_distance = atr_distance * _safe_float(policy.get("atr_multiplier"), 1.8)
-        if current_lots > 0 and current_price <= entry_price - stop_distance:
+        atr_protection = resolve_atr_protection(
+            current_lots=current_lots,
+            current_price=current_price,
+            entry_price=entry_price,
+            atr_distance=atr_distance,
+            atr_multiplier=_safe_float(policy.get("atr_multiplier"), 1.8),
+            best_prior_settlement_price=_safe_float(
+                lifecycle.get("best_prior_settlement_price"),
+                0.0,
+            ),
+        )
+        result["atr_protection"] = atr_protection
+        if current_lots > 0 and atr_protection.get("breached"):
             result.update({"exit_required": True, "target_lots": 0, "reason": "atr_trailing_stop_long"})
             return result
-        if current_lots < 0 and current_price >= entry_price + stop_distance:
+        if current_lots < 0 and atr_protection.get("breached"):
             result.update({"exit_required": True, "target_lots": 0, "reason": "atr_trailing_stop_short"})
             return result
 

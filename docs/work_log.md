@@ -20,3 +20,5 @@
 （1）[setup身份单源三处遗漏收口] `research_learning.py`把`alpha_setup_profile`的canonical `setup_type`原值写入`adaptive_policy_state`，身份缺失及通配时仅跳过该政策；日常hold/reduce/exit学习按成交血缘重放原开仓FAC，同向换约续仓继续继承原setup，当日FAC只保留在证据中；execution样本取消`execution_*_setup`第二套身份，改用对应FAC setup并直接继承Trader的`execution_retrieval_key`区分执行方式。`research_memory_writers.py`删除alpha政策落库时写死的通配setup，`portfolio_manager.py`从Trader执行检索键读取execution profile。回归覆盖政策值传递与跨setup隔离、换约后持仓setup继承、execution FAC setup及精确执行键。原因：完成既有setup单源修改遗漏的三条生产链，不改变换约决策、资金、rank、止损、fallback及升层阈值。
 
 （2）[自适应政策来源交易日落库] `research_learning.py`在alpha setup政策写入时传递本次Phase4刷新交易日，`research_memory_writers.py`让全部`adaptive_policy_state`生产路径在同一学习事件落库后写入该事件的真实`trading_date`，并在alpha政策UPSERT中原子更新该字段；回归核对政策来源日等于关联学习事件日期。原因：补齐政策状态表已登记的标准日期字段，使每次Phase4自动刷新自身可追溯，不改变PM的T+1读取、政策有效期及刷新机制。
+
+（3）[日频止盈与新仓快速止损] `portfolio_manager.py`按原开仓FAC追溯开仓日至T-1已完成结算价，盈利达到1个原始ATR后启用相距1个原始ATR且只能收紧的移动保护，并让新仓前两个交易日亏损达到0.5%且当日同向证据再验证失败时减仓50%、亏损达到2%时退出；`trader_execution_exit_policy.py`统一初始ATR止损与移动保护的确定性计算；`test_phase_flow_regression.py`与`test_pre_backtest_pm_workflow_contracts.py`覆盖多空移动保护、激活边界、T-1结算价、真实PM持仓链及新仓减仓/退出。原因：减少已形成浮盈的回吐，并让原FAC尚未失效但快速亏损且当日证据失效的新仓及时降险。
