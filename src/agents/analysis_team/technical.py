@@ -469,6 +469,7 @@ def technical_agent(state: FundState):
         context=technical_context,
         horizon_class="short",
     )
+    learning_context["technical_parameter_calibration"] = technical_calibration_diag
     prompt += learning_context.get("text", "")
     prompt += (
         "\n\n=== Learning-to-signal requirement ===\n"

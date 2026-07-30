@@ -1504,6 +1504,16 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(item["market_regime"], "trend")
         self.assertIn("BU long winner", item["lesson_text"])
         payload = load_externalized_json(item["payload_json"])
+        self.assertEqual(payload["expected_horizon_days"], 7)
+        self.assertEqual(
+            payload["fac_learning_identity"],
+            {
+                "setup_type": "trend_breakout_setup",
+                "horizon_class": "medium",
+                "expected_horizon_days": 7,
+                "market_regime": "trend",
+            },
+        )
         contract = payload[CONTRACT_KEY]
         self.assertEqual(contract["memory_type"], "trade_episode_memory")
         self.assertEqual(contract["contract_version"], "next_round_strategy_update_v2")
@@ -1756,6 +1766,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                     "target_position_ratio": 0.02 if target_lots else 0.0,
                     "setup_type": "trend_breakout_setup",
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "trend",
                     "invalidation": f"before entry trade below {entry_invalidation}",
                     "invalidation_level": entry_invalidation,
@@ -2192,6 +2203,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 "lots_delta": -1,
                 "setup_type": "trend_breakout_setup",
                 "horizon_class": "short",
+                "expected_horizon_days": 3,
                 "market_regime": "trend",
             },
             "pm_internal_draft": {"market_regime": "range"},
@@ -2336,6 +2348,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 "lots_delta": 1,
                 "setup_type": "trend_breakout_setup",
                 "horizon_class": "short",
+                "expected_horizon_days": 3,
                 "market_regime": "trend",
             },
             "pm_internal_draft": {
@@ -2493,6 +2506,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 "lots_delta": 1,
                 "setup_type": "trend_breakout_setup",
                 "horizon_class": "short",
+                "expected_horizon_days": 3,
                 "market_regime": "trend",
             },
             "pm_internal_draft": {
@@ -4204,6 +4218,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "lots_delta": -1,
                     "setup_type": "trend_breakout_setup",
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "trend",
                     "entry_trigger": "breakout below support",
                 },
@@ -4499,6 +4514,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "ticker": "C",
                     "side": "long",
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "trend",
                     "setup_type": "trend_breakout_setup",
                     "data_combo": "execution",
@@ -4677,6 +4693,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "target_position_ratio": 0.08,
                 "setup_type": "trend_breakout_setup",
                 "horizon_class": "short",
+                "expected_horizon_days": 3,
                 "market_regime": "trend",
                 "reason_codes": reason_codes,
                 "learning_used": learning_used,
@@ -5262,6 +5279,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "target_position_ratio": 0.08,
                     "setup_type": "trend_breakout_setup",
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "trend",
                     "reason_codes": "target_plan",
                     "reason_codes": ["learning_mechanism:alpha_promotion"],
@@ -5431,6 +5449,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "target_position_ratio": 0.08,
                 "setup_type": "trend_breakout_setup",
                 "horizon_class": "short",
+                "expected_horizon_days": 3,
                 "market_regime": "trend",
                 "reason_codes": ["learning_mechanism:alpha_promotion"],
                 "learning_used": {
@@ -6237,6 +6256,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "lots_delta": 0,
                     "setup_type": "volatility_breakout_setup",
                     "horizon_class": "medium",
+                    "expected_horizon_days": 7,
                     "market_regime": "range_breakout",
                     "entry_trigger": "opening_range_breakout_with_volume",
                     "reason_codes": ["intraday_trigger_not_met"],
@@ -6366,6 +6386,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "lots_delta": 2,
                     "setup_type": "breakout_continuation",
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "trend",
                     "entry_trigger": "breakout_above_resistance",
                     "reason_codes": ["entry_confirmed"],
@@ -6492,6 +6513,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             "lots_delta": 0,
             "setup_type": "volatility_breakout_setup",
             "horizon_class": "short",
+            "expected_horizon_days": 3,
             "market_regime": "trend",
             "entry_trigger": "breakout_above_opening_range",
             "execution_profile": "breakout",
@@ -6722,6 +6744,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "lots_delta": 1,
                     "setup_type": "trend_breakout_setup",
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "trend",
                 },
                 "pm_internal_draft": {"analyst_signal_combo": ["Bullish", "Neutral", "Neutral"], "decision_horizon": "short", "market_regime": "trend"},
@@ -6945,10 +6968,16 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 setup_type="news_event_setup", horizon_class="short",
                 market_regime="trend", trading_date="2025-03-11",
             )
+            normalized_regime_rows = db.get_adaptive_policy_state(
+                config_id="cfg", ticker="BU", side="long",
+                setup_type="trend_breakout_setup", horizon_class="short",
+                market_regime="Trend", trading_date="2025-03-11",
+            )
 
             self.assertEqual(len(exact_rows), 1)
             self.assertEqual(exact_rows[0]["setup_type"], "trend_breakout_setup")
             self.assertEqual(cross_setup_rows, [])
+            self.assertEqual(len(normalized_regime_rows), 1)
 
     def test_researcher_writes_execution_action_value_from_trader_feedback(self):
         conn = self._connection()
@@ -7022,6 +7051,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "target_lots": -1,
                     "lots_delta": -1,
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "trend",
                     "setup_type": "trend_breakout_setup",
                     "execution_contract": {
@@ -7077,7 +7107,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(summary["rows"], 2)
             samples = cursor.execute(
                 """
-                SELECT source_type, action_taken, setup_type, payload_json
+                SELECT source_type, action_taken, setup_type, horizon_class,
+                       market_regime, payload_json
                 FROM alpha_setup_sample
                 WHERE config_id='cfg'
                 ORDER BY source_type
@@ -7092,7 +7123,10 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             execution_sample = next(row for row in samples if row["source_type"] == "execution")
             self.assertEqual(execution_sample["action_taken"], "execution_intraday_trigger_confirmed")
             self.assertEqual(execution_sample["setup_type"], "trend_breakout_setup")
+            self.assertEqual(execution_sample["horizon_class"], "short")
+            self.assertEqual(execution_sample["market_regime"], "trend")
             payload = load_externalized_json(execution_sample["payload_json"])
+            self.assertEqual(payload["expected_horizon_days"], 3)
             feedback = payload["result"]["execution_feedback"]
             self.assertTrue(feedback["trigger_checked"])
             self.assertTrue(feedback["trigger_passed"])
@@ -7289,6 +7323,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "lots_delta": -1,
                     "setup_type": "fundamental_timing_setup",
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "range",
                 }
             }
@@ -7333,6 +7368,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "target_lots": -1,
                     "lots_delta": 0,
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "range",
                     "setup_type": "fundamental_timing_setup",
                     "opportunity_state": "tradeable_candidate",
@@ -7442,6 +7478,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "lots_delta": 1,
                     "setup_type": "trend_breakout_setup",
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "trend",
                 }
             }
@@ -7503,6 +7540,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "lots_delta": 0,
                     "setup_type": "volatility_breakout_setup",
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "range",
                 },
                 "execution_result": {"status": "held", "outcome": "not_filled"},
@@ -7526,13 +7564,16 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             sample = cursor.execute(
                 """
-                SELECT setup_type, payload_json
+                SELECT setup_type, horizon_class, market_regime, payload_json
                 FROM alpha_setup_sample
                 WHERE recommendation_id='rec-hold-bu' AND source_type='trade'
                 """
             ).fetchone()
             self.assertEqual(sample["setup_type"], "trend_breakout_setup")
+            self.assertEqual(sample["horizon_class"], "short")
+            self.assertEqual(sample["market_regime"], "trend")
             payload = load_externalized_json(sample["payload_json"])
+            self.assertEqual(payload["expected_horizon_days"], 3)
             self.assertEqual(
                 payload["evidence"]["final_action_contract"]["setup_type"],
                 "volatility_breakout_setup",
@@ -7696,6 +7737,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                             "lots_delta": 5,
                             "setup_type": "news_event_setup",
                             "horizon_class": "short",
+                            "expected_horizon_days": 3,
                             "market_regime": "trend",
                         }
                     }
@@ -7763,6 +7805,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                             "lots_delta": case["target_lots"] - 5,
                             "side": "long",
                             "horizon_class": "short",
+                            "expected_horizon_days": 3,
                             "market_regime": "trend",
                             "setup_type": "trend_breakout_setup",
                             "opportunity_state": "tradeable_candidate",
@@ -7935,7 +7978,21 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "closed",
                     "missed_opportunity",
                     json.dumps([{"horizon_days": 3, "counterfactual_pnl": 2100.0}]),
-                    json.dumps({"source": "test"}),
+                    json.dumps({
+                        "source": "test",
+                        "signal_snapshot": {
+                            "final_action_contract": {
+                                "final_action": "open_probe",
+                                "current_lots": 0,
+                                "target_lots": 1,
+                                "lots_delta": 1,
+                                "setup_type": "long_breakout_short",
+                                "horizon_class": "short",
+                                "expected_horizon_days": 3,
+                                "market_regime": "trend",
+                            }
+                        },
+                    }),
                     "now",
                     "now",
                 ),
@@ -8127,6 +8184,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "target_lots": 1,
                     "lots_delta": 1,
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "range",
                     "setup_type": "trend_breakout_setup",
                     "opportunity_state": "tradeable_candidate",
@@ -8602,6 +8660,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "target_lots": 2,
                     "lots_delta": 2,
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "trend",
                     "setup_type": "trend_breakout_setup",
                     "opportunity_state": "tradeable_candidate",
@@ -9209,6 +9268,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "target_lots": 1,
                     "lots_delta": 1,
                     "horizon_class": "short",
+                    "expected_horizon_days": 3,
                     "market_regime": "range",
                     "setup_type": "trend_breakout_setup",
                     "opportunity_state": "tradeable_candidate",
@@ -9743,6 +9803,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                                 "target_position_ratio": 0.08,
                                 "horizon_class": "short",
                                 "expected_horizon_days": 2,
+                                "setup_type": "reversal_confirmed_setup",
+                                "market_regime": "low_position_reversal",
                                 "entry_trigger": "reversal_confirmed",
                                 "invalidation_level": 3220.0,
                             },

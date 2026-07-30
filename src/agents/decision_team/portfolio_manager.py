@@ -96,6 +96,7 @@ from tools.agent_tools.decision.pm_signal_fusion import (
     resolve_decision_horizon as _fusion_resolve_decision_horizon,
 )
 from tools.common.alpha_setup import compact_profile_for_trace
+from tools.common.learning_identity import canonical_market_regime
 from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
     build_scc_data_quality_summary,
@@ -6152,11 +6153,11 @@ def _market_regime_from_signals(analyst_signals: list, target_side: str) -> str:
         if _signal_side_text(getattr(signal, "signal", None)) == target_side:
             regime = str(getattr(signal, "market_regime", "") or "unknown")
             if regime and regime != "unknown":
-                return regime
+                return canonical_market_regime(regime)
     for signal in analyst_signals or []:
         regime = str(getattr(signal, "market_regime", "") or "unknown")
         if regime and regime != "unknown":
-            return regime
+            return canonical_market_regime(regime)
     return "unknown"
 
 
@@ -6212,7 +6213,10 @@ def _formal_learning_identity_for_side(
                 opening_context.get("expected_horizon_days"),
                 0,
             ),
-            "market_regime": str(opening_context.get("market_regime") or ""),
+            "market_regime": canonical_market_regime(
+                opening_context.get("market_regime"),
+                "",
+            ),
             "source": "opening_final_action_contract",
         }
     signed_side = 1 if normalized_side == "long" else -1 if normalized_side == "short" else 0
@@ -6223,12 +6227,38 @@ def _formal_learning_identity_for_side(
         ),
         "horizon_class": _resolve_decision_horizon(analyst_signals, signed_side),
         "expected_horizon_days": 0,
-        "market_regime": _market_regime_from_signals(
-            analyst_signals,
-            normalized_side,
+        "market_regime": canonical_market_regime(
+            _market_regime_from_signals(analyst_signals, normalized_side),
+            "",
         ),
         "source": "current_signal_collection_contract",
     }
+
+
+def _policy_memory_route_for_lifecycle(
+    *,
+    current_lots: int,
+    opportunity_side: str,
+) -> dict:
+    """Choose the one policy identity that may affect today's lifecycle action."""
+
+    holding_side = (
+        "long" if int(current_lots or 0) > 0
+        else "short" if int(current_lots or 0) < 0
+        else ""
+    )
+    if holding_side:
+        return {
+            "side": holding_side,
+            "route": "opening_fac_holding_policy",
+        }
+    normalized_opportunity_side = str(opportunity_side or "").strip().lower()
+    if normalized_opportunity_side in {"long", "short"}:
+        return {
+            "side": normalized_opportunity_side,
+            "route": "current_scc_opportunity_policy",
+        }
+    return {"side": "", "route": "no_policy_scope"}
 
 
 def _target_side_from_ratio(position_ratio: float) -> str:
@@ -9254,12 +9284,20 @@ def _apply_holding_rebalance_control(
 
     current_side = _target_side_from_ratio(current_ratio)
     target_side = _target_side_from_ratio(position_ratio)
-    calibration_side = target_side if target_side in {"long", "short"} else current_side
-    calibration_horizon = _resolve_decision_horizon(
-        analyst_signals,
-        1 if calibration_side == "long" else -1 if calibration_side == "short" else 0,
-    )
-    calibration_regime = _market_regime_from_signals(analyst_signals, calibration_side)
+    calibration_side = current_side if current_side in {"long", "short"} else target_side
+    opening_context = opening_fac_context if isinstance(opening_fac_context, dict) else {}
+    if current_side in {"long", "short"}:
+        calibration_horizon = str(opening_context.get("horizon_class") or "")
+        calibration_regime = canonical_market_regime(
+            opening_context.get("market_regime"),
+            "",
+        )
+    else:
+        calibration_horizon = _resolve_decision_horizon(
+            analyst_signals,
+            1 if calibration_side == "long" else -1 if calibration_side == "short" else 0,
+        )
+        calibration_regime = _market_regime_from_signals(analyst_signals, calibration_side)
     contextual_cfg = (((full_config.get("learning") or {}).get("contextual_rule_calibration")) or {})
     contextual_diag = {}
     if bool(contextual_cfg.get("enabled", True)) and calibration_side in {"long", "short"}:
@@ -10803,7 +10841,10 @@ def _run_pm_six_step_decision(state: FundState):
     )
 
     signal_combo = _analyst_signal_combo(analyst_signals)
-    early_adaptive_policy_state = []
+    opportunity_adaptive_policy_state: list[dict] = []
+    holding_adaptive_policy_state: list[dict] = []
+    early_adaptive_policy_state: list[dict] = []
+    adaptive_policy_route = "no_policy_scope"
     adaptive_policy_safety_trace = {}
     early_horizon = "*"
     early_market_regime = "*"
@@ -10891,7 +10932,12 @@ def _run_pm_six_step_decision(state: FundState):
         trading_date=trading_date,
     )
     state["full_config"] = full_config
-    step4_memory_side = preferred_side if preferred_side in {"long", "short"} else ""
+    policy_route = _policy_memory_route_for_lifecycle(
+        current_lots=current_lots_for_control,
+        opportunity_side=preferred_side,
+    )
+    step4_memory_side = str(policy_route.get("side") or "")
+    adaptive_policy_route = str(policy_route.get("route") or "no_policy_scope")
     if step4_memory_side:
         early_identity = formal_learning_identity_by_side[step4_memory_side]
         early_horizon = str(early_identity.get("horizon_class") or "")
@@ -10914,7 +10960,14 @@ def _run_pm_six_step_decision(state: FundState):
                 include_adaptive_policy_state=True,
                 limit=12,
             )
-            early_adaptive_policy_state = early_memory_result.get("adaptive_policy_state") or []
+            routed_policy_state = early_memory_result.get("adaptive_policy_state") or []
+            if adaptive_policy_route == "opening_fac_holding_policy":
+                holding_adaptive_policy_state = list(routed_policy_state)
+                opportunity_adaptive_policy_state = []
+            else:
+                opportunity_adaptive_policy_state = list(routed_policy_state)
+                holding_adaptive_policy_state = []
+            early_adaptive_policy_state = list(routed_policy_state)
             adaptive_policy_safety_trace = early_memory_result.get("adaptive_policy_safety_trace") or {}
             alpha_setup_profiles = early_memory_result.get("alpha_setup_profiles") or []
             effective_memory_summary = early_memory_result.get("effective_memory_summary") or effective_memory_summary
@@ -11378,11 +11431,16 @@ def _run_pm_six_step_decision(state: FundState):
             )
         )
         pm_risk_gate_side = _target_side_from_ratio(position_risk.optimal_position_ratio)
+        risk_gate_policy_route = _policy_memory_route_for_lifecycle(
+            current_lots=current_lots_for_control,
+            opportunity_side=pm_risk_gate_side,
+        )
+        risk_gate_policy_side = str(risk_gate_policy_route.get("side") or "")
         recent_side_performance = {}
         recent_conditional_performance = {}
-        if db and config_id and pm_risk_gate_side in {"long", "short"}:
+        if db and config_id and risk_gate_policy_side in {"long", "short"}:
             pm_risk_gate_identity = formal_learning_identity_by_side[
-                pm_risk_gate_side
+                risk_gate_policy_side
             ]
             decision_horizon = str(
                 pm_risk_gate_identity.get("horizon_class") or ""
@@ -11396,7 +11454,7 @@ def _run_pm_six_step_decision(state: FundState):
             recent_side_performance = db.get_futures_trade_pair_performance(
                 config_id=config_id,
                 ticker=ticker,
-                side=pm_risk_gate_side,
+                side=risk_gate_policy_side,
                 trading_date=trading_date,
                 lookback_trades=pm_risk_gate_lookback,
             )
@@ -11404,7 +11462,7 @@ def _run_pm_six_step_decision(state: FundState):
                 recent_conditional_performance = db.get_futures_conditional_trade_performance(
                     config_id=config_id,
                     ticker=ticker,
-                    side=pm_risk_gate_side,
+                    side=risk_gate_policy_side,
                     trading_date=trading_date,
                     signal_combo=list(signal_combo),
                     lookback_trades=pm_risk_gate_lookback,
@@ -11414,7 +11472,7 @@ def _run_pm_six_step_decision(state: FundState):
                 db=pm_memory_db,
                 config_id=config_id,
                 ticker=ticker,
-                side=pm_risk_gate_side,
+                side=risk_gate_policy_side,
                 horizon_class=decision_horizon,
                 market_regime=market_regime_key,
                 setup_type=setup_type_key,
@@ -11427,12 +11485,19 @@ def _run_pm_six_step_decision(state: FundState):
                 limit=12,
             )
             strategy_memory = pm_risk_gate_memory_result.get("strategy_memory") or {}
-            adaptive_policy_state = pm_risk_gate_memory_result.get("adaptive_policy_state") or []
+            routed_policy_state = pm_risk_gate_memory_result.get("adaptive_policy_state") or []
+            adaptive_policy_route = str(risk_gate_policy_route.get("route") or "no_policy_scope")
+            if adaptive_policy_route == "opening_fac_holding_policy":
+                holding_adaptive_policy_state = list(routed_policy_state)
+                adaptive_policy_state = holding_adaptive_policy_state
+            else:
+                opportunity_adaptive_policy_state = list(routed_policy_state)
+                adaptive_policy_state = opportunity_adaptive_policy_state
             adaptive_policy_safety_trace = pm_risk_gate_memory_result.get("adaptive_policy_safety_trace") or adaptive_policy_safety_trace
             provisional_policy_state = pm_risk_gate_memory_result.get("provisional_policy_state") or []
             pm_learning_audit["decision_memory_retrieval_policy"] = {
                 "tool": "decision_memory_retrieval",
-                "side": pm_risk_gate_side,
+                "side": risk_gate_policy_side,
                 "horizon_class": decision_horizon,
                 "market_regime": market_regime_key,
                 "setup_type": setup_type_key,
@@ -11551,6 +11616,23 @@ def _run_pm_six_step_decision(state: FundState):
         control_reasons.extend(reasons)
         control_notes.extend(notes)
 
+    current_side_for_holding_policy = (
+        "long" if current_lots_for_control > 0
+        else "short" if current_lots_for_control < 0
+        else ""
+    )
+    adaptive_policy_state = (
+        holding_adaptive_policy_state
+        if adaptive_policy_route == "opening_fac_holding_policy"
+        else opportunity_adaptive_policy_state
+    )
+    pm_learning_audit["adaptive_policy_route"] = {
+        "route": adaptive_policy_route,
+        "current_position_side": current_side_for_holding_policy,
+        "policy_count": len(adaptive_policy_state),
+    }
+
+    if not pm_risk_gate.enabled:
         position_risk.optimal_position_ratio, reasons, notes, diagnostics = _apply_trade_frequency_control(
             db=db,
             config_id=config_id,

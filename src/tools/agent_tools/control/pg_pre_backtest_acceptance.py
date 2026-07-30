@@ -55,6 +55,9 @@ _TEST_GROUPS = {
         "src.tests.test_accountant_settlement_formulas",
         "src.tests.test_trade_path_incremental_repairs",
         "src.tests.test_researcher_lifecycle_contract",
+        "src.tests.test_decision_workflow_tools",
+        "src.tests.test_reviewer_learning",
+        "src.tests.test_phase_flow_regression",
     ),
     "orchestration_state_and_physical_boundary": (
         "src.tests.test_pre_backtest_pm_workflow_contracts",
@@ -685,7 +688,15 @@ def _formal_temporary_database_check(db_path: Path, cfg: Dict[str, Any], artifac
 
 
 def _run_test_group(check_name: str, modules: Iterable[str]) -> ProtocolCheckResult:
-    suite = unittest.defaultTestLoader.loadTestsFromNames(list(modules))
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite(
+        loader.discover(
+            str(Path(__file__).resolve().parents[3] / "tests"),
+            pattern=f"{Path(module_name.replace('.', '/')).name}.py",
+            top_level_dir=str(Path(__file__).resolve().parents[3] / "tests"),
+        )
+        for module_name in modules
+    )
     stream = io.StringIO()
     result = unittest.TextTestRunner(stream=stream, verbosity=0).run(suite)
     if result.wasSuccessful():

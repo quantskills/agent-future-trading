@@ -108,6 +108,7 @@ def _canonical_recommendation(
         final_contract_scope={
             "setup_type": "trend_following",
             "horizon_class": "short",
+            "expected_horizon_days": 3,
             "market_regime": "trend",
         },
     )

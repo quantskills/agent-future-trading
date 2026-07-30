@@ -467,15 +467,15 @@ def _table_columns(cursor: sqlite3.Cursor, table_name: str) -> set[str]:
         return set()
 
 
-def _opening_fac_setup_type(
+def _opening_fac_learning_identity(
     cursor: sqlite3.Cursor,
     *,
     config_id: str,
     ticker: str,
     trading_date: str,
     current_lots: int,
-) -> str:
-    """Resolve the pre-decision open position to its original strategy FAC setup."""
+) -> Dict[str, Any]:
+    """Resolve the pre-decision position to its complete opening strategy FAC identity."""
 
     current_side = "long" if int(current_lots or 0) > 0 else "short" if int(current_lots or 0) < 0 else ""
     decision_day = str(trading_date or "")[:10]
@@ -608,12 +608,19 @@ def _opening_fac_setup_type(
         raise RuntimeError("research_opening_fac_recommendation_missing")
     recommendation = dict(raw_recommendation)
     opening_snapshot = _review_helpers._recommendation_snapshot(recommendation)
-    opening_setup_type = _valid_fac_setup_type(
-        _review_helpers._fac_setup_type(opening_snapshot)
-    )
-    if not opening_setup_type:
-        raise RuntimeError("research_opening_fac_setup_type_missing")
-    return opening_setup_type
+    opening_identity = _review_helpers._fac_learning_identity(opening_snapshot)
+    if not bool(opening_identity.get("complete")):
+        missing = ",".join(opening_identity.get("missing_fields") or [])
+        raise RuntimeError(f"research_opening_fac_identity_missing:{missing}")
+    return {
+        key: opening_identity.get(key)
+        for key in (
+            "setup_type",
+            "horizon_class",
+            "expected_horizon_days",
+            "market_regime",
+        )
+    }
 
 
 def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -791,11 +798,18 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
         counterfactual_pnl = _counterfactual_result_value(selected_result)
         classification = str(row.get("classification") or "")
         source_type = "counterfactual_missed_alpha" if classification == "missed_opportunity" else "counterfactual_reasonable_avoidance"
-        horizon = str(row.get("horizon_class") or "unknown")
-        regime = str(row.get("market_regime") or "unknown")
-        setup_type = str(row.get("setup_type") or "").strip()
-        if setup_type.lower() in {"", "unknown", "*", "generic_trade_setup"}:
+        memory_payload = _load_episode_payload(row)
+        original_snapshot = (
+            memory_payload.get("signal_snapshot")
+            if isinstance(memory_payload.get("signal_snapshot"), dict)
+            else {}
+        )
+        fac_identity = _review_helpers._fac_learning_identity(original_snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        setup_type = str(fac_identity.get("setup_type") or "")
         signal_combo = row.get("signal_combo")
         if isinstance(signal_combo, str):
             parsed_combo = _review_helpers._json_loads(signal_combo)
@@ -820,6 +834,10 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
             "side": side,
             "sector": row.get("sector") or _review_helpers._sector_for_ticker(cfg, ticker),
             "horizon_class": horizon,
+            "expected_horizon_days": _review_helpers._safe_int(
+                fac_identity.get("expected_horizon_days"),
+                0,
+            ),
             "market_regime": regime,
             "setup_type": setup_type,
             "data_combo": data_combo,
@@ -929,11 +947,12 @@ def write_alpha_setup_profiles(
             continue
         rec_id = str(recommendation.get("id") or "")
         txs = transactions_by_recommendation.get(rec_id, [])
-        horizon = _review_helpers._horizon_class(_review_helpers._expected_horizon_days(snapshot, side), snapshot)
-        regime = _review_helpers._market_regime(snapshot)
-        template = _valid_fac_setup_type(_review_helpers._fac_setup_type(snapshot))
-        if not template:
+        fac_identity = _review_helpers._fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        template = str(fac_identity.get("setup_type") or "")
         data_usage = data_usage_from_snapshot(snapshot)
         data_combo = _review_helpers._data_combo_key(data_usage)
         analyst_payloads = _review_helpers._analyst_payloads(snapshot)
@@ -967,18 +986,29 @@ def write_alpha_setup_profiles(
         opportunity_type = _review_helpers._primary_opportunity_type(snapshot, side)
         opportunity_state = _review_helpers._primary_opportunity_state(snapshot, side)
         opportunity_contract_summary = _review_helpers._opportunity_contract_summary(snapshot)
-        setup_type = template
+        learning_identity = {
+            key: fac_identity.get(key)
+            for key in (
+                "setup_type",
+                "horizon_class",
+                "expected_horizon_days",
+                "market_regime",
+            )
+        }
         sector = _review_helpers._sector_for_ticker(cfg, ticker)
         planned_target_lots = _review_helpers._safe_int(semantic_state.get("target_lots"))
         current_lots = _review_helpers._safe_int(semantic_state.get("current_lots"), 0)
         if current_lots != 0:
-            setup_type = _opening_fac_setup_type(
+            learning_identity = _opening_fac_learning_identity(
                 cursor,
                 config_id=config_id,
                 ticker=ticker,
                 trading_date=trading_date,
                 current_lots=current_lots,
             )
+        setup_type = str(learning_identity.get("setup_type") or "")
+        horizon = str(learning_identity.get("horizon_class") or "")
+        regime = str(learning_identity.get("market_regime") or "")
         contract_intent = recommendation_intent_from_lots(
             current_lots=current_lots,
             target_lots=planned_target_lots,
@@ -1062,6 +1092,10 @@ def write_alpha_setup_profiles(
             "side": side,
             "sector": sector,
             "horizon_class": horizon,
+            "expected_horizon_days": _review_helpers._safe_int(
+                learning_identity.get("expected_horizon_days"),
+                0,
+            ),
             "market_regime": regime,
             "setup_type": setup_type,
             "data_combo": data_combo,
@@ -1445,6 +1479,11 @@ def _episode_alpha_setup_samples(
             "side": side,
             "sector": row.get("sector") or "unknown",
             "horizon_class": row.get("horizon_class") or "unknown",
+            "expected_horizon_days": _review_helpers._safe_int(
+                payload.get("expected_horizon_days")
+                or final_contract.get("expected_horizon_days"),
+                0,
+            ),
             "market_regime": row.get("market_regime") or "unknown",
             "setup_type": setup_type,
             "entry_trigger": entry_trigger,

@@ -2167,6 +2167,24 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             analyst="technical",
             ticker="RB",
             learning_context={
+                "prompt_learning_record_ids": [
+                    "digest-1",
+                    "action-value-technical-1",
+                ],
+                "technical_parameter_calibration": {
+                    "applied": [
+                        {
+                            "id": "technical-policy-1",
+                            "changed": {
+                                "trend.short": {
+                                    "from": 10,
+                                    "to": 9,
+                                    "rule": "trend_short_multiplier",
+                                }
+                            },
+                        }
+                    ]
+                },
                 "analyst_calibration_items": [
                     {
                         "ticker": "RB",
@@ -2174,6 +2192,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "horizon_class": "short",
                         "market_regime": "trend",
                         "setup_type": "trend_breakout_setup",
+                        "source_learning_record_id": "action-value-technical-1",
                         "action_name": "open",
                         "sample_count": 8,
                         "reward_mean": 1200.0,
@@ -2217,10 +2236,50 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         self.assertEqual(impact["contract_version"], "agentquant.analyst_learning_impact.v1")
         self.assertIn("RB:long:trend_breakout_setup:trend:open", impact["historical_support"])
         self.assertEqual(impact["historical_contradiction"], [])
+        self.assertTrue(impact["prompt_calibration_applied"])
+        self.assertEqual(
+            impact["prompt_learning_record_ids"],
+            ["digest-1", "action-value-technical-1"],
+        )
+        self.assertTrue(impact["evidence_calibration_applied"])
+        self.assertEqual(
+            impact["evidence_calibration_record_ids"],
+            ["action-value-technical-1"],
+        )
+        self.assertTrue(impact["technical_parameter_calibration_applied"])
+        self.assertEqual(
+            impact["technical_parameter_calibrations"],
+            [
+                {
+                    "policy_id": "technical-policy-1",
+                    "parameter_changes": {
+                        "trend.short": {"from": 10, "to": 9},
+                    },
+                }
+            ],
+        )
         self.assertIn("no_trade_authority", impact["authority_boundary"])
         self.assertNotIn("lots", impact)
         self.assertNotIn("margin_ratio", impact)
         self.assertEqual(calibrated.metadata["learning_impact_summary"], impact)
+        finalized = apply_trade_research_contract(
+            calibrated,
+            {"opportunity_state": "tradeable_candidate"},
+            analyst="technical",
+            trading_date="2025-07-02",
+            ticker="RB",
+        )
+        persisted_summary = finalized.metadata["action_evidence_contract"][
+            "learning_impact_summary"
+        ]
+        self.assertEqual(
+            persisted_summary["prompt_learning_record_ids"],
+            ["digest-1", "action-value-technical-1"],
+        )
+        self.assertEqual(
+            persisted_summary["technical_parameter_calibrations"],
+            impact["technical_parameter_calibrations"],
+        )
 
     def test_analyst_learning_calibration_uses_product_learning_scope_without_trade_authority(self):
         signal = AnalystSignal(

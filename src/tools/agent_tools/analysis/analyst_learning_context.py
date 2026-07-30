@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from util.logger import logger
 from tools.common.learning_contract import CONTRACT_KEY, contract_prompt_line
+from tools.common.learning_identity import canonical_market_regime
 from tools.common.alpha_setup import (
     analyst_signal_calibration_prompt_line,
     compact_product_learning_performance_key_for_analyst,
@@ -190,7 +191,7 @@ def _context_market_regime(context: Optional[Dict[str, Any]]) -> str:
     if not isinstance(context, dict):
         return "*"
     regime = context.get("market_regime") or context.get("regime") or context.get("trend_stage")
-    return str(regime or "*")
+    return canonical_market_regime(regime, "*")
 
 
 def _context_side(context: Optional[Dict[str, Any]]) -> str:
@@ -308,6 +309,34 @@ def _budget_plain_lines(lines: Iterable[str], *, max_chars: int, max_items: int)
         selected.append(line)
         used += len(line) + 1
     return selected, dropped
+
+
+def _budget_item_lines(
+    lines: Iterable[str],
+    items: Iterable[Dict[str, Any]],
+    *,
+    max_chars: int,
+    max_items: int,
+) -> tuple[List[str], List[Dict[str, Any]], int]:
+    """Budget prompt lines while retaining only records actually inserted."""
+
+    selected_lines: List[str] = []
+    selected_items: List[Dict[str, Any]] = []
+    used = 0
+    dropped = 0
+    for raw, item in zip(lines, items):
+        line = str(raw or "").strip().replace("\n", " ")
+        if not line:
+            continue
+        if len(line) + 1 > max_chars and max_chars > 24:
+            line = line[: max(0, max_chars - 4)].rstrip() + "..."
+        if len(selected_lines) >= max_items or used + len(line) + 1 > max_chars:
+            dropped += 1
+            continue
+        selected_lines.append(line)
+        selected_items.append(item)
+        used += len(line) + 1
+    return selected_lines, selected_items, dropped
 
 
 def _memory_trace_ref(item: Dict[str, Any], memory_type: str) -> Dict[str, Any]:
@@ -581,6 +610,7 @@ def _safe_analyst_action_value_projection(
     # Missing canonical_action_value is accepted only after the same completeness
     # and shared semantic checks used above; explicit false was already rejected.
     projection = compact_action_value_for_analyst_trace(row)
+    projection["source_learning_record_id"] = str(row.get("id") or "")
     projected_calibration = (
         projection.get("signal_calibration")
         if isinstance(projection.get("signal_calibration"), dict)
@@ -960,8 +990,9 @@ def build_learning_context(
                     f"{episode_prefix}lifecycle=[structured lifecycle facts unavailable; "
                     "use performance summary only]."
                 )
-        episode_lines, episode_dropped = _budget_plain_lines(
+        episode_lines, episode_items, episode_dropped = _budget_item_lines(
             raw_episode_lines,
+            episode_items,
             max_chars=episode_chars,
             max_items=episode_limit,
         )
@@ -1024,8 +1055,9 @@ def build_learning_context(
                 f"{neutral_text}; counterfactual=[{counterfactual_text or 'pending'}]; "
                 f"reason={_compact_inline_text(item.get('pm_reason') or item.get('execution_reason') or '', 50)}"
             )
-        no_trade_lines, no_trade_dropped = _budget_plain_lines(
+        no_trade_lines, no_trade_items, no_trade_dropped = _budget_item_lines(
             raw_no_trade_lines,
+            no_trade_items,
             max_chars=no_trade_chars,
             max_items=no_trade_limit,
         )
@@ -1099,8 +1131,9 @@ def build_learning_context(
                 "Before using it, state whether today's data confirms or contradicts it; "
                 f"if evidence is missing or conflicting, lower confidence or stay Neutral.{contract_suffix}"
             )
-        hypothesis_lines, hypothesis_dropped = _budget_plain_lines(
+        hypothesis_lines, hypothesis_items, hypothesis_dropped = _budget_item_lines(
             raw_hypothesis_lines,
+            hypothesis_items,
             max_chars=hypothesis_chars,
             max_items=hypothesis_limit,
         )
@@ -1143,8 +1176,9 @@ def build_learning_context(
                 f"- {profile_prompt_line(item, include_entry_calibration=analyst_key == 'technical')}"
                 for item in alpha_setup_items
             ]
-            alpha_setup_lines, alpha_setup_dropped = _budget_plain_lines(
+            alpha_setup_lines, alpha_setup_items, alpha_setup_dropped = _budget_item_lines(
                 raw_alpha_lines,
+                alpha_setup_items,
                 max_chars=alpha_chars,
                 max_items=alpha_limit,
             )
@@ -1239,15 +1273,12 @@ def build_learning_context(
                 f"- {_analyst_action_value_prompt_line(item)}"
                 for item in analyst_calibration_items
             ]
-            analyst_calibration_lines, action_value_dropped = _budget_plain_lines(
+            analyst_calibration_lines, analyst_calibration_items, action_value_dropped = _budget_item_lines(
                 raw_calibration_lines,
+                analyst_calibration_items,
                 max_chars=action_value_chars,
                 max_items=action_value_limit,
             )
-            if len(analyst_calibration_lines) < len(analyst_calibration_items):
-                analyst_calibration_items = analyst_calibration_items[
-                    : len(analyst_calibration_lines)
-                ]
             dropped += action_value_dropped
 
     try:
@@ -1390,7 +1421,7 @@ def build_learning_context(
         )
         text_parts.append(
             "These are safe signal-calibration projections of formal same-ticker, past-only action-values."
-            f"{calibration_boundary} They are not raw PM records, contain no learning ID, PM rank/score, lots, margin, "
+            f"{calibration_boundary} They are not raw PM records, contain no visible learning ID, PM rank/score, lots, margin, "
             "or historical absolute price, and cannot create direction, opportunity, trade authority, or execution."
         )
         text_parts.extend(analyst_calibration_lines)
@@ -1434,6 +1465,21 @@ def build_learning_context(
         ],
         "analyst_calibration_items": analyst_calibration_items,
         "selected_ids": selected_ids,
+        "prompt_learning_record_ids": list(dict.fromkeys(
+            item_id
+            for item_id in (
+                list(selected_ids)
+                + [str(item.get("id") or "") for item in episode_items]
+                + [str(item.get("id") or "") for item in no_trade_items]
+                + [str(item.get("id") or "") for item in hypothesis_items]
+                + [str(item.get("id") or "") for item in alpha_setup_items]
+                + [
+                    str(item.get("source_learning_record_id") or "")
+                    for item in analyst_calibration_items
+                ]
+            )
+            if item_id
+        )),
         "horizon_class": horizon,
         "requested_horizon_class": horizon,
         "matched_horizon_classes": matched_horizons,

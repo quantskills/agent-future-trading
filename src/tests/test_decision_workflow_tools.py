@@ -19,6 +19,7 @@ from agents.decision_team.portfolio_manager import (
     _build_execution_contract_fields,
     _current_canonical_setup_type_from_signals,
     _formal_learning_identity_for_side,
+    _policy_memory_route_for_lifecycle,
 )
 from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
 from tools.agent_tools.decision.pm_invalidation_policy import (
@@ -230,6 +231,21 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertEqual(held_position_identity["market_regime"], "trend")
         self.assertEqual(held_position_identity["source"], "opening_final_action_contract")
 
+        self.assertEqual(
+            _policy_memory_route_for_lifecycle(
+                current_lots=3,
+                opportunity_side="short",
+            ),
+            {"side": "long", "route": "opening_fac_holding_policy"},
+        )
+        self.assertEqual(
+            _policy_memory_route_for_lifecycle(
+                current_lots=0,
+                opportunity_side="short",
+            ),
+            {"side": "short", "route": "current_scc_opportunity_policy"},
+        )
+
         class SetupMemoryDB:
             def get_alpha_setup_action_values(self, **_kwargs):
                 return [
@@ -263,6 +279,48 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 for row in scoped.get_alpha_setup_action_values(setup_type=None)
             },
             {"current-setup", "historical-other-setup", "wildcard-setup"},
+        )
+
+    def test_pm_memory_normalizes_market_regime_for_all_formal_queries(self):
+        class MemoryDB:
+            def __init__(self):
+                self.calls = []
+
+            def get_alpha_setup_action_values(self, **kwargs):
+                self.calls.append(("action", kwargs))
+                return []
+
+            def get_alpha_setup_profiles(self, **kwargs):
+                self.calls.append(("profile", kwargs))
+                return []
+
+            def get_adaptive_policy_state(self, **kwargs):
+                self.calls.append(("policy", kwargs))
+                return []
+
+        db = MemoryDB()
+        retrieve_pm_memory(
+            db=db,
+            config_id="cfg",
+            ticker="RB",
+            side="long",
+            horizon_class="short",
+            market_regime="Bullish /  Trend",
+            setup_type="trend_breakout_setup",
+            trading_date="2025-07-02",
+            include_profiles=True,
+            include_adaptive_policy_state=True,
+        )
+
+        exact_calls = [
+            kwargs
+            for kind, kwargs in db.calls
+            if kind in {"action", "profile", "policy"}
+            and kwargs.get("market_regime") is not None
+        ]
+        self.assertTrue(exact_calls)
+        self.assertTrue(
+            all(kwargs["market_regime"] == "bullish_trend" for kwargs in exact_calls)
         )
 
     def test_pm_exact_setup_retrieval_failure_cannot_become_cold_start(self):

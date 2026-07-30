@@ -211,7 +211,7 @@
 | `execution_horizon` | Trader 执行 | 执行期限。 |
 | `validation_horizon` | Reviewer 复盘 | 验证期限。 |
 | `expected_horizon_days` | 分析师 / 研究 | 预期期限天数。 |
-| `market_regime` | 分析师 / state_key | 市场状态，如趋势、震荡、高波动。 |
+| `market_regime` | 分析师 / FAC / 正式学习 state_key | 市场状态，如趋势、震荡、高波动；FAC 生产、正式学习落库和正式查询统一为小写、空格与斜杠转下划线的 canonical 文本，不合并语义不同的状态。 |
 | `trend_stage` | 技术证据 | 趋势阶段。 |
 | `trend_direction` | 技术证据 | 技术趋势方向背景。 |
 | `direction_context` | 分析师证据 | 方向背景说明；不能作为交易授权。 |
@@ -823,6 +823,9 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `learning_impact_summary.opportunity_state_reason` | 分析师学习校准 | 学习校准后机会状态的结构化原因。 |
 | `learning_impact_summary.positive_strength` / `learning_impact_summary.negative_strength` / `learning_impact_summary.broad_positive_strength` / `learning_impact_summary.broad_negative_strength` | 分析师学习校准 | 同范围与宽范围历史学习的正负强度。 |
 | `learning_impact_summary.net_evidence_adjustment` | 分析师学习校准 | 历史学习对当日证据的净校准量。 |
+| `learning_impact_summary.prompt_calibration_applied` / `learning_impact_summary.prompt_learning_record_ids` | 分析师学习校准 / AEC | 是否实际向本次分析提示词追加过去学习，以及实际追加记录的编号；仅内部追溯，不保存完整提示词，不创建交易权限。 |
+| `learning_impact_summary.evidence_calibration_applied` / `learning_impact_summary.evidence_calibration_record_ids` | 分析师学习校准 / AEC | 是否有记录真正通过适用性和安全校验并参与确定性证据校准，以及对应记录编号；仅检索但未采用的记录不得写入。 |
+| `learning_impact_summary.technical_parameter_calibration_applied` / `learning_impact_summary.technical_parameter_calibrations` | 技术分析师学习校准 / AEC | 技术参数校准是否实际生效，以及政策编号、参数名和 `from/to` 前后值；不保存内部完整配置，不改变 PM、Rank 或交易权限。 |
 | `learning_impact_summary.authority_boundary` / `factor_calibration_summary.authority_boundary` / `event_calibration_summary.authority_boundary` | 分析师学习校准 | 固定声明学习只校准分析证据，不产生动作、手数、rank 或预算权限。 |
 | `factor_calibration_summary.effective_factors` / `factor_calibration_summary.stale_or_conflicting_factors` / `factor_calibration_summary.factors_requiring_price_confirmation` | fundamental 因子校准 | 有效、陈旧/冲突及仍需价格确认的基本面因子。 |
 | `factor_calibration_summary.supporting_learning_scopes` / `factor_calibration_summary.contradicting_learning_scopes` / `factor_calibration_summary.factor_calibration_reason` | fundamental 因子校准 | 支持/反对学习范围及因子校准原因。 |

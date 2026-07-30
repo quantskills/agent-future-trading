@@ -1231,8 +1231,11 @@ def _write_signal_context_history(
         snapshot = _recommendation_snapshot(recommendation)
         side = _recommendation_side(recommendation, snapshot)
         combo = _signal_combo_from_snapshot(snapshot)
-        expected_days = _expected_horizon_days(snapshot, side)
-        template = _fac_setup_type(snapshot)
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
+            continue
+        expected_days = _safe_int(fac_identity.get("expected_horizon_days"), 0)
+        template = str(fac_identity.get("setup_type") or "")
         row_id = str(uuid.uuid4())
         ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
         analyst_ext = externalize_json_for_db(
@@ -1285,9 +1288,9 @@ def _write_signal_context_history(
                 side,
                 _json_dumps(combo),
                 template,
-                _horizon_class(expected_days, snapshot),
+                str(fac_identity.get("horizon_class") or ""),
                 expected_days,
-                _market_regime(snapshot),
+                str(fac_identity.get("market_regime") or ""),
                 _price_stage(snapshot),
                 _price_percentile(snapshot),
                 _entry_trigger_label(snapshot, side),
@@ -1345,7 +1348,7 @@ def _write_template_and_analyst_learning(
     except sqlite3.Error:
         recommendation_lookup = {}
 
-    template_groups: Dict[Tuple[str, str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    template_groups: Dict[Tuple[str, str, str, str, int, str], List[Dict[str, Any]]] = defaultdict(list)
     analyst_groups: Dict[Tuple[str, str, str, str, str], List[float]] = defaultdict(list)
 
     for pair in pairs:
@@ -1354,16 +1357,17 @@ def _write_template_and_analyst_learning(
         ticker = str(pair.get("ticker") or "").upper()
         side = str(pair.get("side") or "").lower()
         combo = _signal_combo_from_snapshot(snapshot)
-        expected_days = _expected_horizon_days(snapshot, side)
-        horizon = _horizon_class(expected_days, snapshot)
-        regime = _market_regime(snapshot)
-        template = _fac_setup_type(snapshot)
-        if not template:
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        expected_days = _safe_int(fac_identity.get("expected_horizon_days"), 0)
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        template = str(fac_identity.get("setup_type") or "")
         item = dict(pair)
         item["setup_type"] = template
         item["signal_combo"] = combo
-        template_groups[(ticker, side, template, horizon, regime)].append(item)
+        template_groups[(ticker, side, template, horizon, expected_days, regime)].append(item)
 
         sector = _sector_for_ticker(cfg, ticker)
         for analyst, payload in _analyst_payloads(snapshot).items():
@@ -1378,7 +1382,7 @@ def _write_template_and_analyst_learning(
     now = _utc_now()
     valid_until = _valid_until(trading_date, expires_after_days)
     template_rows = 0
-    for (ticker, side, template, horizon, regime), rows in template_groups.items():
+    for (ticker, side, template, horizon, expected_days, regime), rows in template_groups.items():
         if len(rows) < min_samples:
             continue
         summary = summarize_trade_pairs(rows)
@@ -1420,7 +1424,16 @@ def _write_template_and_analyst_learning(
                 trading_date,
                 now,
                 valid_until,
-                _json_dumps({"summary": summary, "cutoff_trading_date": trading_date}),
+                _json_dumps({
+                    "summary": summary,
+                    "cutoff_trading_date": trading_date,
+                    "fac_learning_identity": {
+                        "setup_type": template,
+                        "horizon_class": horizon,
+                        "expected_horizon_days": expected_days,
+                        "market_regime": regime,
+                    },
+                }),
             ),
         )
         template_rows += 1
@@ -2215,21 +2228,12 @@ def _write_trade_episode_memory(
         side = str(pair.get("side") or "").lower()
         combo = _signal_combo_from_snapshot(snapshot)
         final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-        template = str(final_contract.get("setup_type") or "").strip()
-        horizon = str(final_contract.get("horizon_class") or "").strip()
-        expected_days = _safe_int(final_contract.get("expected_horizon_days"), 0)
-        regime = str(final_contract.get("market_regime") or "").strip()
-        missing_identity = [
-            key
-            for key, value in {
-                "setup_type": template,
-                "horizon_class": horizon,
-                "expected_horizon_days": expected_days,
-                "market_regime": regime,
-            }.items()
-            if value in (None, "", 0)
-            or str(value).strip().lower() in {"*", "unknown"}
-        ]
+        fac_identity = _fac_learning_identity(snapshot)
+        template = str(fac_identity.get("setup_type") or "")
+        horizon = str(fac_identity.get("horizon_class") or "")
+        expected_days = _safe_int(fac_identity.get("expected_horizon_days"), 0)
+        regime = str(fac_identity.get("market_regime") or "")
+        missing_identity = list(fac_identity.get("missing_fields") or [])
         if missing_identity:
             logger.warning(
                 "Skip completed strategy episode with incomplete opening FAC identity: "
@@ -2308,6 +2312,12 @@ def _write_trade_episode_memory(
             "episode_date": episode_date,
             "review_trading_date": trading_date,
             "expected_horizon_days": expected_days,
+            "fac_learning_identity": {
+                "setup_type": template,
+                "horizon_class": horizon,
+                "expected_horizon_days": expected_days,
+                "market_regime": regime,
+            },
         }
         payload = attach_next_round_memory_contract(
             payload,
@@ -2319,6 +2329,7 @@ def _write_trade_episode_memory(
                 "side": side,
                 "setup_type": template,
                 "horizon_class": horizon,
+                "expected_horizon_days": expected_days,
                 "market_regime": regime,
             },
             usable_memory=[
@@ -2753,11 +2764,12 @@ def _write_research_position_feedback(
             continue
         side = _recommendation_side(recommendation, snapshot)
         combo = _signal_combo_from_snapshot(snapshot)
-        horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
-        regime = _market_regime(snapshot)
-        template = _fac_setup_type(snapshot)
-        if not template:
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        template = str(fac_identity.get("setup_type") or "")
         rec_id = str(recommendation.get("id") or "")
         txs = transactions_by_recommendation.get(rec_id, [])
         executed_lots = sum(abs(_safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
@@ -3090,11 +3102,12 @@ def _write_loss_template_observation_research(
             recommendation_lookup.get(str(pair.get("open_recommendation_id") or "")) or {}
         )
         combo = _signal_combo_from_snapshot(snapshot)
-        horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
-        regime = _market_regime(snapshot)
-        template = _fac_setup_type(snapshot)
-        if not template:
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        template = str(fac_identity.get("setup_type") or "")
         key = (ticker, side, template, horizon, regime)
         grouped[key].append(pair)
         representative_snapshot.setdefault(key, snapshot)
@@ -3501,11 +3514,12 @@ def _write_fast_loss_sentinel_state(
             continue
         snapshot = _recommendation_snapshot(recommendation_lookup.get(str(pair.get("open_recommendation_id") or "")) or {})
         combo = _signal_combo_from_snapshot(snapshot)
-        horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
-        regime = _market_regime(snapshot)
-        template = _fac_setup_type(snapshot)
-        if not template:
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        template = str(fac_identity.get("setup_type") or "")
         key = (ticker, side, template, horizon, regime)
         groups[key].append(pair)
         snapshots.setdefault(key, snapshot)
@@ -4688,12 +4702,13 @@ def _learning_mechanism_policy_groups(
         ticker = str(pair.get("ticker") or "").upper()
         side = str(pair.get("side") or "").lower()
         combo = _signal_combo_from_snapshot(snapshot)
-        expected_days = _expected_horizon_days(snapshot, side)
-        horizon = _horizon_class(expected_days, snapshot)
-        regime = _market_regime(snapshot)
-        template = _fac_setup_type(snapshot)
-        if not template:
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        expected_days = _safe_int(fac_identity.get("expected_horizon_days"), 0)
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        template = str(fac_identity.get("setup_type") or "")
         item = dict(pair)
         item["setup_type"] = template
         item["signal_combo"] = combo
@@ -5412,11 +5427,12 @@ def _write_tail_loss_sentinel_state(
             position_type = str(pnl_row.get("position_type") or "").lower()
             side = "short" if "short" in position_type else "long"
         combo = _signal_combo_from_snapshot(snapshot)
-        template = _fac_setup_type(snapshot)
-        if not template:
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
-        horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
-        regime = _market_regime(snapshot)
+        template = str(fac_identity.get("setup_type") or "")
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
         evidence = {
             "ticker_daily_pnl": pnl_row,
             "loss_threshold": loss_threshold,
@@ -5865,15 +5881,16 @@ def _write_contextual_rule_calibration_state(
             continue
         side = _recommendation_side(recommendation, snapshot)
         combo = _signal_combo_from_snapshot(snapshot)
-        setup_type = _fac_setup_type(snapshot)
-        if not setup_type:
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        setup_type = str(fac_identity.get("setup_type") or "")
         scope = {
             "ticker": recommendation.get("underlying_code"),
             "side": side,
             "setup_type": setup_type,
-            "horizon_class": _horizon_class(_expected_horizon_days(snapshot, side), snapshot),
-            "market_regime": _market_regime(snapshot),
+            "horizon_class": str(fac_identity.get("horizon_class") or ""),
+            "market_regime": str(fac_identity.get("market_regime") or ""),
         }
         rules = {}
         reason = "same-scope PM lifecycle/horizon observation keeps strict validation until future evidence improves"

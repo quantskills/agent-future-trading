@@ -25,6 +25,7 @@ from tools.common.final_action_semantics import (
     validate_action_preference_family_consistency,
 )
 from tools.common.execution_trigger_semantics import CANONICAL_ENTRY_TRIGGERS
+from tools.common.learning_identity import canonical_market_regime
 from tools.agent_tools.research import research_memory_writers
 
 
@@ -102,7 +103,7 @@ def build_scope_key(
             _clean_token(ticker, "*").upper(),
             _clean_token(side, "*"),
             _clean_token(horizon_class, "unknown"),
-            _clean_token(market_regime, "unknown"),
+            canonical_market_regime(market_regime, "unknown"),
             _clean_token(setup_type, "unknown"),
             _clean_token(data_combo, "unknown")[:160],
         ]
@@ -300,7 +301,8 @@ def build_product_learning_performance_key(
         "ticker": ticker,
         "side": side,
         "horizon_class": _clean_token(sample.get("horizon_class"), "unknown"),
-        "market_regime": _clean_token(sample.get("market_regime"), "unknown"),
+        "expected_horizon_days": _safe_int(sample.get("expected_horizon_days")),
+        "market_regime": canonical_market_regime(sample.get("market_regime"), "unknown"),
         "setup_type": setup_type,
         "action_name": _clean_token(action_name, "unknown"),
         "entry_trigger": entry_trigger,
@@ -412,7 +414,7 @@ def _learning_retrieval_keys(
     ticker = str(profile_scope.get("ticker") or "*").strip().upper() or "*"
     side = _clean_token(profile_scope.get("side"), "*")
     horizon = _clean_token(profile_scope.get("horizon_class"), "*")
-    regime = _clean_token(profile_scope.get("market_regime"), "*")
+    regime = canonical_market_regime(profile_scope.get("market_regime"), "*")
     setup_type = _clean_token(profile_scope.get("setup_type"), "*")
     lane = _clean_token(action_value_lane or action_name, "*")
     exact_execution_retrieval_key = str(
@@ -595,7 +597,7 @@ def _alpha_state_completeness(profile_scope: Mapping[str, Any], action_name: str
     ticker = str(profile_scope.get("ticker") or "").strip().upper()
     side = _clean_token(profile_scope.get("side"), "*")
     horizon = _clean_token(profile_scope.get("horizon_class"), "unknown")
-    regime = _clean_token(profile_scope.get("market_regime"), "unknown")
+    regime = canonical_market_regime(profile_scope.get("market_regime"), "unknown")
     setup_type = _clean_token(profile_scope.get("setup_type"), "unknown")
     action = _clean_token(action_name, "unknown")
     missing: List[str] = []
@@ -938,7 +940,7 @@ def upsert_alpha_setup_sample_and_profile(
     side = _clean_token(sample.get("side"), "*")
     sector = str(sample.get("sector") or "unknown")
     horizon = _clean_token(sample.get("horizon_class"), "unknown")
-    regime = _clean_token(sample.get("market_regime"), "unknown")
+    regime = canonical_market_regime(sample.get("market_regime"), "unknown")
     setup_type = _clean_token(sample.get("setup_type"), "unknown")
     data_combo = _clean_token(sample.get("data_combo"), "unknown")[:180]
     scope_key = str(sample.get("scope_key") or build_scope_key(
@@ -1041,6 +1043,7 @@ def upsert_alpha_setup_sample_and_profile(
             "sector": sector,
             "side": side,
             "horizon_class": horizon,
+            "expected_horizon_days": _safe_int(sample.get("expected_horizon_days")),
             "market_regime": regime,
             "setup_type": setup_type,
             "data_combo": data_combo,
@@ -1136,6 +1139,7 @@ def upsert_alpha_setup_sample_and_profile(
             "ticker": ticker,
             "side": side,
             "horizon_class": horizon,
+            "expected_horizon_days": _safe_int(sample.get("expected_horizon_days")),
             "market_regime": regime,
             "setup_type": setup_type,
             "data_combo": data_combo,
@@ -1323,6 +1327,9 @@ def _upsert_action_values(
         payload = {
             "research_output_contract_version": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
             "scope_key": scope_key,
+            "expected_horizon_days": _safe_int(
+                profile_scope.get("expected_horizon_days")
+            ),
             "action_name": action_name,
             "canonical_action_family": canonical_family,
             "action_value_lane": action_value_lane,

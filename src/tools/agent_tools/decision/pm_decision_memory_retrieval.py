@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping
 
 from tools.common.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
 from tools.common.final_action_semantics import validate_action_preference_family_consistency
+from tools.common.learning_identity import canonical_market_regime
 
 
 _MATCH_PRIORITY = {
@@ -226,6 +227,7 @@ def retrieve_pm_memory(
             "retrieval_attempts": attempts,
         }
 
+    market_regime = canonical_market_regime(market_regime, "")
     layers = []
     if _text(setup_type):
         layers.append(

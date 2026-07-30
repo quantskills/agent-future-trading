@@ -159,12 +159,12 @@ def learned_effect_underperformance_groups(
         snapshot = _review_helpers._recommendation_snapshot(recommendation or {})
         ticker = str(pair.get("ticker") or "").upper()
         side = str(pair.get("side") or "").lower()
-        expected_days = _review_helpers._expected_horizon_days(snapshot, side)
-        horizon = _review_helpers._horizon_class(expected_days, snapshot)
-        regime = _review_helpers._market_regime(snapshot)
-        template = _review_helpers._fac_setup_type(snapshot)
-        if not template:
+        fac_identity = _review_helpers._fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        template = str(fac_identity.get("setup_type") or "")
         key = (ticker, side, template, horizon, regime)
         item = dict(pair)
         item["setup_type"] = template

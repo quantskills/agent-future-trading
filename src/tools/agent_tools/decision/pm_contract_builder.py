@@ -17,6 +17,7 @@ from tools.common.final_action_semantics import (
     filter_action_values_for_contract_learning,
 )
 from tools.common.order_semantics import build_lot_intent_consistency
+from tools.common.learning_identity import canonical_market_regime
 
 
 FINAL_ACTION_CONTRACT_VERSION = "agentquant.final_action.v1"
@@ -1043,7 +1044,7 @@ def build_final_action_contract(
         "setup_type": final_scope.get("setup_type"),
         "horizon_class": final_scope.get("horizon_class"),
         "expected_horizon_days": final_scope.get("expected_horizon_days"),
-        "market_regime": final_scope.get("market_regime"),
+        "market_regime": canonical_market_regime(final_scope.get("market_regime")),
         "invalidation_level": final_scope.get("invalidation_level"),
         "position_invalidation_level": final_scope.get("position_invalidation_level"),
         "exit_hint": final_scope.get("exit_hint"),

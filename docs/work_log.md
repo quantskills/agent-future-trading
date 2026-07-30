@@ -30,3 +30,15 @@
 （2）[完整episode身份、普通亏损复评与收益率Rank] `research_memory_writers.py`让完整episode的四项身份直接继承原开仓FAC，身份缺失时不写正式episode；`portfolio_manager.py`让原FAC未失效的普通持仓在浮亏2%且证据失败时减仓50%、浮亏4%时退出；`alpha_setup.py`与`pm_signal_fusion.py`把完整episode的平均及最差名义收益率写入action-value并用于Rank，人民币奖励保留审计。`test_phase_flow_regression.py`与`test_reviewer_learning.py`覆盖开仓身份、跨setup隔离、2%/4%复评、相同收益率同分及完整episode收益率聚合。原因：恢复持仓学习周期的一致身份、激活既有普通亏损保护，并消除不同合约和手数按人民币盈亏比较的不公平。
 
 （3）[决策工具旧测试契约同步] `test_decision_workflow_tools.py`把PM学习身份的源码字符串断言改为新机会读取当天SCC、已持仓读取原开仓FAC的行为测试，并为排名正负学习与权重测试补齐完整周期平均及最差名义收益率，人民币盈亏仅保留为审计样本。原因：同步本日持仓身份和收益率Rank生产契约，防止旧测试反向要求已删除实现或缺失正式排名输入。
+
+==========2026年07月31日==========
+
+（1）[正式学习FAC身份单源收口] `learning_identity.py`新增完整FAC学习身份与市场状态规范化公共入口；`research_review_helpers.py`、`research_learning.py`、`research_memory_writers.py`、`research_snapshot_reports.py`和`alpha_setup.py`让成交型日常持仓、execution、完整episode及其Profile、action-value、持仓反馈、setup绩效和亏损政策统一继承原开仓FAC四项身份，未交易学习继承对应当日FAC，身份不完整时不写正式学习；execution继续使用独立`execution_retrieval_key`区分执行方式。原因：完成既有FAC身份单源修改遗漏路径，禁止同一学习周期因平仓日信号或分析师重新推导而形成第二套身份。
+
+（2）[PM政策生命周期路由与市场状态规范化] `portfolio_manager.py`把新机会政策与原持仓政策分开检索和消费：空仓按当天SCC/FAC，持仓、减仓和退出按原开仓FAC，反向日先按旧周期管理；`pm_contract_builder.py`、`pm_decision_memory_retrieval.py`、`sqlite_helper.py`和`learning_contract.py`统一正式市场状态的小写下划线格式。原因：修复当天目标方向覆盖原持仓政策及同义市场状态格式不同导致精确检索降级的问题，不改变当天行情判断、排名、资金或交易规则。
+
+（3）[分析师学习实际采用摘要] `analyst_learning_context.py`只记录真正进入提示词预算的学习记录编号，`analyst_learning_calibration.py`把实际参与确定性证据校准的记录编号及技术参数政策编号和参数前后值写入现有`learning_impact_summary`，`technical.py`传递已执行的技术参数校准结果；现有AEC与signal artifact继续保存该摘要。原因：使回测后能够证明分析师实际采用了哪些学习及参数校准，不新增表、不保存完整提示词、不改变分析策略和交易权限。
+
+（4）[四项修改永久行为回归] `test_decision_workflow_tools.py`、`test_reviewer_learning.py`、`test_researcher_lifecycle_contract.py`和`test_phase_flow_regression.py`增加新机会/持仓政策路由、完整FAC身份继承、execution身份、跨setup隔离、市场状态规范化及分析师学习摘要落入AEC的行为测试。原因：用现有测试套件封闭本轮生产、落库和消费路径，防止旧夹具缺字段或同类遗漏再次通过。
+
+（5）[回测前全路径测试门] `pg_pre_backtest_acceptance.py`把决策检索、Researcher学习和Phase全链路三组行为回归纳入`pre_backtest`的`supported_business_paths`检查，`test_pre_backtest_acceptance.py`固定校验测试组完整性及任一失败令回测前报告失败。原因：使学习生产、落库、消费、排名、资金、止损和换约在用户下令回测前检测时统一验收，不接入`backtest.py`，不改变每日七项审计。

@@ -2,11 +2,94 @@
 
 研究链路的生产端、DB 落点、下游消费、PG 审计、pre-backtest fixture 与 diagnostics 边界统一锚定 `docs/matrix_chain_contract.md`；本文只说明研究与复盘机制细节。
 
-更新时间：2026-06-25
+更新时间：2026-07-30
 
 本文档定义 AgentQuant 的复盘、研究、记忆持久化和未来学习消费机制。它必须与 `docs/mechanism_multiagents.md` 的固定工作流一致，并以 `docs/matrix_field_semantics.md` 作为唯一字段语义矩阵。若本文与多智能体运行机制冲突，以固定工作流、智能体边界和字段语义矩阵为准。
 
 研究机制只服务未来交易日的结构化学习，不产生当天交易动作，不改写当天合约、成交、结算或收益。
+
+## 当前代码与回测事实快照（2026-07-30）
+
+本节不是机制设想，而是对当前生产代码与当前本地回测库的事实盘点。统计范围为配置 `f29453cd-3de9-4b2c-b41d-68022fe14272` 的 2025-07-01 至 2025-07-31 回测：23 个交易日、345 条 PM 日频决定。后续清库或继续回测后，行数会变化；对象定义、生产者和消费者应继续以代码为准。
+
+### 1. 谁产生事实，谁产生未来记忆
+
+| 环节 | 实际职责 | 是否生成未来研究记忆 |
+|---|---|---|
+| 三类分析师 | 生成当日预测证据；技术分析师在结构化输出中给出当日 `setup_type` | 否；只生成当日证据和 setup 身份 |
+| 信号收集员 | 保真汇总 AEC 为 SCC | 否 |
+| 投资组合经理 | 根据当日 SCC、持仓和历史记忆签发唯一 FAC，并记录实际消费过的学习 ID | 否；不写研究表 |
+| 交易员 | 生成成交、未触发及 `execution_learning_trace` 等执行事实 | 否；这些是 Researcher 的未来输入 |
+| 会计师 | 生成成交入账和结算事实 | 否 |
+| 复盘员 | Phase4 确定性验证交易、执行、成交和结算事实 | 否；代码明确 `reviewer_writes_action_value=False` |
+| 研究员 | 仅在 Phase4 completed 后读取已验证事实，统一生成、刷新和落库未来学习 | 是；绝大多数正式记录由确定性 writer/聚合函数生成，LLM 只参与因果候选和探索假设，不直接生成交易权限 |
+
+因此，“研究员生成记忆”不等于“LLM 自由写策略”。正式 sample、profile、action-value、policy、digest、episode 和反馈均由 Researcher 调度的确定性代码校验并落库。
+
+### 2. setup、sample、profile、action-value、policy 的关系
+
+常见生产链是：
+
+```text
+当日技术证据给出 setup_type
+-> PM 把最终交易身份冻结进 final_action_contract
+-> Researcher 将已验证事实写成 alpha_setup_sample
+-> 同作用域样本聚合为 alpha_setup_profile
+-> 再按动作 lane 聚合为 alpha_setup_action_value
+-> 达到相应条件后，部分 profile/绩效事实转成 adaptive/provisional policy
+```
+
+这是一条常见链，不表示每条 policy 都必须逐级经过以上所有对象；止损哨兵、参数校准等 policy 还可以从已验证的亏损、分析师绩效或上下文事实生成。
+
+| 概念 | 当前代码中的准确含义 | 主要生产者 | 正式消费者 | 当前行数/种类 |
+|---|---|---|---|---|
+| `setup_type` | 一笔机会采用的交易形态身份，不是收益、动作或记忆表。技术分析师正式枚举为 `trend_breakout_setup`、`trend_pullback_setup`、`range_reversal_setup`、`volatility_breakout_setup`、`failed_rebound_setup`、`unknown`；PM 将选中的 canonical setup 冻结进 FAC | 技术分析师产生当日值；PM 冻结最终值；Researcher 继承 | SCC、PM 识别当日机会；后续所有正式记忆用它隔离作用域 | 不是独立表；当前学习表实际出现 4 种有效值：趋势突破、趋势回调、波动突破、反弹失败 |
+| `alpha_setup_sample` | 一条最小学习观察，记录某个 setup 在某日发生的交易、未交易、持仓动作或执行结果 | Researcher 的 `write_alpha_setup_profiles`/`upsert_alpha_setup_sample_and_profile` | Researcher 聚合；其他智能体不直接消费原始 sample | 336 行 |
+| `alpha_setup_profile` | 同一 `ticker/side/horizon/regime/setup/data_combo` 下多条 sample 的“成绩单”，包括样本数、胜率、盈亏因子、净盈亏、置信度和生命周期状态 | Researcher 确定性聚合 sample | 分析师读取安全摘要；PM 经 `decision_memory_retrieval` 读取同 setup profile | 237 行；当前 185 个 candidate、52 个 watchlist，尚无 protected/deployable |
+| `alpha_setup_action_value` | 同一学习身份下，对某个动作 lane 的历史结果总结；回答“历史上 open/hold/reduce/exit/execution 等动作表现如何”，不是明日指令 | Researcher 在 profile 刷新时按动作分账聚合 | PM 经 `decision_memory_retrieval` 用于评分、排名、生命周期和执行偏好；分析师只读显式授权的安全校准投影 | 244 行；`execution=108`、`observe=40`、`open=38`、`hold=24`、`reduce=19`、`exit=15`。其中 124 行没有形成 action preference，表中存在不等于具备正式消费资格 |
+| `adaptive_policy_state` | 从合格历史事实导出的有时效、置信度和样本门槛的未来软规则，如参数校准、cap、probe；不是订单 | Researcher 的多个 policy writer | PM 经 `decision_memory_retrieval` 消费交易决策类 policy；技术分析师只消费 `contextual_rule_calibration:technical_parameters` | 24 行：PM 参数校准 13、技术参数校准 3、fast-candidate 4、fast-loss 4 |
+| `provisional_policy_state` | 低成熟度、可回滚的临时政策，仅允许进入 PM risk gate 的低权限校准 | Researcher | PM risk gate 经 `decision_memory_retrieval` 消费 | 当前 0 行，尚无真实消费样本 |
+
+profile 与 action-value 的区别：profile 是“这个 setup 整体成绩如何”；action-value 是“在这个 setup 下，某个具体动作历史上是否有效”。policy 与二者的区别：policy 是通过额外条件生成的未来软控制规则，只有当日证据再次验证后才能生效。
+
+### 3. 其他正式研究、辅助记录和诊断记录
+
+| 对象 | 当前用途 | 正式消费者 | 当前行数 |
+|---|---|---|---|
+| `trade_episode_memory` | 仓位从 0 开始并最终回到 0 后形成的一条完整学习周期 | Researcher 生成 sample/profile/action-value；分析师读取相对化摘要；PM 不直接读 episode 表 | 16 |
+| `no_trade_opportunity_memory` | 记录未交易原因和后续固定窗口反事实结果 | Researcher 汇总，并间接转成 sample/profile/policy；分析师读取安全摘要 | 56 |
+| `analyst_learning_digest` | 面向 technical/fundamental/commodity_news/PM 作用域的压缩学习摘要 | 三类分析师通过 `build_learning_context` 消费各自作用域；当前 `portfolio_manager` 作用域行不属于 PM 的 `decision_memory_retrieval` 正式输入 | 184：technical 83、fundamental 55、commodity_news 23、portfolio_manager 23 |
+| `analyst_performance` | 分析师在品种和周期作用域下的表现统计 | 分析师动态权重校准；Researcher 生成上下文参数政策 | 10 |
+| `setup_type_performance` | 已完成 setup 的聚合表现 | 分析师动态权重校准；Researcher 生成 policy | 6 |
+| `strategy_memory` | 按品种、方向和 signal combo 汇总的较宽策略先验 | PM 经 `decision_memory_retrieval` 用于风险门和资金控制 | 当前状态 21；历史快照 191 |
+| `research_position_feedback` | 记录 PM 是否实际声明消费学习，以及后续动作、成交和结算 | Researcher 闭环和开发验收，不直接控制交易 | 23 |
+| `signal_context_history` | 每日 SCC/FAC 等上下文事实快照 | Researcher 后续归因和聚合 | 345 |
+| `capital_deployment_state` | 每日资金利用和部署诊断 | Researcher、Reviewer 报告和开发评估；不是 PM 次日直接记忆 | 23 |
+| `exploratory_hypothesis` | Researcher LLM 生成的结构化探索假设 | 分析师可在提示词中作为“待验证假设”参考；不能授权交易 | 41，全部 candidate |
+| `causal_review_candidate` | Researcher LLM 形成的因果候选及确定性验证状态 | Researcher 和开发评估；未验证前无正式交易消费权 | 22 |
+| `researcher_llm_notes` | 保存 Researcher 因果/探索研究使用的 prompt、response 及外置 artifact，供审计和复现 | 无直接交易消费者；只有结构化、验证后的候选才能进入后续研究链 | 35 |
+| `config_learning_overlay` | 研究参数覆盖层；PM 代码通过 `apply_config_learning_overlay` 读取 | PM 配置层 | 当前 0 行，本轮没有实际参数覆盖 |
+| `learning_context_budget` | 记录每次分析师提示词选了多少学习条目、字符及丢弃量 | 审计和开发验收，不是知识记忆 | 1035，即 23 日 × 15 品种 × 3 分析师 |
+| `learning_event_log` | 研究事件总账，登记来源、日期、状态和 verifier | 审计、Researcher 和开发验收，不直接参与交易评分 | 537 |
+
+### 4. 消费边界的当前代码事实
+
+- 三类分析师会消费 `analyst_learning_digest`、相对化 episode、未交易摘要、探索假设、profile 摘要和显式授权的 action-value 安全投影；技术分析师还会消费技术参数校准 policy。学习同时进入 LLM 前提示词和 LLM 后确定性信号校对。
+- PM 的统一正式入口 `retrieve_pm_memory` 当前可返回 action-value、profile、strategy memory、adaptive policy 和 provisional policy。action-value 还按 exact、同品种同方向同周期 fallback、同品种同方向 fallback 分层；fallback 是低质量学习，不能冒充 exact 或单独支持 real/scale。
+- Trader、Auditor、Accountant、Reviewer 和 Signal Collector 不直接读取研究表。Trader 只读取 PM 已写入 FAC 的执行字段；Auditor/Accountant 只审计 FAC、账户、风险和成交结算事实。
+- `learning_event_log`、`learning_context_budget`、`researcher_llm_notes`、`capital_deployment_state` 和多数因果/排名事件属于总账、诊断或研究输入，不能仅因“有记录”就声称已经影响分析、排名、资金或交易。
+
+### 5. PM 新机会与持仓 policy 的正式路由
+
+底层 `retrieve_pm_memory` 和数据库按 `ticker/side/setup/horizon/regime/trading_date` 过滤。PM 调用方必须把两种政策用途分开：
+
+1. 当天目标方向 policy 用于评估新开、反向和新增风险，这是合法用途；
+2. 原持仓 policy 应按原开仓 FAC 身份服务 hold/reduce/exit 生命周期；
+3. 反向日先按原开仓 FAC 管理并结束旧周期；仓位归零后的新机会才按当天 SCC/FAC 建立新政策作用域。
+
+2025-07-31 的 I 多头是该路由的真实暴露样本：7 月 30 日收盘后的 I 多头 policy 在次日已具备消费资格，当天 SCC 候选方向为 short。旧实现用 short 机会检索覆盖 long 持仓 policy；现实现固定按 long 原开仓 FAC 检索持仓 policy，同时仍以当天 SCC 判断最新确认和退出证据。该日平多 2 手由独立的新仓快速止损触发，不得倒推为 policy 造成的退出。
+
+代码分别维护新机会 policy 与原持仓 policy：前者使用当天 SCC/FAC 身份并只服务新增风险；后者使用原开仓 FAC 的 side/setup/horizon/regime 并只服务原持仓周期。当天 SCC 继续提供最新确认和退出证据，但不得改写持仓学习身份。
 
 ## 一、研究机制原则
 

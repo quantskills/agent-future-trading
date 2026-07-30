@@ -37,6 +37,7 @@ from tools.common.final_action_semantics import (
     validate_action_preference_family_consistency,
 )
 from tools.common.learning_contract import CONTRACT_KEY
+from tools.common.learning_identity import formal_fac_learning_identity
 
 ANALYSTS = ("technical", "fundamental", "commodity_news")
 DEFAULT_ANALYST_HORIZON = {
@@ -1144,24 +1145,20 @@ def _fac_learning_identity(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     side = str(semantic_side or "").strip().lower()
     if side not in {"long", "short"}:
         side = str(evidence.get("scorecard_preferred_side") or "").strip().lower()
+    fac_identity = formal_fac_learning_identity(contract)
     identity = {
         "side": side,
-        "setup_type": _fac_setup_type(snapshot),
         "entry_trigger": str(contract.get("entry_trigger") or "").strip(),
-        "horizon_class": str(contract.get("horizon_class") or "").strip(),
-        "market_regime": str(contract.get("market_regime") or "").strip(),
+        **fac_identity,
     }
-    missing_fields = [
-        field_name
-        for field_name, value in identity.items()
-        if value.lower() in {"", "unknown", "*"}
-    ]
+    missing_fields = []
+    missing_fields.extend(fac_identity.get("missing_fields") or [])
     if identity["side"] not in {"long", "short"} and "side" not in missing_fields:
         missing_fields.append("side")
     return {
         **identity,
-        "complete": not missing_fields,
-        "missing_fields": sorted(missing_fields),
+        "complete": not set(missing_fields),
+        "missing_fields": sorted(set(missing_fields)),
         "source": "final_action_contract",
     }
 
@@ -1730,11 +1727,12 @@ def _completed_pairs_for_scope(
             continue
         recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
         snapshot = _recommendation_snapshot(recommendation or {})
-        horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
-        regime = _market_regime(snapshot)
-        template = _fac_setup_type(snapshot)
-        if not template:
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        template = str(fac_identity.get("setup_type") or "")
         if (
             template == expected["setup_type"]
             and horizon == expected["horizon_class"]
@@ -2057,12 +2055,12 @@ def _template_groups_from_completed_pairs(
         snapshot = _recommendation_snapshot(recommendation or {})
         ticker = str(pair.get("ticker") or "").upper()
         side = str(pair.get("side") or "").lower()
-        expected_days = _expected_horizon_days(snapshot, side)
-        horizon = _horizon_class(expected_days, snapshot)
-        regime = _market_regime(snapshot)
-        template = _fac_setup_type(snapshot)
-        if not template:
+        fac_identity = _fac_learning_identity(snapshot)
+        if not bool(fac_identity.get("complete")):
             continue
+        horizon = str(fac_identity.get("horizon_class") or "")
+        regime = str(fac_identity.get("market_regime") or "")
+        template = str(fac_identity.get("setup_type") or "")
         item = dict(pair)
         item["setup_type"] = template
         item["signal_combo"] = _signal_combo_from_snapshot(snapshot)

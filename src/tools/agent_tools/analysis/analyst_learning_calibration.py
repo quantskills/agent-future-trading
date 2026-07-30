@@ -22,6 +22,7 @@ from tools.common.final_action_semantics import (
     canonical_action_family,
     canonical_action_value_lane,
 )
+from tools.common.learning_identity import canonical_market_regime
 
 
 _DIRECTION_BY_SIDE = {
@@ -60,6 +61,7 @@ def retrieve_analyst_policy_calibration(
     """
     if not hasattr(db, "get_adaptive_policy_state"):
         return [], {"available": False, "reason": "db_method_missing"}
+    market_regime = canonical_market_regime(market_regime, "*")
     try:
         rows = db.get_adaptive_policy_state(
             config_id=config_id,
@@ -190,6 +192,7 @@ def _analyst_safe_action_value_row(row: Mapping[str, Any]) -> Dict[str, Any] | N
         payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
         product_view = payload.get("product_learning_calibration_view")
     safe_row = {
+        "source_learning_record_id": row.get("source_learning_record_id") or row.get("id"),
         "ticker": row.get("ticker"),
         "side": row.get("side"),
         "horizon_class": row.get("horizon_class"),
@@ -494,6 +497,9 @@ def _learning_impact_summary(
     broad_positive_strength: float,
     broad_negative_strength: float,
     net_adjustment: float,
+    prompt_learning_record_ids: List[str],
+    evidence_calibration_record_ids: List[str],
+    technical_parameter_calibrations: List[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     historical_support = _unique_strings(
         [_row_scope_label(row) for row in positive_rows + broad_positive_rows],
@@ -548,8 +554,55 @@ def _learning_impact_summary(
         "broad_positive_strength": round(broad_positive_strength, 4),
         "broad_negative_strength": round(broad_negative_strength, 4),
         "net_evidence_adjustment": round(net_adjustment, 4),
+        "prompt_calibration_applied": bool(prompt_learning_record_ids),
+        "prompt_learning_record_ids": prompt_learning_record_ids,
+        "evidence_calibration_applied": bool(evidence_calibration_record_ids),
+        "evidence_calibration_record_ids": evidence_calibration_record_ids,
+        "technical_parameter_calibration_applied": bool(technical_parameter_calibrations),
+        "technical_parameter_calibrations": technical_parameter_calibrations,
         "authority_boundary": "evidence_explanation_only_no_trade_authority_no_lots_no_margin_no_execution",
     }
+
+
+def _learning_row_ids(rows: Iterable[Mapping[str, Any]]) -> List[str]:
+    return _unique_strings(
+        [
+            str(row.get("source_learning_record_id") or row.get("id") or "")
+            for row in rows
+            if isinstance(row, Mapping)
+        ],
+        max_items=12,
+    )
+
+
+def _technical_parameter_calibration_summary(
+    diagnostics: Mapping[str, Any] | None,
+) -> List[Dict[str, Any]]:
+    summary: List[Dict[str, Any]] = []
+    source = diagnostics if isinstance(diagnostics, Mapping) else {}
+    for row in list(source.get("applied") or []):
+        if not isinstance(row, Mapping):
+            continue
+        changed = row.get("changed") if isinstance(row.get("changed"), Mapping) else {}
+        parameter_changes: Dict[str, Dict[str, Any]] = {}
+        for parameter, change in changed.items():
+            if not isinstance(change, Mapping):
+                continue
+            parameter_changes[str(parameter)] = {
+                "from": change.get("from"),
+                "to": change.get("to"),
+            }
+        if not parameter_changes:
+            continue
+        summary.append(
+            {
+                "policy_id": str(row.get("id") or ""),
+                "parameter_changes": parameter_changes,
+            }
+        )
+        if len(summary) >= 8:
+            break
+    return summary
 
 
 def _factor_calibration_summary(
@@ -739,6 +792,23 @@ def calibrate_signal_with_learning_context(
         broad_positive_strength=broad_positive_strength,
         broad_negative_strength=broad_negative_strength,
         net_adjustment=net_adjustment,
+        prompt_learning_record_ids=_unique_strings(
+            [
+                str(item)
+                for item in list(
+                    context.get("prompt_learning_record_ids")
+                    or context.get("selected_ids")
+                    or []
+                )
+            ],
+            max_items=12,
+        ),
+        evidence_calibration_record_ids=_learning_row_ids(matched + broad),
+        technical_parameter_calibrations=_technical_parameter_calibration_summary(
+            context.get("technical_parameter_calibration")
+            if isinstance(context.get("technical_parameter_calibration"), Mapping)
+            else {}
+        ),
     )
     signal.learning_impact_summary = impact_summary
     metadata["learning_impact_summary"] = impact_summary

@@ -9,6 +9,8 @@ and which current-day conditions are required before it can influence position.
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from tools.common.learning_identity import canonical_market_regime
+
 
 CONTRACT_KEY = "next_round_memory_contract"
 CONTRACT_VERSION = "next_round_strategy_update_v2"
@@ -22,7 +24,10 @@ def _normalize_scope(scope: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "side": str(raw.get("side") or "*").lower(),
         "setup_type": str(raw.get("setup_type") or raw.get("template") or "*"),
         "horizon_class": str(raw.get("horizon_class") or raw.get("horizon") or "*"),
-        "market_regime": str(raw.get("market_regime") or raw.get("regime") or "*"),
+        "market_regime": canonical_market_regime(
+            raw.get("market_regime") or raw.get("regime"),
+            "*",
+        ),
     }
     for key, value in raw.items():
         if key not in normalized and value not in (None, ""):

@@ -33,6 +33,7 @@ from tools.common.final_action_semantics import (
     canonical_action_family,
     canonical_action_value_lane,
 )
+from tools.common.learning_identity import canonical_market_regime
 
 class SQLiteDB(BaseDB):
     def __init__(self):
@@ -2821,6 +2822,7 @@ class SQLiteDB(BaseDB):
             if horizon_class:
                 where.append("horizon_class IN (?, '*')")
                 params.append(str(horizon_class))
+            market_regime = canonical_market_regime(market_regime, "")
             if market_regime:
                 where.append("market_regime IN (?, '*')")
                 params.append(str(market_regime))
@@ -2901,6 +2903,7 @@ class SQLiteDB(BaseDB):
             if horizon_class and str(horizon_class) != "*":
                 where.append("horizon_class IN (?, '*')")
                 params.append(str(horizon_class))
+            market_regime = canonical_market_regime(market_regime, "")
             if market_regime and str(market_regime) != "*":
                 where.append("market_regime IN (?, '*')")
                 params.append(str(market_regime))
@@ -3040,6 +3043,7 @@ class SQLiteDB(BaseDB):
             if horizon_class and str(horizon_class) != "*":
                 where.append("horizon_class IN (?, '*')")
                 params.append(str(horizon_class))
+            market_regime = canonical_market_regime(market_regime, "")
             if market_regime and str(market_regime) != "*":
                 where.append("market_regime IN (?, '*')")
                 params.append(str(market_regime))

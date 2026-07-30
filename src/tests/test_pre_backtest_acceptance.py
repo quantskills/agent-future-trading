@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from tools.agent_tools.control.pg_pre_backtest_acceptance import (
     PRE_BACKTEST_CHECK_NAMES,
+    _TEST_GROUPS,
     _data_readiness_check,
     _static_orchestration_check,
     run_pre_backtest_acceptance,
@@ -38,6 +39,60 @@ def _daily_fact(trading_date: str, contract_code: str = "RB2505") -> SimpleNames
 
 
 class PreBacktestAcceptanceTest(unittest.TestCase):
+    def test_supported_business_paths_include_full_path_behavior_suites(self):
+        modules = set(_TEST_GROUPS["supported_business_paths"])
+        self.assertTrue(
+            {
+                "src.tests.test_decision_workflow_tools",
+                "src.tests.test_reviewer_learning",
+                "src.tests.test_phase_flow_regression",
+            }.issubset(modules)
+        )
+
+    def test_any_full_path_test_failure_fails_prebacktest_gate(self):
+        failed = ProtocolCheckResult.fail_result(
+            "supported_business_paths",
+            ["pre_backtest_test_module_failure"],
+        )
+        isolated_groups = {
+            name: (("src.tests.test_phase_flow_regression",) if name == "supported_business_paths" else ())
+            for name in _TEST_GROUPS
+        }
+        with patch(
+            "tools.agent_tools.control.pg_pre_backtest_acceptance._TEST_GROUPS",
+            isolated_groups,
+        ), patch(
+            "tools.agent_tools.control.pg_pre_backtest_acceptance._run_test_group",
+            return_value=failed,
+        ):
+            report = self._run(run_test_modules=True)
+
+        self.assertEqual(report.status, "failed")
+        business_paths = next(
+            check
+            for check in report.checks
+            if check.check_name == "supported_business_paths"
+        )
+        self.assertEqual(business_paths.status, "failed")
+        self.assertIn("pre_backtest_test_module_failure", business_paths.violation_codes)
+
+    def test_full_path_test_group_loads_every_configured_module(self):
+        from tools.agent_tools.control.pg_pre_backtest_acceptance import _run_test_group
+
+        with patch.object(unittest.TextTestRunner, "run") as run:
+            run.return_value = SimpleNamespace(wasSuccessful=lambda: True)
+            result = _run_test_group(
+                "supported_business_paths",
+                _TEST_GROUPS["supported_business_paths"],
+            )
+
+        self.assertTrue(result.passed)
+        loaded_suite = run.call_args.args[0]
+        self.assertGreaterEqual(
+            loaded_suite.countTestCases(),
+            len(_TEST_GROUPS["supported_business_paths"]),
+        )
+
     def _run(self, **overrides):
         kwargs = {
             "config_path": SRC_ROOT / "config" / "dev.yaml",
