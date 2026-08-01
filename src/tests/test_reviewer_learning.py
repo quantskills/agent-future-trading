@@ -6677,13 +6677,67 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             )
 
             self.assertEqual(summary["rows"], 0)
-            self.assertEqual(summary["deactivated_rows"], 1)
+            self.assertEqual(summary["deactivated_rows"], 0)
             self.assertEqual(summary["excluded_invalidated"], 1)
             self.assertEqual(summary["excluded_incomplete_execution_basis"], 1)
             count = cursor.execute(
                 "SELECT COUNT(*) FROM adaptive_policy_state WHERE policy_type='fast_candidate_alpha' AND active=1"
             ).fetchone()[0]
-            self.assertEqual(count, 0)
+            self.assertEqual(count, 1)
+        finally:
+            conn.close()
+
+    def test_fast_candidate_deactivation_only_owns_missed_alpha_source(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            for event_id, event_type in (
+                ("event-missed", "missed_alpha_accountability"),
+                ("event-profile", "alpha_setup_fast_candidate"),
+            ):
+                cursor.execute(
+                    """
+                    INSERT INTO learning_event_log (
+                        id, config_id, trading_date, event_type, scope_type,
+                        scope_key, created_at, status
+                    ) VALUES (?, 'cfg', '2025-03-25', ?, 'ticker_side_template',
+                              'RB:long:volatility_breakout_setup', 'now', 'applied')
+                    """,
+                    (event_id, event_type),
+                )
+            cursor.executemany(
+                """
+                INSERT INTO adaptive_policy_state (
+                    id, config_id, ticker, side, setup_type, horizon_class,
+                    market_regime, policy_type, policy_action, multiplier,
+                    confidence_score, sample_count, reason, source_event_id,
+                    created_at, active
+                ) VALUES (?, 'cfg', ?, 'long', 'volatility_breakout_setup',
+                          'short', 'trend', 'fast_candidate_alpha', 'probe',
+                          0.75, 0.70, 2, 'fixture', ?, 'now', 1)
+                """,
+                [
+                    ("owned-policy", "RB", "event-missed"),
+                    ("foreign-policy", "BU", "event-profile"),
+                ],
+            )
+
+            summary = _write_missed_alpha_accountability_state(
+                cursor,
+                cfg={"learning": {"missed_alpha_accountability": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-04-10",
+            )
+
+            self.assertEqual(summary["deactivated_rows"], 1)
+            states = {
+                row["id"]: row["active"]
+                for row in cursor.execute(
+                    "SELECT id, active FROM adaptive_policy_state ORDER BY id"
+                ).fetchall()
+            }
+            self.assertEqual(states["owned-policy"], 0)
+            self.assertEqual(states["foreign-policy"], 1)
         finally:
             conn.close()
 
@@ -6871,6 +6925,88 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_alpha_setup_candidate_profile_does_not_create_fast_candidate_policy(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            now = "2025-03-10T00:00:00"
+            cursor.execute(
+                """
+                INSERT INTO alpha_setup_profile (
+                    id, config_id, ticker, side, sector, horizon_class, market_regime,
+                    setup_type, data_combo, scope_key, lifecycle_state, profile_state_hint,
+                    sample_count, trade_count, no_trade_count, win_count, loss_count,
+                    gross_profit, gross_loss, net_pnl, total_commission, profit_factor,
+                    win_rate, max_loss, avg_holding_days, confidence_score,
+                    max_position_impact, last_sample_date, created_at, updated_at,
+                    valid_until, active, payload_json
+                ) VALUES (
+                    'prof-candidate', 'cfg', 'I', 'short', 'ferrous', 'short', 'trend',
+                    'trend_breakout_setup', 'pandaai_price',
+                    'I|short|short|trend|trend_breakout_setup|pandaai_price',
+                    'candidate', 'profile_candidate', 3, 3, 0, 3, 0,
+                    6000, 0, 6000, 30, 3.0, 1.0, 0, 1.0, 0.75, 0.02,
+                    '2025-03-10', ?, ?, '2025-03-30', 1, '{}'
+                )
+                """,
+                (now, now),
+            )
+
+            result = _write_alpha_setup_policy_state(
+                cursor,
+                cfg={"learning": {"alpha_setup_policy_state": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-10",
+            )
+
+            self.assertEqual(result["rows"], 0)
+            self.assertEqual(
+                cursor.execute(
+                    "SELECT COUNT(*) FROM adaptive_policy_state WHERE policy_type='fast_candidate_alpha'"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            conn.close()
+
+    def test_no_trade_counterfactual_does_not_create_alpha_promotion(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            for index in range(5):
+                self._insert_fast_candidate_counterfactual_memory(
+                    cursor,
+                    memory_id=f"nt-promotion-{index}",
+                    trading_date=f"2025-03-{10 + index:02d}",
+                    fixed_pnl=2500.0,
+                )
+
+            rows = _write_alpha_promotion_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-04-10",
+                cfg={
+                    "learning": {
+                        "alpha_promotion": {
+                            "enabled": True,
+                            "min_sample_count": 5,
+                            "min_win_rate": 0.60,
+                            "min_net_pnl": 1000,
+                        }
+                    }
+                },
+            )
+
+            self.assertEqual(rows, 0)
+            self.assertEqual(
+                cursor.execute(
+                    "SELECT COUNT(*) FROM adaptive_policy_state WHERE policy_type='alpha_promotion'"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            conn.close()
+
     def test_alpha_setup_policy_state_skips_identity_incomplete_profile(self):
         conn = self._connection()
         try:
@@ -6941,7 +7077,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "prof-exact", "cfg", "BU", "long", "energy", "short", "trend",
                     "trend_breakout_setup", "pandaai_price",
                     "BU|long|short|trend|trend_breakout_setup|pandaai_price",
-                    "candidate", "profile_candidate", 2, 2, 0, 2, 0, 2000, 0,
+                    "protected", "controlled_probe_or_hold", 2, 2, 0, 2, 0, 2000, 0,
                     2000, 20, 2.0, 1.0, 0, 1.0, 0.7, 0.02,
                     "2025-03-10", now, now, "2025-03-30", json.dumps({}),
                 ),

@@ -42,3 +42,9 @@
 （4）[四项修改永久行为回归] `test_decision_workflow_tools.py`、`test_reviewer_learning.py`、`test_researcher_lifecycle_contract.py`和`test_phase_flow_regression.py`增加新机会/持仓政策路由、完整FAC身份继承、execution身份、跨setup隔离、市场状态规范化及分析师学习摘要落入AEC的行为测试。原因：用现有测试套件封闭本轮生产、落库和消费路径，防止旧夹具缺字段或同类遗漏再次通过。
 
 （5）[回测前全路径测试门] `pg_pre_backtest_acceptance.py`把决策检索、Researcher学习和Phase全链路三组行为回归纳入`pre_backtest`的`supported_business_paths`检查，`test_pre_backtest_acceptance.py`固定校验测试组完整性及任一失败令回测前报告失败。原因：使学习生产、落库、消费、排名、资金、止损和换约在用户下令回测前检测时统一验收，不接入`backtest.py`，不改变每日七项审计。
+
+==========2026年08月01日==========
+
+（1）[排名尾部学习信号独立生效] `pm_signal_fusion.py`让完整周期的`worst_return_on_notional`为负时独立形成尾部风险信号，不再要求该周期的平均收益同时为负；`test_phase_flow_regression.py`覆盖平均收益为正、最差收益为负时同时保留正向学习并产生尾部扣分。原因：修复盈利周期中的真实最差结果未进入排名尾部学习分的问题。
+
+（2）[未交易fast-candidate政策单源] `research_learning.py`停止由candidate/watchlist Profile生成`fast_candidate_alpha`，`research_memory_writers.py`删除未交易反事实按多周期最佳结果生成成熟`alpha_promotion`的旁路，并让固定5日未交易路径只按自身`missed_alpha_accountability`事件精确停用政策；`adaptive_policy_safety.py`拒绝错误来源fast-candidate及历史未交易反事实成熟alpha，配置删除失去生产用途的阈值；回归覆盖真实Alpha政策保持、Profile不生成fast-candidate、固定5日政策生成与来源隔离、停用归属和消费拦截。原因：消除两条政策生产路径共用同名政策、跨来源停用及未交易影子结果越权晋升成熟Alpha的问题，不改变真实成交Alpha、其他政策、排名、资金与试仓参数。

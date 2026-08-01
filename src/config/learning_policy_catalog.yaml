@@ -107,10 +107,6 @@ learning:
     enabled: true
     valid_days: 10
     max_rows_per_day: 12
-    min_candidate_trade_count: 1
-    min_candidate_net_pnl: 1000
-    min_candidate_confidence: 0.30
-    probe_multiplier: 0.75
     cap_multiplier: 0.50
   config_overlay:
     # Researcher 写入 overlay，PM 下一交易日按 allowlist 读取。
@@ -258,7 +254,6 @@ learning:
     min_sample_count: 5
     min_win_rate: 0.60
     min_net_pnl: 1000
-    min_counterfactual_pnl: 1000
     valid_days: 10
   exploratory_research:
     # Researcher 在 Phase4 后可调用 LLM 生成作用域假设；验证前只作候选先验。

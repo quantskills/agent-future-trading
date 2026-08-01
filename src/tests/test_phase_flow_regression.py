@@ -4076,6 +4076,57 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertGreater(summary["recent_tail_loss_signal"], 0.0)
         self.assertEqual(summary["not_trade_authority"], True)
 
+    def test_positive_mean_with_negative_worst_return_keeps_positive_signal_and_adds_tail_penalty(self):
+        signal = self._tradeable_signal()
+        common = {
+            "ticker": "TA",
+            "analyst_signals": [signal],
+            "market_confirmation": {"confirmation_score": 0.70},
+            "data_quality_summary": {},
+            "decision_date": "2025-03-15",
+            "config": self._scorecard_config(),
+        }
+        mixed_history = self._action_value(
+            action_preference="positive_candidate_open",
+            lane="open",
+            reward_mean=4200.0,
+            reward_sum=8400.0,
+            mean_return_on_notional=0.008977,
+            worst_return_on_notional=-0.001146,
+            sample_count=2,
+        )
+        all_positive_history = self._action_value(
+            action_preference="positive_candidate_open",
+            lane="open",
+            reward_mean=4200.0,
+            reward_sum=8400.0,
+            mean_return_on_notional=0.008977,
+            worst_return_on_notional=0.001146,
+            sample_count=2,
+        )
+
+        mixed_scorecard = build_opportunity_scorecard(
+            **common,
+            alpha_setup_action_values=[mixed_history],
+        )
+        all_positive_scorecard = build_opportunity_scorecard(
+            **common,
+            alpha_setup_action_values=[all_positive_history],
+        )
+
+        mixed_components = mixed_scorecard["short"]["opportunity_score_components"]
+        mixed_summary = mixed_scorecard["short"]["learning_adjustment_summary"]
+        self.assertGreater(mixed_components["positive_learning"], 0.0)
+        self.assertEqual(mixed_components["negative_learning"], 0.0)
+        self.assertLess(mixed_components["recent_tail_loss_penalty"], 0.0)
+        self.assertGreater(mixed_summary["positive_learning_signal"], 0.0)
+        self.assertEqual(mixed_summary["negative_learning_signal"], 0.0)
+        self.assertGreater(mixed_summary["recent_tail_loss_signal"], 0.0)
+        self.assertLess(
+            sum(mixed_components.values()),
+            sum(all_positive_scorecard["short"]["opportunity_score_components"].values()),
+        )
+
 
 class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
     class _PMTestDB:
@@ -7204,7 +7255,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "confidence_score": 0.80,
                 "sample_count": 4,
                 "payload": {
+                    "evidence": {"source": "missed_opportunity_counterfactual"},
                     "next_round_memory_contract": {
+                        "memory_type": "missed_alpha_accountability",
                         "status": "candidate",
                         "maturity_state": "fast_candidate_alpha",
                         "position_authority": "probe_or_small_setup_only_after_current_confirmation",
@@ -7259,7 +7312,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "confidence_score": 0.75,
                 "sample_count": "not-a-number",
                 "payload": {
+                    "evidence": {"source": "missed_opportunity_counterfactual"},
                     "next_round_memory_contract": {
+                        "memory_type": "missed_alpha_accountability",
                         "status": "candidate",
                         "maturity_state": "fast_candidate_alpha",
                         "position_authority": "probe_or_small_setup_only_after_current_confirmation",
@@ -7272,6 +7327,64 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["adaptive_policy_runtime_decision"]["sample_count"], 0)
         self.assertEqual(trace["allowed_count"], 1)
+
+    def test_fast_candidate_alpha_rejects_profile_origin(self):
+        rows, trace = filter_adaptive_policy_state_for_pm([
+            {
+                "ticker": "RB",
+                "side": "long",
+                "setup_type": "trend_breakout_setup",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "policy_type": "fast_candidate_alpha",
+                "policy_action": "probe",
+                "sample_count": 4,
+                "payload": {
+                    "evidence": {"source": "alpha_setup_profile"},
+                    "next_round_memory_contract": {
+                        "memory_type": "fast_candidate_alpha",
+                        "status": "candidate",
+                        "maturity_state": "alpha_setup_fast_candidate",
+                        "position_authority": "analysis_prior_only",
+                        "max_position_impact": "no_direct_position_impact",
+                    },
+                },
+            }
+        ])
+
+        self.assertEqual(rows, [])
+        self.assertEqual(trace["blocked_count"], 1)
+
+    def test_counterfactual_no_trade_cannot_release_mature_alpha(self):
+        rows, trace = filter_adaptive_policy_state_for_pm([
+            {
+                "ticker": "CF",
+                "side": "long",
+                "setup_type": "trend_breakout_setup",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "policy_type": "alpha_promotion",
+                "policy_action": "protect",
+                "sample_count": 8,
+                "payload": {
+                    "status": "applied",
+                    "evidence": {"source": "no_trade_counterfactual_results"},
+                    "next_round_memory_contract": {
+                        "memory_type": "alpha_promotion",
+                        "status": "applied",
+                        "maturity_state": "validated_counterfactual_alpha_memory",
+                        "position_authority": "pm_auditor_conditioned",
+                        "max_position_impact": "may_support_alpha_scaling_inside_20pct_cap",
+                    },
+                },
+            }
+        ])
+
+        self.assertEqual(rows, [])
+        self.assertEqual(
+            trace["blocked_examples"][0]["reason"],
+            "counterfactual_no_trade_cannot_create_mature_alpha_promotion",
+        )
 
     def test_final_action_contract_is_single_structured_trade_truth(self):
         contract = _build_final_action_contract(

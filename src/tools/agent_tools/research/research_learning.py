@@ -1599,11 +1599,7 @@ def _write_alpha_setup_policy_state(
     valid_until = _review_helpers._valid_until(trading_day, valid_days)
     now = _review_helpers._utc_now()
     max_rows = max(1, _review_helpers._safe_int(policy_cfg.get("max_rows_per_day"), 12))
-    min_candidate_net_pnl = _review_helpers._safe_float(policy_cfg.get("min_candidate_net_pnl"), 1000.0)
-    min_candidate_confidence = _review_helpers._safe_float(policy_cfg.get("min_candidate_confidence"), 0.30)
-    min_candidate_trade_count = max(1, _review_helpers._safe_int(policy_cfg.get("min_candidate_trade_count"), 1))
     cap_multiplier = max(0.0, min(1.0, _review_helpers._safe_float(policy_cfg.get("cap_multiplier"), 0.50)))
-    probe_multiplier = max(0.0, min(1.0, _review_helpers._safe_float(policy_cfg.get("probe_multiplier"), 0.75)))
 
     cursor.execute(
         """
@@ -1705,18 +1701,6 @@ def _write_alpha_setup_policy_state(
             multiplier = cap_multiplier
             reason = "negative same-scope alpha setup expectancy requires cap or repair evidence"
             maturity_state = "alpha_setup_negative_expectancy"
-        elif (
-            state in {"candidate", "watchlist"}
-            and trade_count >= min_candidate_trade_count
-            and net_pnl >= min_candidate_net_pnl
-            and confidence >= min_candidate_confidence
-        ):
-            policy_type = "fast_candidate_alpha"
-            policy_action = "probe"
-            multiplier = probe_multiplier
-            reason = "early positive alpha setup can receive future same-scope tiny probe"
-            maturity_state = "alpha_setup_fast_candidate"
-            event_type = "alpha_setup_fast_candidate"
         else:
             skipped += 1
             continue

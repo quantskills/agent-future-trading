@@ -4226,11 +4226,16 @@ def _write_missed_alpha_accountability_state(
     qualified_scope_keys = {key for _, key, _ in candidates}
     cursor.execute(
         """
-        SELECT id, ticker, side, setup_type, horizon_class, market_regime
-        FROM adaptive_policy_state
-        WHERE config_id = ?
-          AND policy_type = 'fast_candidate_alpha'
-          AND active = 1
+        SELECT aps.id, aps.source_event_id, aps.ticker, aps.side,
+               aps.setup_type, aps.horizon_class, aps.market_regime
+        FROM adaptive_policy_state aps
+        JOIN learning_event_log event
+          ON event.id = aps.source_event_id
+         AND event.config_id = aps.config_id
+         AND event.event_type = 'missed_alpha_accountability'
+        WHERE aps.config_id = ?
+          AND aps.policy_type = 'fast_candidate_alpha'
+          AND aps.active = 1
         """,
         (config_id,),
     )
@@ -4246,19 +4251,25 @@ def _write_missed_alpha_accountability_state(
         )
         if policy_scope_key in qualified_scope_keys:
             continue
-        deactivated_rows += _deactivate_adaptive_policy_state(
-            cursor,
-            config_id=config_id,
-            scope={
-                "ticker": policy_scope_key[0],
-                "side": policy_scope_key[1],
-                "setup_type": policy_scope_key[2],
-                "horizon_class": policy_scope_key[3],
-                "market_regime": policy_scope_key[4],
-            },
-            policy_type="fast_candidate_alpha",
-            reason="fixed-horizon signed evidence no longer qualifies this fast candidate",
+        cursor.execute(
+            """
+            UPDATE adaptive_policy_state
+            SET active = 0,
+                reason = ?
+            WHERE id = ?
+              AND config_id = ?
+              AND source_event_id = ?
+              AND policy_type = 'fast_candidate_alpha'
+              AND active = 1
+            """,
+            (
+                "fixed-horizon signed evidence no longer qualifies this fast candidate",
+                policy.get("id"),
+                config_id,
+                policy.get("source_event_id"),
+            ),
         )
+        deactivated_rows += int(cursor.rowcount or 0)
 
     for net_counterfactual, key, items in candidates[:max_rows]:
         ticker, side, template, horizon, regime = key
@@ -5666,132 +5677,6 @@ def _write_alpha_promotion_state(
         )
         inserted += 1
 
-    counterfactual_min_pnl = _safe_float(alpha_cfg.get("min_counterfactual_pnl"), min_net_pnl)
-    cursor.execute(
-        '''
-        SELECT *
-        FROM no_trade_opportunity_memory
-        WHERE config_id = ?
-          AND classification = 'missed_opportunity'
-          AND counterfactual_results_json IS NOT NULL
-        ORDER BY trading_date DESC
-        LIMIT 200
-        ''',
-        (config_id,),
-    )
-    counterfactual_groups: Dict[Tuple[str, str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
-    for row in cursor.fetchall():
-        item = dict(row)
-        results = _json_loads(item.get("counterfactual_results_json")) or []
-        best_pnl = max([_safe_float(result.get("counterfactual_pnl")) for result in results if isinstance(result, dict)] or [0.0])
-        if best_pnl < counterfactual_min_pnl:
-            continue
-        counterfactual_groups[
-            (
-                str(item.get("ticker") or "*"),
-                str(item.get("side") or "*"),
-                str(item.get("setup_type") or "*"),
-                str(item.get("horizon_class") or "*"),
-                str(item.get("market_regime") or "*"),
-            )
-        ].append({**item, "best_counterfactual_pnl": best_pnl})
-    for (ticker, side, template, horizon, regime), items in counterfactual_groups.items():
-        if len(items) < min_samples:
-            continue
-        net_counterfactual = sum(_safe_float(item.get("best_counterfactual_pnl")) for item in items)
-        if net_counterfactual < min_net_pnl:
-            continue
-        confidence = min(0.90, 0.45 + len(items) / 20.0 + min(0.20, net_counterfactual / 50000.0))
-        evidence = {
-            "source": "no_trade_counterfactual_results",
-            "sample_count": len(items),
-            "net_counterfactual_pnl": net_counterfactual,
-            "counterfactual_memory_ids": [item.get("id") for item in items[:20]],
-            "confidence_score": confidence,
-        }
-        policy_payload = _policy_contract_payload(
-            policy_type="alpha_promotion",
-            policy_action="protect",
-            reason="positive alpha promotion from missed-opportunity counterfactual results",
-            multiplier=1.0,
-            maturity_state="validated_counterfactual_alpha_memory",
-            scope={
-                "ticker": ticker,
-                "side": side,
-                "setup_type": template,
-                "horizon_class": horizon,
-                "market_regime": regime,
-            },
-            evidence=evidence,
-        )
-        event_id = _insert_learning_event(
-            cursor,
-            config_id=config_id,
-            trading_date=trading_date,
-            event_type="alpha_promotion_counterfactual",
-            scope_type="ticker_side_template",
-            scope_key=f"{ticker}:{side}:{template}",
-            evidence=evidence,
-            action={
-                "policy_action": "protect",
-                "multiplier": 1.0,
-                "valid_until": valid_until,
-                CONTRACT_KEY: policy_payload[CONTRACT_KEY],
-            },
-            status="applied",
-        )
-        cursor.execute(
-            '''
-            INSERT INTO adaptive_policy_state (
-                id, config_id, ticker, side, setup_type, horizon_class, market_regime,
-                policy_type, policy_action, multiplier, confidence_score, sample_count,
-                reason, source_event_id, created_at, valid_until, payload_json, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'alpha_promotion', 'protect', 1.0, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(config_id, ticker, side, setup_type, horizon_class, market_regime, policy_type)
-            DO UPDATE SET
-                policy_action=excluded.policy_action,
-                multiplier=excluded.multiplier,
-                confidence_score=CASE
-                    WHEN adaptive_policy_state.confidence_score > excluded.confidence_score
-                    THEN adaptive_policy_state.confidence_score
-                    ELSE excluded.confidence_score
-                END,
-                sample_count=CASE
-                    WHEN adaptive_policy_state.sample_count > excluded.sample_count
-                    THEN adaptive_policy_state.sample_count
-                    ELSE excluded.sample_count
-                END,
-                reason=excluded.reason,
-                source_event_id=excluded.source_event_id,
-                created_at=excluded.created_at,
-                valid_until=excluded.valid_until,
-                payload_json=excluded.payload_json,
-                active=1
-            ''',
-            (
-                str(uuid.uuid4()),
-                config_id,
-                ticker,
-                side,
-                template,
-                horizon,
-                regime,
-                confidence,
-                len(items),
-                "positive alpha promotion from missed-opportunity counterfactual results",
-                event_id,
-                now,
-                valid_until,
-                _json_dumps(policy_payload),
-            ),
-        )
-        _upsert_adaptive_policy_source_trading_date(
-            cursor,
-            config_id=config_id,
-            source_event_id=event_id,
-            source_trading_date=trading_date,
-        )
-        inserted += 1
     return inserted
 
 def _write_contextual_rule_calibration_state(

@@ -91,6 +91,11 @@ def _contract_forbids_position_impact(contract: Mapping[str, Any]) -> bool:
     return False
 
 
+def _evidence_source(payload: Mapping[str, Any]) -> str:
+    evidence = payload.get("evidence")
+    return _lower(evidence.get("source")) if isinstance(evidence, Mapping) else ""
+
+
 def adaptive_policy_runtime_decision(row: Mapping[str, Any]) -> Dict[str, Any]:
     """Classify whether one adaptive-policy row may affect PM behavior.
 
@@ -146,6 +151,10 @@ def adaptive_policy_runtime_decision(row: Mapping[str, Any]) -> Dict[str, Any]:
     if not _policy_type_allowed_action(policy_type, action):
         result["reason"] = "unknown_or_disallowed_policy_action"
         return result
+    evidence_source = _evidence_source(payload)
+    if policy_type == "alpha_promotion" and evidence_source == "no_trade_counterfactual_results":
+        result["reason"] = "counterfactual_no_trade_cannot_create_mature_alpha_promotion"
+        return result
     if policy_type.startswith("contextual_rule_calibration") and action == "calibrate":
         if validation_status and validation_status not in VALIDATED_RULE_STATUSES:
             result["reason"] = "contextual_rule_calibration_not_validated"
@@ -158,6 +167,17 @@ def adaptive_policy_runtime_decision(row: Mapping[str, Any]) -> Dict[str, Any]:
     if policy_type in CANDIDATE_POLICY_TYPES:
         if action not in PROBE_ACTIONS:
             result["reason"] = "candidate_policy_not_probe_or_watchlist"
+            return result
+        if (
+            evidence_source != "missed_opportunity_counterfactual"
+            or _lower(contract.get("memory_type")) != "missed_alpha_accountability"
+            or maturity != "fast_candidate_alpha"
+            or _lower(contract.get("position_authority"))
+            != "probe_or_small_setup_only_after_current_confirmation"
+            or _lower(contract.get("max_position_impact"))
+            != "same_scope_probe_or_small_trade_only"
+        ):
+            result["reason"] = "fast_candidate_alpha_invalid_provenance_or_authority"
             return result
         result.update({"allowed": True, "decision": "candidate_probe_only", "reason": "fast_candidate_alpha_probe_only"})
         return result

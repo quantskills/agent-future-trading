@@ -661,11 +661,11 @@ def _action_value_learning_summary(
             positive_learning_signal += positive_strength
             if not strongest_positive or positive_strength > _safe_float(strongest_positive.get("weight"), 0.0):
                 strongest_positive = summary_ref
+        if is_tail_loss:
+            recent_tail_loss_signal += tail_strength
         if is_negative:
             negative_count += 1
             negative_learning_signal += negative_strength
-            if is_tail_loss:
-                recent_tail_loss_signal += tail_strength
             if not strongest_negative or negative_strength > _safe_float(strongest_negative.get("weight"), 0.0):
                 strongest_negative = {
                     **summary_ref,
