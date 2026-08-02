@@ -200,8 +200,9 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 - `consumer_scope`；
 - `learning_lane`；
 - `memory_side_role`；
-- `reward_sum`、`reward_mean`，保留既有 action-value 生命周期分类、升层门槛和人民币财务审计用途，不进入 Rank；
-- `mean_return_on_notional`、`worst_return_on_notional`、`episode_return_on_notional_count`，供 PM Rank 的正负及尾部学习信号；
+- `reward_sum`、`reward_mean`，保留既有 action-value 生命周期分类、升层门槛和人民币财务审计用途，不进入分析师开仓学习强度、PM Rank、仓位学习方向或触发确认等级；
+- `mean_return_on_notional`、`worst_return_on_notional`、`episode_return_on_notional_count`，供分析师开仓学习强度、PM Rank、仓位学习、尾部学习和触发确认统一读取手续费后名义收益率；
+- `latest_complete_episode_return_on_notional`、`latest_complete_episode_date`、`latest_complete_episode_outcome`，供同完整作用域最新亏损优先撤销分析师与 PM 旧正向加分；
 - `sample_count`；
 - `last_sample_date`；
 - `valid_until`；
@@ -222,7 +223,7 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 
 技术面分析师额外保留一项专业机制：在 LLM 调用前，根据当前可见价格形成初始自适应参数和初始 `market_regime`，再读取过去有效、作用域匹配且经过验证的 `contextual_rule_calibration:technical_parameters`，有界调整 EMA、RSI 和 Bollinger 参数，并用校准后的参数重新计算最终技术指标和 `technical_context`。该机制不直接修改 `signal`、`opportunity_state`、触发、手数、rank、预算和交易权限。
 
-完整持仓 episode 进入分析师提示词时，只投影结构化的相对结构失效距离、原始 ATR 距离、预期/实际持有期、最终退出原因和已结算结果；其检索继续服从既有 ticker/sector/horizon 范围和 T+1 边界，历史开仓价、历史结构价等绝对价格不得复制到当日信号，旧 episode 自由文本不得作为回退来源。正式 action-value 只有在同品种、严格早于当日、有效期合法、canonical 语义完整，且其顶层 `consumer_scope=pm_learning`、内嵌 `signal_calibration.contract_version` 合法、内嵌 `consumer_scope=analyst_calibration` 并明确允许 `analysis_team` 使用时，才投影为不含原始学习 ID、reward、rank、手数和保证金的提示词摘要；similar、weak、incomplete、counterfactual prior 不进入该投影。
+完整持仓 episode 进入分析师提示词时，只投影结构化的相对结构失效距离、原始 ATR 距离、预期/实际持有期、最终退出原因和已结算结果；其检索继续服从既有 ticker/sector/horizon 范围和 T+1 边界，历史开仓价、历史结构价等绝对价格不得复制到当日信号，旧 episode 自由文本不得作为回退来源。正式 action-value 只有在同品种、严格早于当日、有效期合法、canonical 语义完整，且其顶层 `consumer_scope=pm_learning`、内嵌 `signal_calibration.contract_version` 合法、内嵌 `consumer_scope=analyst_calibration` 并明确允许 `analysis_team` 使用时，才投影为不含原始学习 ID、人民币reward、rank、手数和保证金的提示词摘要；该摘要保留`mean_return_on_notional`与最新完整周期收益率。分析师校准强度只按手续费后名义收益率、样本数、置信度和胜率计算；同完整作用域最新完整周期亏损时，正式action-value的负向校准优先撤销旧正向Profile校准。similar、weak、incomplete、counterfactual prior 不进入该投影。
 
 分析校准先检索当前精确 `market_regime`。只有精确结果没有形成任何安全投影、且当前方向明确时，才允许读取同品种、同方向、同周期的跨 regime 正式摘要；该摘要以内部 `retrieval_match_level=cross_regime_same_ticker_side_horizon` 标识并按低权重进入分析校准，当前 regime 证据始终优先。技术参数 overlay 仍严格要求精确 regime，不使用该回退，也不放宽 PM 的正式学习检索。
 
@@ -281,13 +282,15 @@ signal_collection_contract
 
 当前 AEC → SCC → PM 的证据融合来自当日正式预测证据及确定性融合函数，不来自 `evidence_fusion_attribution` 研究记录。后者目前没有正式消费端，不能用当日融合通路反推其学习闭环已经成立。
 
-研究记忆只影响评分分项、排序分项、仓位生命周期解释和执行 profile 偏好，不能单独创造交易机会。当前触发不成立时，正向历史只能支持观察或条件监控；当前证据强但没有真实历史时，历史分项按冷启动中性处理；当前证据强但历史亏损明确时，排名必须降级并写入 `capital_allocation_reason`。
+研究记忆只影响评分分项、排序分项、仓位生命周期解释和执行 profile 偏好，不能单独创造交易机会。`candidate_quality`仍由当日机会分、触发和失效边界形成，学习只能先进入唯一机会分；同完整作用域最新完整周期亏损时，旧 `positive_learning`、正向 Profile 加分和 positive open seed 立即失效，但当日强证据仍可沿既有 exploration probe 验证。当前触发不成立时，正向历史只能支持观察或条件监控；当前证据强但没有真实历史时，历史分项按冷启动中性处理；当前证据强但历史亏损明确时，排名必须降级并写入 `capital_allocation_reason`。
+
+策略失效不新增状态机：同 ticker、side、setup、horizon、regime 的最近最多5个手续费后完整周期达到既有 `cap_min_samples` 且平均 `return_on_notional<0` 时，复用 `capped` 撤销 real/scale 放大；新 probe 改善该滚动均值后，再由既有 watchlist/protected/deployable 样本、胜率、盈利因子和收益门槛恢复。人民币盈亏继续用于财务事实和既有生命周期审计，不得重新进入 Rank 或仓位学习方向判断。
 
 PM 的决策学习生命周期与 Trader 的条件执行生命周期必须分开。`current_lots=0 -> target_lots!=0` 的条件 probe 在 PM 中仍使用 open/add 决策学习并参加新增风险 rank，但 `requires_intraday_confirmation` 继续要求 Trader 等待触发；只有手数不变且仅保留监控的最终合约才使用 conditional_monitor 决策学习。正式学习进入 `learning_used` 只证明 PM 消费事实，不证明合约一定获预算、通过审计、触发或成交。
 
 对最终 `hold/reduce/exit` 合约，生命周期匹配只是必要条件。只有某条正式 action-value 的精确 ID 被对应软生命周期控制选中、实际改变了最终动作或仓位比例，并且该影响没有被后续规则覆盖，才允许同时进入最终 `decision_learning_rows` 与 `learning_used.alpha_setup_action_values`。唯一窄桥接是：canonical、`pm_learning` 的负向 hold 记录确实使同方向持仓比例下降时，可保持原 hold family/lane 和精确 ID 进入最终 reduce FAC；它不得被重标为 reduce，也不得把其他 hold 记录全局放行。结构/ATR 止损、明确技术反转、基本面中期反向和其他独立确定性生命周期规则即使得到同 lane 历史记录，也不得把该记录写成实际消费学习。
 
-投资组合经理可以消费 execution action-value，但只能把它转成未来最终合约里的合约化执行字段。对入场学习，只有同品种、同方向、同 setup、同 canonical trigger 的正式 canonical open/add `entry_quality_outcome.trigger_confirmation_adjustment`，或当日结构化 weak-conflict 权限，才允许形成最终合约的 `trigger_confirmation_adjustment`；reason 文本、similar/weak/incomplete prior 不得产生该字段。交易员只读 `final_action_contract` 中的 `execution_profile/entry_trigger/trigger_confirmation_adjustment/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`。
+投资组合经理可以消费 execution action-value，但只能把它转成未来最终合约里的合约化执行字段。对入场学习，只有同品种、同方向、同 setup、同 canonical trigger 的正式 canonical open/add `entry_quality_outcome.trigger_confirmation_adjustment`，或当日结构化 weak-conflict 权限，才允许形成最终合约的 `trigger_confirmation_adjustment`；开仓episode的正负、`support_weight/penalty_weight`和确认等级只按手续费后`return_on_notional`生成，人民币盈亏只保留审计与生命周期统计。reason 文本、similar/weak/incomplete prior 不得产生该字段。交易员对 stronger/strict 只在现有 FAC 路径内追加下一根完整15分钟线的价格延续与相对量能确认，standard 保持原触发；交易员仍只读 `final_action_contract` 中的 `execution_profile/entry_trigger/trigger_confirmation_adjustment/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`，也不新增方向、手数或退出权限。
 
 ## 七、交易员、会计师、复盘员与研究边界
 

@@ -478,6 +478,10 @@ def select_intraday_execution(
 
         initial_trigger_bar = signal_bar
         confirmed_signal_bar = signal_bar
+        volume_confirmation: Dict[str, Any] = {
+            "required": False,
+            "passed": None,
+        }
         if requires_stronger_trigger_confirmation(trigger_confirmation_adjustment):
             next_index = signal_index + 1
             if next_index >= len(signal_bars_for_trigger):
@@ -546,6 +550,14 @@ def select_intraday_execution(
                         required_checks.append(follow_close < follow_vwap)
                     follow_through = bool(required_checks and all(required_checks))
             if not follow_through:
+                continue
+            volume_confirmation = _stronger_confirmation_volume_check(
+                signal_bars=normalized_signal_bars,
+                initial_trigger_bar=initial_trigger_bar,
+                follow_bar=follow_bar,
+                config=config,
+            )
+            if not bool(volume_confirmation.get("passed")):
                 continue
             confirmed_signal_bar = follow_bar
             signal_close = follow_close
@@ -637,6 +649,7 @@ def select_intraday_execution(
                 "execution_bars": len(normalized_execution_bars),
                 "chase_check": chase_check,
                 "trigger_confirmation_adjustment": trigger_confirmation_adjustment,
+                "volume_confirmation": volume_confirmation,
                 "initial_trigger_datetime": initial_trigger_bar["dt"].strftime("%Y-%m-%d %H:%M:%S"),
             },
             source=BasePriceSource.INTRADAY_NEXT_1M_OPEN,
@@ -963,6 +976,68 @@ def _vwap(bars: List[Dict[str, Any]]) -> Optional[float]:
     if close_count > 0:
         return close_sum / close_count
     return None
+
+
+def _stronger_confirmation_volume_check(
+    *,
+    signal_bars: List[Dict[str, Any]],
+    initial_trigger_bar: Dict[str, Any],
+    follow_bar: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Require participated follow-through only on PM-strengthened entries."""
+    lookback_bars = max(
+        1,
+        int(config.get("stronger_confirmation_volume_lookback_bars", 4) or 4),
+    )
+    min_ratio = max(
+        0.0,
+        float(config.get("stronger_confirmation_min_volume_ratio", 1.0) or 1.0),
+    )
+    prior_volumes = [
+        max(0.0, _float(bar.get("volume"), 0.0) or 0.0)
+        for bar in signal_bars
+        if bar["dt"] < initial_trigger_bar["dt"]
+    ][-lookback_bars:]
+    prior_volumes = [value for value in prior_volumes if value > 0.0]
+    initial_volume = max(
+        0.0,
+        _float(initial_trigger_bar.get("volume"), 0.0) or 0.0,
+    )
+    follow_volume = max(0.0, _float(follow_bar.get("volume"), 0.0) or 0.0)
+    reference_volume = (
+        sum(prior_volumes) / len(prior_volumes)
+        if prior_volumes
+        else None
+    )
+    two_bar_average_volume = (initial_volume + follow_volume) / 2.0
+    comparable_baseline_available = bool(
+        reference_volume is not None and reference_volume > 0.0
+    )
+    passed = bool(
+        initial_volume > 0.0
+        and follow_volume > 0.0
+        and (
+            not comparable_baseline_available
+            or two_bar_average_volume >= float(reference_volume) * min_ratio
+        )
+    )
+    return {
+        "required": True,
+        "passed": passed,
+        "lookback_bars": lookback_bars,
+        "reference_volume": reference_volume,
+        "initial_trigger_volume": initial_volume,
+        "follow_through_volume": follow_volume,
+        "two_bar_average_volume": two_bar_average_volume,
+        "min_volume_ratio": min_ratio,
+        "comparable_baseline_available": comparable_baseline_available,
+        "method": (
+            "initial_and_follow_average_vs_prior_completed_signal_average"
+            if comparable_baseline_available
+            else "nonzero_initial_and_follow_without_comparable_prior_signal_bar"
+        ),
+    }
 
 
 def _passes_chase_filter(

@@ -241,6 +241,8 @@ execution:
     opening_range_minutes: 30
     require_complete_opening_range: true
     min_execution_volume: 1
+    stronger_confirmation_volume_lookback_bars: 4
+    stronger_confirmation_min_volume_ratio: 1.0
     max_chase_ratio: 0.015
     finalize_after: "15:00:00"
     loop_check_interval_seconds: 300

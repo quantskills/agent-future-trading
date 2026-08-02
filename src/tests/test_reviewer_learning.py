@@ -69,6 +69,7 @@ from tools.agent_tools.research.research_learning import (
 )
 from tools.common.alpha_setup import (
     _action_preference_from_stats,
+    classify_lifecycle,
     compact_product_learning_performance_key_for_analyst,
     upsert_alpha_setup_sample_and_profile,
 )
@@ -8425,6 +8426,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "pnl_source": "trade_episode_memory",
                     "episode_net_pnl": 3180.0,
                     "episode_reward_source": "trade_episode_memory",
+                    "return_on_notional": 0.0318,
                 },
             }
 
@@ -8469,6 +8471,18 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(
                 action_value_payload["entry_quality_outcome"]["entry_quality_verdict"],
                 "entry_quality_supported",
+            )
+            self.assertEqual(
+                action_value_payload["latest_complete_episode_return_on_notional"],
+                0.0318,
+            )
+            self.assertEqual(
+                action_value_payload["latest_complete_episode_date"],
+                "2025-03-20",
+            )
+            self.assertEqual(
+                action_value_payload["latest_complete_episode_outcome"],
+                "profit",
             )
         finally:
             conn.close()
@@ -8525,6 +8539,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "pnl_source": "trade_episode_memory",
                     "episode_net_pnl": -2620.0,
                     "episode_reward_source": "trade_episode_memory",
+                    "return_on_notional": -0.0062,
                 },
             }
 
@@ -8542,17 +8557,235 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             ).fetchone()
             payload = load_externalized_json(row["payload_json"])
             outcome = payload["entry_quality_outcome"]
-            self.assertEqual(outcome["entry_quality_verdict"], "entry_tail_loss_revalidate")
-            self.assertEqual(outcome["trigger_quality_verdict"], "trigger_tail_loss_revalidate")
-            self.assertEqual(outcome["trigger_confirmation_adjustment"], "strict_confirmation_required")
+            self.assertEqual(outcome["entry_quality_verdict"], "entry_loss_revalidate")
+            self.assertEqual(outcome["trigger_quality_verdict"], "trigger_loss_revalidate")
+            self.assertEqual(outcome["trigger_confirmation_adjustment"], "stronger_confirmation_required")
             self.assertTrue(outcome["loss_episode"])
-            self.assertTrue(outcome["tail_loss_episode"])
+            self.assertFalse(outcome["tail_loss_episode"])
+            self.assertEqual(outcome["return_on_notional"], -0.0062)
+            self.assertEqual(
+                outcome["learning_economics_basis"],
+                "after_fee_return_on_notional",
+            )
             self.assertEqual(outcome["trigger_key"], "vwap_pullback_support")
             self.assertIn("capital_priority_score", outcome["affects"])
             self.assertTrue(outcome["future_only"])
             self.assertEqual(
                 payload["product_learning_performance_key"]["entry_quality_outcome"]["entry_quality_verdict"],
-                "entry_tail_loss_revalidate",
+                "entry_loss_revalidate",
+            )
+            self.assertEqual(
+                payload["latest_complete_episode_return_on_notional"],
+                -0.0062,
+            )
+            self.assertEqual(payload["latest_complete_episode_outcome"], "loss")
+        finally:
+            conn.close()
+
+    def test_recent_complete_episode_expectancy_caps_and_recovers_through_existing_states(self):
+        cfg = {
+            "learning": {
+                "alpha_setup_profile": {
+                    "cap_min_samples": 2,
+                    "min_samples_protected": 4,
+                    "min_samples_deployable": 7,
+                    "protected_min_net_pnl": 800,
+                    "deployable_min_net_pnl": 2500,
+                }
+            }
+        }
+        common = {
+            "sample_count": 7,
+            "trade_count": 7,
+            "win_rate": 0.60,
+            "net_pnl": 3000.0,
+            "profit_factor": 1.30,
+            "max_loss": -500.0,
+        }
+        capped = classify_lifecycle(
+            {
+                **common,
+                "recent_complete_episode_count": 5,
+                "recent_mean_return_on_notional": -0.002,
+            },
+            cfg,
+        )
+        recovered = classify_lifecycle(
+            {
+                **common,
+                "recent_complete_episode_count": 5,
+                "recent_mean_return_on_notional": 0.004,
+            },
+            cfg,
+        )
+
+        self.assertEqual(capped["lifecycle_state"], "capped")
+        self.assertEqual(
+            capped["reason"],
+            "same_scope_recent_return_on_notional_negative",
+        )
+        self.assertTrue(capped["recent_negative_expectancy"])
+        self.assertEqual(recovered["lifecycle_state"], "deployable")
+        self.assertFalse(recovered["recent_negative_expectancy"])
+
+    def test_entry_confirmation_adjustment_is_notional_return_invariant(self):
+        def write_episode(
+            cursor,
+            *,
+            config_id: str,
+            ticker: str,
+            lots: int,
+            multiplier: float,
+            net_pnl: float,
+        ):
+            return upsert_alpha_setup_sample_and_profile(
+                cursor,
+                cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                config_id=config_id,
+                trading_date="2025-03-14",
+                sample={
+                    "ticker": ticker,
+                    "side": "long",
+                    "sector": "black",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "setup_type": "trend_breakout_setup",
+                    "data_combo": "technical",
+                    "scope_key": f"{ticker}|long|short|trend|trend_breakout_setup|technical",
+                    "source_type": "trade_episode",
+                    "action_taken": "open_long",
+                    "current_lots": 0,
+                    "target_lots": lots,
+                    "executed_lots": lots,
+                    "net_pnl": net_pnl,
+                    "commission": 0.0,
+                    "outcome_label": "loss",
+                    "evidence": {
+                        "final_action_contract": {
+                            "final_action": "open_long",
+                            "current_lots": 0,
+                            "target_lots": lots,
+                            "lots_delta": lots,
+                            "entry_trigger": canonical_entry_trigger("breakout", "long"),
+                            "capital_deployment": {
+                                "capital_layer": "exploration_probe",
+                                "selected_for_capital_deployment": True,
+                            },
+                        }
+                    },
+                    "result": {
+                        "episode_net_pnl": net_pnl,
+                        "return_on_notional": -0.006,
+                        "contract_multiplier": multiplier,
+                    },
+                },
+            )
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        _ensure_reviewer_learning_schema(conn.cursor())
+        try:
+            write_episode(
+                conn.cursor(),
+                config_id="cfg",
+                ticker="RB",
+                lots=1,
+                multiplier=10.0,
+                net_pnl=-600.0,
+            )
+            write_episode(
+                conn.cursor(),
+                config_id="cfg",
+                ticker="HC",
+                lots=10,
+                multiplier=100.0,
+                net_pnl=-6000.0,
+            )
+            rows = conn.execute(
+                """
+                SELECT ticker, payload_json
+                FROM alpha_setup_action_value
+                WHERE config_id = 'cfg' AND action_name = 'open'
+                ORDER BY ticker
+                """
+            ).fetchall()
+            adjustments = {}
+            penalty_weights = {}
+            for row in rows:
+                payload = json.loads(row["payload_json"])
+                outcome = payload["entry_quality_outcome"]
+                adjustments[row["ticker"]] = outcome["trigger_confirmation_adjustment"]
+                penalty_weights[row["ticker"]] = outcome["penalty_weight"]
+
+            self.assertEqual(adjustments["HC"], adjustments["RB"])
+            self.assertEqual(penalty_weights["HC"], penalty_weights["RB"])
+            self.assertEqual(adjustments["HC"], "stronger_confirmation_required")
+        finally:
+            conn.close()
+
+    def test_entry_confirmation_adjustment_severity_uses_notional_return(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        _ensure_reviewer_learning_schema(conn.cursor())
+        try:
+            upsert_alpha_setup_sample_and_profile(
+                conn.cursor(),
+                cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-22",
+                sample={
+                    "ticker": "RB",
+                    "side": "long",
+                    "sector": "black",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "setup_type": "trend_breakout_setup",
+                    "data_combo": "technical",
+                    "scope_key": (
+                        "RB|long|short|trend|trend_breakout_setup|technical"
+                    ),
+                    "source_type": "trade_episode",
+                    "action_taken": "open_long",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "executed_lots": 1,
+                    "net_pnl": -2500.0,
+                    "commission": 0.0,
+                    "outcome_label": "loss",
+                    "evidence": {
+                        "final_action_contract": {
+                            "final_action": "open_long",
+                            "current_lots": 0,
+                            "target_lots": 1,
+                            "lots_delta": 1,
+                            "entry_trigger": canonical_entry_trigger(
+                                "breakout",
+                                "long",
+                            ),
+                            "capital_deployment": {
+                                "capital_layer": "exploration_probe",
+                                "selected_for_capital_deployment": True,
+                            },
+                        }
+                    },
+                    "result": {
+                        "episode_net_pnl": -2500.0,
+                        "return_on_notional": -0.025,
+                    },
+                },
+            )
+
+            row = conn.execute(
+                "SELECT payload_json FROM alpha_setup_action_value "
+                "WHERE config_id='cfg' AND action_name='open'"
+            ).fetchone()
+            payload = json.loads(row["payload_json"])
+            outcome = payload["entry_quality_outcome"]
+            self.assertEqual(outcome["return_on_notional"], -0.025)
+            self.assertTrue(outcome["tail_loss_episode"])
+            self.assertEqual(
+                outcome["trigger_confirmation_adjustment"],
+                "strict_confirmation_required",
             )
         finally:
             conn.close()

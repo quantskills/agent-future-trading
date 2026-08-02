@@ -451,6 +451,10 @@ def _action_value_learning_summary(
     episode_count = 0
     strongest_positive: dict[str, Any] = {}
     strongest_negative: dict[str, Any] = {}
+    latest_complete_episode_key: tuple[str, str] | None = None
+    latest_complete_episode_return_on_notional: float | None = None
+    latest_complete_episode_date: str | None = None
+    latest_complete_episode_quality_weight = 0.0
     used_lanes: set[str] = set()
     ignored_lanes: set[str] = set()
     lifecycle = _clean_key(decision_lifecycle) or "open_add_new_risk"
@@ -642,6 +646,39 @@ def _action_value_learning_summary(
             exact_real_count += 1
         if reward_source in {"trade_episode", "episode_trade"}:
             episode_count += 1
+        latest_episode_return_value = _row_value(
+            row,
+            payload,
+            "latest_complete_episode_return_on_notional",
+            default=None,
+        )
+        latest_episode_date_value = str(
+            _row_value(
+                row,
+                payload,
+                "latest_complete_episode_date",
+                default="",
+            )
+            or ""
+        )[:10]
+        if (
+            scope == "exact_real_state"
+            and reward_source in {"trade_episode", "episode_trade"}
+            and latest_episode_return_value is not None
+            and latest_episode_date_value
+        ):
+            latest_key = (
+                latest_episode_date_value,
+                str(_row_value(row, payload, "last_sample_date", default="") or "")[:10],
+            )
+            if latest_complete_episode_key is None or latest_key > latest_complete_episode_key:
+                latest_complete_episode_key = latest_key
+                latest_complete_episode_date = latest_episode_date_value
+                latest_complete_episode_return_on_notional = _safe_float(
+                    latest_episode_return_value,
+                    0.0,
+                )
+                latest_complete_episode_quality_weight = quality_weight
         summary_ref = {
             "action_preference": action_preference,
             "lane": lane or "unknown",
@@ -697,6 +734,22 @@ def _action_value_learning_summary(
                     entry_penalty_weight,
                 )
                 recent_tail_loss_signal += tail_strength * 0.35
+    latest_complete_episode_loss = bool(
+        latest_complete_episode_return_on_notional is not None
+        and latest_complete_episode_return_on_notional < 0.0
+    )
+    positive_amplification_suspended = latest_complete_episode_loss
+    if positive_amplification_suspended:
+        latest_loss_strength = (
+            latest_complete_episode_quality_weight
+            * abs(float(latest_complete_episode_return_on_notional or 0.0))
+        )
+        positive_learning_signal = 0.0
+        trigger_quality_positive_signal = 0.0
+        negative_learning_signal = max(
+            negative_learning_signal,
+            latest_loss_strength,
+        )
     positive_learning_signal = _bounded(positive_learning_signal)
     negative_learning_signal = _bounded(negative_learning_signal)
     execution_signal = _bounded(execution_signal, -1.0, 1.0)
@@ -722,6 +775,12 @@ def _action_value_learning_summary(
         "episode_count": episode_count,
         "strongest_positive": strongest_positive,
         "strongest_negative": strongest_negative,
+        "latest_complete_episode_date": latest_complete_episode_date,
+        "latest_complete_episode_return_on_notional": (
+            latest_complete_episode_return_on_notional
+        ),
+        "latest_complete_episode_loss": latest_complete_episode_loss,
+        "positive_amplification_suspended": positive_amplification_suspended,
         "decision_lifecycle": lifecycle,
         "used_lanes": sorted(used_lanes),
         "ignored_lanes": sorted(ignored_lanes),
@@ -822,6 +881,18 @@ def _learning_adjustment_summary(
         "net_trigger_quality_loss_signal": round(
             _safe_float(action_value_learning.get("net_trigger_quality_loss_signal"), 0.0),
             4,
+        ),
+        "latest_complete_episode_date": action_value_learning.get(
+            "latest_complete_episode_date"
+        ),
+        "latest_complete_episode_return_on_notional": action_value_learning.get(
+            "latest_complete_episode_return_on_notional"
+        ),
+        "latest_complete_episode_loss": bool(
+            action_value_learning.get("latest_complete_episode_loss")
+        ),
+        "positive_amplification_suspended": bool(
+            action_value_learning.get("positive_amplification_suspended")
         ),
         "strongest_positive_action_value": action_value_learning.get("strongest_positive") or {},
         "strongest_negative_action_value": action_value_learning.get("strongest_negative") or {},
@@ -1027,6 +1098,12 @@ def build_opportunity_scorecard(
         trigger_quality_positive_signal = _safe_float(action_value_learning.get("trigger_quality_positive_signal"), 0.0)
         trigger_quality_loss_signal = _safe_float(action_value_learning.get("trigger_quality_loss_signal"), 0.0)
         net_trigger_quality_loss_signal = _safe_float(action_value_learning.get("net_trigger_quality_loss_signal"), trigger_quality_loss_signal)
+        positive_amplification_suspended = bool(
+            action_value_learning.get("positive_amplification_suspended")
+        )
+        if positive_amplification_suspended:
+            positive_learning_signal = 0.0
+            trigger_quality_positive_signal = 0.0
         action_value_signal_present = bool(
             int(action_value_learning.get("positive_count", 0) or 0)
             or int(action_value_learning.get("negative_count", 0) or 0)
@@ -1090,7 +1167,9 @@ def build_opportunity_scorecard(
                 _safe_float(cfg.get("profile_prior_only_bonus_cap_without_action_value"), 0.015),
             )
         alpha_profile_penalty = 0.08 if capped_profiles else 0.0
-        if recent_tail_loss_signal > 0 and alpha_profile_bonus > 0:
+        if positive_amplification_suspended:
+            alpha_profile_bonus = 0.0
+        elif recent_tail_loss_signal > 0 and alpha_profile_bonus > 0:
             alpha_profile_bonus *= max(0.0, 1.0 - recent_tail_loss_signal)
         elif negative_learning_signal > 0 and alpha_profile_bonus > 0:
             alpha_profile_bonus *= max(0.25, 1.0 - negative_learning_signal * 0.5)
@@ -1313,6 +1392,16 @@ def build_opportunity_scorecard(
                 "execution_profile_signal_direct_to_rank": bool(
                     action_value_learning.get("execution_profile_signal_direct_to_rank")
                 ),
+                "latest_complete_episode_date": action_value_learning.get(
+                    "latest_complete_episode_date"
+                ),
+                "latest_complete_episode_return_on_notional": action_value_learning.get(
+                    "latest_complete_episode_return_on_notional"
+                ),
+                "latest_complete_episode_loss": bool(
+                    action_value_learning.get("latest_complete_episode_loss")
+                ),
+                "positive_amplification_suspended": positive_amplification_suspended,
             },
             "alpha_setup_profile_counts": {
                 "deployable": len(deployable_profiles),

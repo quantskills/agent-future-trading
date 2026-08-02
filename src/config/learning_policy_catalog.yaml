@@ -84,6 +84,10 @@ learning:
     protected_min_net_pnl: 800
     deployable_min_net_pnl: 2500
     cap_min_samples: 2
+    # 仅用同完整作用域、手续费后 return_on_notional 的近期完整真实周期识别策略失效；
+    # 新 probe 改善同一滚动窗口后，继续由既有 protected/deployable 门槛决定恢复资格。
+    negative_expectancy_window_complete_episodes: 5
+    cap_mean_return_on_notional_below: 0.0
     cap_min_loss_abs: 8000
     reject_min_samples: 5
     reject_min_loss_abs: 20000

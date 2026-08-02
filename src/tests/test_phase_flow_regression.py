@@ -109,6 +109,13 @@ from tools.agent_tools.analysis.analyst_quality import (
     summarize_news_events,
 )
 from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
+from tools.agent_tools.analysis.analyst_learning_context import (
+    _safe_analyst_action_value_projection,
+)
+from tools.common.alpha_setup import (
+    _entry_quality_outcome_from_sample,
+    _signal_calibration_contract,
+)
 from tools.agent_tools.decision.pm_signal_fusion import (
     build_opportunity_scorecard,
 )
@@ -2010,6 +2017,108 @@ class ResearchLearningMechanismRegressionTest(unittest.TestCase):
 
 
 class AnalystStrategyQualityRegressionTest(unittest.TestCase):
+    def test_formal_entry_episode_without_notional_return_is_analyst_unusable(self):
+        for action_preference in (
+            "positive_candidate_open",
+            "negative_revalidate",
+        ):
+            with self.subTest(action_preference=action_preference):
+                calibration = _signal_calibration_contract(
+                    action_name="open",
+                    action_preference=action_preference,
+                    amplification_scope_quality="exact_real_state",
+                    reward_source="trade_episode",
+                    mean_return_on_notional=None,
+                )
+
+                self.assertEqual(
+                    calibration["calibration_bias"],
+                    "neutral_evidence_context",
+                )
+                self.assertEqual(
+                    calibration["learning_economics_basis"],
+                    "after_fee_return_on_notional",
+                )
+                self.assertEqual(calibration["usable_by"], [])
+                self.assertEqual(calibration["allowed_effects"], [])
+                self.assertEqual(
+                    calibration["unusable_reason"],
+                    "missing_return_on_notional",
+                )
+                reward_sign = 1.0 if action_preference.startswith("positive_") else -1.0
+                row = {
+                    "id": f"missing-ron-{action_preference}",
+                    "scope_key": "RB|long|short|trend|trend_breakout_setup|technical",
+                    "ticker": "RB",
+                    "side": "long",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "setup_type": "trend_breakout_setup",
+                    "action_name": "open",
+                    "canonical_action_family": "open_add_new_risk",
+                    "action_value_lane": "open",
+                    "learning_lane": "open",
+                    "consumer_scope": "pm_learning",
+                    "memory_side_role": "target_side",
+                    "canonical_action_value": True,
+                    "sample_count": 1,
+                    "reward_sum": 1000.0 * reward_sign,
+                    "reward_mean": 1000.0 * reward_sign,
+                    "win_rate": 1.0 if reward_sign > 0 else 0.0,
+                    "confidence_score": 0.60,
+                    "action_preference": action_preference,
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                    "last_sample_date": "2025-03-14",
+                    "valid_until": "2025-04-14",
+                    "payload": {
+                        "research_output_contract_version": "agentquant.research_action_value.v1",
+                        "canonical_action_family": "open_add_new_risk",
+                        "action_value_lane": "open",
+                        "learning_lane": "open",
+                        "consumer_scope": "pm_learning",
+                        "memory_side_role": "target_side",
+                        "action_preference": action_preference,
+                        "reward_source": "trade_episode",
+                        "amplification_scope_quality": "exact_real_state",
+                        "mean_return_on_notional": None,
+                        "signal_calibration": calibration,
+                    },
+                }
+                self.assertIsNone(
+                    _safe_analyst_action_value_projection(
+                        row,
+                        analyst="technical",
+                        ticker="RB",
+                        trading_date="2025-03-17",
+                    )
+                )
+
+    def test_formal_entry_episode_without_notional_return_keeps_confirmation_neutral(self):
+        for episode_net_pnl in (1000.0, -1000.0):
+            with self.subTest(episode_net_pnl=episode_net_pnl):
+                outcome = _entry_quality_outcome_from_sample(
+                    sample={"net_pnl": episode_net_pnl, "commission": 0.0},
+                    result={"episode_net_pnl": episode_net_pnl},
+                    action_name="open",
+                    entry_trigger="breakout",
+                    evidence_combo="technical",
+                    deployment={"deployment_tier": "capital_deployed"},
+                )
+
+                self.assertEqual(
+                    outcome["entry_quality_verdict"],
+                    "entry_outcome_neutral",
+                )
+                self.assertEqual(
+                    outcome["trigger_confirmation_adjustment"],
+                    "neutral",
+                )
+                self.assertFalse(outcome["loss_episode"])
+                self.assertFalse(outcome["tail_loss_episode"])
+                self.assertFalse(outcome["positive_entry_episode"])
+                self.assertIsNone(outcome["return_on_notional"])
+
     def test_news_direction_without_complete_setup_is_no_opportunity(self):
         news_item = SimpleNamespace(
             title="inventory edges lower",
@@ -2340,6 +2449,282 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         self.assertNotIn("authority_type", impact)
         self.assertNotIn("target_lots", impact)
         self.assertNotIn("lots_delta", impact)
+
+    def test_latest_complete_episode_loss_cancels_stale_positive_analyst_calibration(
+        self,
+    ):
+        trigger = canonical_entry_trigger("breakout", "long")
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.60,
+            business_quality_score=0.60,
+            factor_alignment_score=0.60,
+            horizon_class="short",
+            setup_type="trend_breakout_setup",
+            entry_timing_signal="breakout",
+        )
+        calibrated = calibrate_signal_with_learning_context(
+            signal,
+            analyst="technical",
+            ticker="RB",
+            learning_context={
+                "alpha_setup_items": [
+                    {
+                        "ticker": "RB",
+                        "side": "long",
+                        "horizon_class": "short",
+                        "market_regime": "trend",
+                        "setup_type": "trend_breakout_setup",
+                        "action_name": "open",
+                        "sample_count": 8,
+                        "net_pnl": 18000.0,
+                        "win_rate": 0.75,
+                        "confidence_score": 0.80,
+                        "product_learning_calibration_view": {
+                            "contract_version": "agentquant.product_learning_calibration_view.v1",
+                            "setup_type": "trend_breakout_setup",
+                            "action_name": "open",
+                            "trigger_key": trigger,
+                        },
+                    }
+                ],
+                "analyst_calibration_items": [
+                    {
+                        "ticker": "RB",
+                        "side": "long",
+                        "horizon_class": "short",
+                        "market_regime": "trend",
+                        "setup_type": "trend_breakout_setup",
+                        "action_name": "open",
+                        "sample_count": 6,
+                        "confidence_score": 0.72,
+                        "mean_return_on_notional": 0.025,
+                        "latest_complete_episode_return_on_notional": -0.001,
+                        "latest_complete_episode_outcome": "loss",
+                        "signal_calibration": {
+                            "contract_version": "agentquant.analysis_signal_calibration.v1",
+                            "consumer_scope": "analyst_calibration",
+                            "usable_by": ["analysis_team"],
+                            "allowed_effects": ["evidence_quality_calibration"],
+                            "forbidden_effects": [
+                                "trade_authority",
+                                "lots",
+                                "margin_ratio",
+                                "direction_override",
+                            ],
+                            "source_action_value_lane": "open",
+                            "source_quality": "exact_real_state",
+                            "calibration_bias": "positive_evidence_calibration",
+                            "learning_economics_basis": "after_fee_return_on_notional",
+                            "positive_amplification_suspended": True,
+                        },
+                        "product_learning_calibration_view": {
+                            "contract_version": "agentquant.product_learning_calibration_view.v1",
+                            "setup_type": "trend_breakout_setup",
+                            "action_name": "open",
+                            "trigger_key": trigger,
+                        },
+                    }
+                ]
+            },
+        )
+
+        calibration = calibrated.metadata["analyst_learning_calibration"]
+        self.assertEqual(calibration["positive_strength"], 0.0)
+        self.assertGreater(calibration["negative_strength"], 0.0)
+        self.assertLess(calibration["net_evidence_adjustment"], 0.0)
+        self.assertLess(calibrated.business_quality_score, 0.60)
+        self.assertIn(
+            "technical_same_scope_negative_learning",
+            calibrated.current_evidence_conflict,
+        )
+
+    def test_analyst_safe_projection_carries_latest_episode_notional_economics(self):
+        trigger = canonical_entry_trigger("breakout", "long")
+        row = {
+            "id": "av-rb-loss",
+            "scope_key": "RB|long|short|trend|trend_breakout_setup|technical",
+            "ticker": "RB",
+            "side": "long",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "trend_breakout_setup",
+            "action_name": "open",
+            "canonical_action_family": "open_add_new_risk",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "consumer_scope": "pm_learning",
+            "memory_side_role": "target_side",
+            "canonical_action_value": True,
+            "sample_count": 4,
+            "reward_sum": 5000.0,
+            "reward_mean": 1250.0,
+            "win_rate": 0.75,
+            "confidence_score": 0.70,
+            "action_preference": "positive_candidate_open",
+            "reward_source": "trade_episode",
+            "evidence_scope": "exact_real_state",
+            "last_sample_date": "2025-03-14",
+            "valid_until": "2025-04-14",
+            "payload": {
+                "research_output_contract_version": "agentquant.research_action_value.v1",
+                "canonical_action_family": "open_add_new_risk",
+                "action_value_lane": "open",
+                "learning_lane": "open",
+                "consumer_scope": "pm_learning",
+                "memory_side_role": "target_side",
+                "action_preference": "positive_candidate_open",
+                "reward_source": "trade_episode",
+                "amplification_scope_quality": "exact_real_state",
+                "mean_return_on_notional": 0.012,
+                "latest_complete_episode_return_on_notional": -0.001,
+                "latest_complete_episode_date": "2025-03-14",
+                "latest_complete_episode_outcome": "loss",
+                "signal_calibration": {
+                    "contract_version": "agentquant.analysis_signal_calibration.v1",
+                    "source_action_value_contract": "agentquant.research_action_value.v1",
+                    "source_canonical_action_family": "open_add_new_risk",
+                    "consumer_scope": "analyst_calibration",
+                    "source_action_value_lane": "open",
+                    "source_quality": "exact_real_state",
+                    "reward_source": "trade_episode",
+                    "calibration_bias": "negative_evidence_calibration",
+                    "learning_economics_basis": "after_fee_return_on_notional",
+                    "mean_return_on_notional": 0.012,
+                    "latest_complete_episode_return_on_notional": -0.001,
+                    "latest_complete_episode_date": "2025-03-14",
+                    "latest_complete_episode_outcome": "loss",
+                    "positive_amplification_suspended": True,
+                    "usable_by": ["analysis_team"],
+                    "allowed_effects": ["evidence_quality_calibration"],
+                    "forbidden_effects": [
+                        "trade_authority",
+                        "lots",
+                        "margin_ratio",
+                        "direction_override",
+                    ],
+                },
+                "product_learning_performance_key": {
+                    "contract_version": "agentquant.product_learning_performance_key.v1",
+                    "ticker": "RB",
+                    "side": "long",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "setup_type": "trend_breakout_setup",
+                    "action_name": "open",
+                    "trigger_key": trigger,
+                },
+            },
+        }
+
+        projection = _safe_analyst_action_value_projection(
+            row,
+            analyst="technical",
+            ticker="RB",
+            trading_date="2025-03-17",
+        )
+
+        self.assertIsNotNone(projection)
+        self.assertEqual(projection["mean_return_on_notional"], 0.012)
+        self.assertEqual(
+            projection["latest_complete_episode_return_on_notional"],
+            -0.001,
+        )
+        self.assertEqual(
+            projection["signal_calibration"]["calibration_bias"],
+            "negative_evidence_calibration",
+        )
+        self.assertNotIn("reward_mean", projection)
+        self.assertNotIn("net_pnl", projection)
+
+    def test_analyst_entry_calibration_strength_is_notional_return_invariant(self):
+        trigger = canonical_entry_trigger("breakout", "long")
+
+        def calibrate(
+            *,
+            ticker: str,
+            reward_mean: float,
+            net_pnl: float,
+            mean_return_on_notional: float = 0.008,
+        ):
+            signal = AnalystSignal(
+                agent_name="technical",
+                signal=Signal.BULLISH,
+                confidence=0.50,
+                business_quality_score=0.50,
+                factor_alignment_score=0.50,
+                horizon_class="short",
+                setup_type="trend_breakout_setup",
+                entry_timing_signal="breakout",
+            )
+            return calibrate_signal_with_learning_context(
+                signal,
+                analyst="technical",
+                ticker=ticker,
+                learning_context={
+                    "analyst_calibration_items": [
+                        {
+                            "ticker": ticker,
+                            "side": "long",
+                            "horizon_class": "short",
+                            "market_regime": "trend",
+                            "setup_type": "trend_breakout_setup",
+                            "action_name": "open",
+                            "sample_count": 1,
+                            "confidence_score": 0.10,
+                            "reward_mean": reward_mean,
+                            "net_pnl": net_pnl,
+                            "mean_return_on_notional": mean_return_on_notional,
+                            "latest_complete_episode_return_on_notional": 0.006,
+                            "latest_complete_episode_outcome": "profit",
+                            "signal_calibration": {
+                                "contract_version": "agentquant.analysis_signal_calibration.v1",
+                                "consumer_scope": "analyst_calibration",
+                                "usable_by": ["analysis_team"],
+                                "allowed_effects": ["evidence_quality_calibration"],
+                                "forbidden_effects": [
+                                    "trade_authority",
+                                    "lots",
+                                    "margin_ratio",
+                                    "direction_override",
+                                ],
+                                "source_action_value_lane": "open",
+                                "calibration_bias": "positive_evidence_calibration",
+                                "learning_economics_basis": "after_fee_return_on_notional",
+                            },
+                            "product_learning_calibration_view": {
+                                "contract_version": "agentquant.product_learning_calibration_view.v1",
+                                "setup_type": "trend_breakout_setup",
+                                "action_name": "open",
+                                "trigger_key": trigger,
+                            },
+                        }
+                    ]
+                },
+            )
+
+        small_cny = calibrate(ticker="RB", reward_mean=500.0, net_pnl=2500.0)
+        large_cny = calibrate(ticker="HC", reward_mean=5000.0, net_pnl=25000.0)
+        stronger_return = calibrate(
+            ticker="I",
+            reward_mean=500.0,
+            net_pnl=2500.0,
+            mean_return_on_notional=0.018,
+        )
+
+        self.assertEqual(
+            small_cny.metadata["analyst_learning_calibration"]["positive_strength"],
+            large_cny.metadata["analyst_learning_calibration"]["positive_strength"],
+        )
+        self.assertEqual(
+            small_cny.metadata["analyst_learning_calibration"]["net_evidence_adjustment"],
+            large_cny.metadata["analyst_learning_calibration"]["net_evidence_adjustment"],
+        )
+        self.assertGreater(
+            stronger_return.metadata["analyst_learning_calibration"]["positive_strength"],
+            small_cny.metadata["analyst_learning_calibration"]["positive_strength"],
+        )
 
     def test_entry_learning_rejects_wrong_lane_setup_and_trigger_with_zero_effect(self):
         breakout_trigger = canonical_entry_trigger("breakout", "long")
@@ -2751,6 +3136,8 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         scope: str = "exact_real_state",
         last_sample_date: str = "2025-03-12",
         sample_count: int = 4,
+        latest_complete_episode_return_on_notional: float | None = None,
+        latest_complete_episode_date: str | None = None,
     ) -> dict:
         episode_mean_return = (
             float(mean_return_on_notional)
@@ -2804,6 +3191,23 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
                 "episode_trade_reward_count": sample_count if "episode" in reward_source else 0,
                 "real_trade_reward_count": sample_count,
                 "last_sample_date": last_sample_date,
+                "latest_complete_episode_return_on_notional": (
+                    latest_complete_episode_return_on_notional
+                ),
+                "latest_complete_episode_date": (
+                    latest_complete_episode_date or last_sample_date
+                ),
+                "latest_complete_episode_outcome": (
+                    "loss"
+                    if latest_complete_episode_return_on_notional is not None
+                    and latest_complete_episode_return_on_notional < 0.0
+                    else "profit"
+                    if latest_complete_episode_return_on_notional is not None
+                    and latest_complete_episode_return_on_notional > 0.0
+                    else "flat"
+                    if latest_complete_episode_return_on_notional is not None
+                    else None
+                ),
             },
         }
 
@@ -2941,6 +3345,73 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             small_cny["positive_learning_signal"],
             lower_return["positive_learning_signal"],
         )
+
+    def test_latest_complete_loss_removes_old_positive_rank_and_profile_lift(self):
+        learned = self._action_value(
+            action_preference="positive_candidate_open",
+            lane="open",
+            reward_mean=2500.0,
+            reward_sum=10000.0,
+            mean_return_on_notional=0.025,
+            worst_return_on_notional=-0.001,
+            latest_complete_episode_return_on_notional=-0.001,
+            latest_complete_episode_date="2025-03-14",
+        )
+        row = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[self._tradeable_signal()],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_profiles=[{
+                "ticker": "TA",
+                "side": "short",
+                "setup_type": "trend_breakout_setup",
+                "lifecycle_state": "deployable",
+                "sample_count": 7,
+                "confidence_score": 0.80,
+                "net_pnl": 10000.0,
+            }],
+            alpha_setup_action_values=[learned],
+            formal_setup_by_side={"short": "trend_breakout_setup", "long": ""},
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )["short"]
+
+        summary = row["action_value_learning_summary"]
+        self.assertTrue(summary["latest_complete_episode_loss"])
+        self.assertTrue(summary["positive_amplification_suspended"])
+        self.assertEqual(summary["positive_learning_signal"], 0.0)
+        self.assertGreater(summary["negative_learning_signal"], 0.0)
+        self.assertEqual(row["opportunity_score_components"]["positive_learning"], 0.0)
+        self.assertLessEqual(
+            row["opportunity_score_components"]["alpha_profile_adjustment"],
+            0.0,
+        )
+
+    def test_latest_profitable_probe_restores_positive_learning_path(self):
+        learned = self._action_value(
+            action_preference="positive_candidate_open",
+            lane="open",
+            reward_mean=1200.0,
+            reward_sum=4800.0,
+            mean_return_on_notional=0.012,
+            latest_complete_episode_return_on_notional=0.004,
+            latest_complete_episode_date="2025-03-14",
+        )
+        row = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[self._tradeable_signal()],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[learned],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )["short"]
+
+        summary = row["action_value_learning_summary"]
+        self.assertFalse(summary["latest_complete_episode_loss"])
+        self.assertFalse(summary["positive_amplification_suspended"])
+        self.assertGreater(summary["positive_learning_signal"], 0.0)
 
     def test_scorecard_excludes_cross_setup_profile_from_formal_rank(self):
         signal = self._tradeable_signal()
@@ -7145,6 +7616,61 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             }
         }
 
+    @staticmethod
+    def _attach_episode_returns(value):
+        if isinstance(value, dict):
+            payload = value.get("payload")
+            if (
+                value.get("action_name")
+                and value.get("reward_mean") is not None
+                and value.get("mean_return_on_notional") is None
+                and (
+                    not isinstance(payload, dict)
+                    or payload.get("mean_return_on_notional") is None
+                )
+            ):
+                reward_mean = float(value.get("reward_mean") or 0.0)
+                target = payload if isinstance(payload, dict) else value
+                target["mean_return_on_notional"] = reward_mean / 100000.0
+                worst_reward = (
+                    payload.get("worst_reward")
+                    if isinstance(payload, dict)
+                    else None
+                )
+                target["worst_return_on_notional"] = float(
+                    worst_reward or value.get("worst_reward") or reward_mean
+                ) / 100000.0
+            for item in value.values():
+                PMExpectancyTradeQualificationRegressionTest._attach_episode_returns(item)
+        elif isinstance(value, list):
+            for item in value:
+                PMExpectancyTradeQualificationRegressionTest._attach_episode_returns(item)
+
+    def setUp(self):
+        original_apply = _apply_alpha_setup_ev_position_control
+        original_seed = _positive_open_action_value_seed
+
+        def apply_with_canonical_episode_returns(**kwargs):
+            self._attach_episode_returns(kwargs.get("alpha_setup_action_values"))
+            return original_apply(**kwargs)
+
+        def seed_with_canonical_episode_returns(**kwargs):
+            self._attach_episode_returns(kwargs.get("alpha_setup_action_values"))
+            return original_seed(**kwargs)
+
+        apply_patcher = patch(
+            f"{__name__}._apply_alpha_setup_ev_position_control",
+            side_effect=apply_with_canonical_episode_returns,
+        )
+        seed_patcher = patch(
+            f"{__name__}._positive_open_action_value_seed",
+            side_effect=seed_with_canonical_episode_returns,
+        )
+        apply_patcher.start()
+        seed_patcher.start()
+        self.addCleanup(apply_patcher.stop)
+        self.addCleanup(seed_patcher.stop)
+
     def test_alpha_setup_diagnostics_keep_side_priority_separate_from_full_market_rank(self):
         scorecard = self._base_scorecard(layer="tradeable_candidate")
         scorecard["long"].update(
@@ -8163,6 +8689,87 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertNotIn("repeat_loss_watchlist_only", reasons)
         detail = diagnostics["alpha_setup_ev_fusion"]
         self.assertTrue(detail["strong_realtime_evidence"])
+
+    def test_latest_complete_loss_removes_real_scale_lift_but_keeps_strong_probe(self):
+        ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
+            ticker="RB",
+            position_ratio=0.04,
+            current_ratio=0.0,
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
+            alpha_setup_profiles=[{
+                "ticker": "RB",
+                "side": "long",
+                "lifecycle_state": "deployable",
+                "sample_count": 7,
+                "net_pnl": 10000.0,
+                "profit_factor": 1.5,
+                "win_rate": 0.65,
+                "confidence_score": 0.80,
+                "max_position_impact": 0.04,
+            }],
+            alpha_setup_action_values=[{
+                "ticker": "RB",
+                "side": "long",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "setup_type": "trend_breakout_setup",
+                "action_name": "open",
+                "sample_count": 7,
+                "reward_mean": 2500.0,
+                "reward_sum": 17500.0,
+                "win_rate": 0.65,
+                "confidence_score": 0.80,
+                "action_preference": "positive_candidate_open",
+                "max_position_impact": 0.04,
+                "reward_source": "trade_episode",
+                "evidence_scope": "exact_real_state",
+                "mean_return_on_notional": 0.025,
+                "worst_return_on_notional": -0.001,
+                "latest_complete_episode_return_on_notional": -0.001,
+                "latest_complete_episode_date": "2025-03-14",
+                "payload": {
+                    "reward_source": "trade_episode",
+                    "real_trade_reward_count": 7,
+                    "exact_state_real_trade_sample_count": 7,
+                    "amplification_scope_quality": "exact_real_state",
+                    "action_preference": "positive_candidate_open",
+                    "mean_return_on_notional": 0.025,
+                    "worst_return_on_notional": -0.001,
+                    "latest_complete_episode_return_on_notional": -0.001,
+                    "latest_complete_episode_date": "2025-03-14",
+                },
+            }],
+            analyst_signals=[
+                AnalystSignal(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    confidence=0.72,
+                    opportunity_state="tradeable_candidate",
+                    entry_trigger="breakout above opening range with volume confirmation",
+                    invalidation_level=3300.0,
+                    position_invalidation_level=3300.0,
+                    trigger_valid=True,
+                    invalidation_present=True,
+                    entry_quality="strong",
+                    evidence_role="entry_timing",
+                    metadata=_canonical_pm_execution_metadata(ticker="RB"),
+                ),
+                AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.55),
+            ],
+            market_confirmation={"confirmation_score": 0.70},
+            full_config={},
+            max_position_ratio=0.05,
+        )
+
+        detail = diagnostics["alpha_setup_ev_fusion"]
+        self.assertGreater(ratio, 0.0)
+        self.assertLess(ratio, 0.04)
+        self.assertTrue(detail["latest_complete_episode_loss"])
+        self.assertTrue(detail["positive_amplification_suspended"])
+        self.assertFalse(detail["positive_action_value"])
+        self.assertFalse(detail["positive_profile"])
+        self.assertFalse(detail["qualified_positive_expectancy"])
+        self.assertNotIn("qualified_positive_expectancy", reasons)
 
     def test_positive_action_value_marks_qualified_positive_expectancy(self):
         ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
@@ -12352,6 +12959,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "action_value_stats": {
                         "sample_count": 5,
                         "reward_sum": 12000.0,
+                        "mean_return_on_notional": 0.024,
                     },
                 }
             },
@@ -12401,6 +13009,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "action_value_stats": {
                         "sample_count": 5,
                         "reward_sum": 12000.0,
+                        "mean_return_on_notional": 0.024,
                     },
                 },
             },

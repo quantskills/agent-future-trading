@@ -25,16 +25,50 @@
 - [ ] 【未验证：待空库新回测】原 FAC 未失效、普通持仓浮亏达到 4% 且同向证据再验证失败时，必须全部退出。
 - [ ] 【未验证：缺真实样本】普通持仓的同向证据再验证通过时，不得触发普通亏损减仓。
 - [ ] 【未验证：缺真实样本】普通持仓的同向证据再验证通过时，不得触发普通亏损退出。
+- [ ] 【未验证：缺增强确认真实样本】只有 `trigger_confirmation_adjustment=stronger_confirmation_required/strict_confirmation_required` 的入场 FAC 才能进入增强确认路径。
+- [ ] 【未验证：缺增强确认真实样本】增强确认路径必须使用初次触发后的下一根完整 15 分钟线验证价格延续。
+- [ ] 【未验证：缺增强确认真实样本】增强确认路径的初次触发线和延续确认线成交量必须都大于零。
+- [ ] 【未验证：缺增强确认真实样本】存在可比前序成交量时，增强确认路径两根确认线的平均成交量必须不低于最近最多 4 根前序完整 15 分钟线平均成交量。
+- [ ] 【未验证：缺增强确认低量样本】增强确认路径量能不足时不得执行该次入场。
+- [ ] 【未验证：缺标准确认对照样本】`standard_confirmation_supported` 入场不得被增强量能确认门限制。
+- [ ] 【未验证：缺增强确认真实样本】增强确认结果只能决定原入场 FAC 的执行、等待或跳过，不得生成新的交易动作。
+- [ ] 【未验证：缺增强确认真实样本】增强确认路径不得生成 Trader 盘中策略退出。
 
 ## PM、排名与资金
 
 - [ ] 【未验证：缺真实样本】严格匹配的成熟正向学习与合格当日证据必须能够把候选从 `probe` 升级至 `real/scale`。
 - [ ] 【未验证：缺真实样本】`real/scale` 候选必须按现有资金分层获得高于 `probe` 的资金比例。
+- [ ] 【未验证：待空库新回测】`probe` 的 `target_margin_ratio` 必须按 `0.8% + candidate_quality × (1.5% - 0.8%)` 计算。
+- [ ] 【未验证：缺同日差异候选样本】`candidate_quality` 不同的 `probe` 必须形成对应不同的 `target_margin_ratio`。
+- [ ] 【未验证：缺冷启动差异候选样本】完整作用域真实周期为零时，`probe` 不得仅因零样本被机械固定为 0.8%。
+- [ ] 【未验证：缺冷启动差异候选样本】完整作用域真实周期为零时，`probe` 不得仅因零样本被机械固定为 1.5%。
+- [ ] 【未验证：待空库新回测】`candidate_quality_components` 必须只由当日 `opportunity_score`、`trigger_quality` 和 `invalidation_quality` 构成。
+- [ ] 【未验证：缺过期学习对照样本】超过 `valid_until` 的 action-value 不得进入 PM 当日 `candidate_quality`、Rank 或仓位学习输入。
+- [ ] 【未验证：缺相同学习不同实时证据样本】有效学习相同而当日证据强度不同的候选必须形成不同的 `candidate_quality`。
+- [ ] 【未验证：缺相同实时证据不同学习样本】当日证据相同而有效学习结果不同的候选必须形成对应不同的 `candidate_quality`。
+- [ ] 【未验证：缺最新亏损后续决策样本】同完整作用域最新完整真实周期 `return_on_notional<0` 时必须标记 `latest_complete_episode_loss=true`。
+- [ ] 【未验证：缺最新亏损后续决策样本】`latest_complete_episode_loss=true` 时当日同方向 `positive_learning` 排名分项必须为零。
+- [ ] 【未验证：缺最新亏损后续决策样本】`latest_complete_episode_loss=true` 时同作用域正向 Profile 加分必须为零。
+- [ ] 【未验证：缺最新亏损后续决策样本】`latest_complete_episode_loss=true` 时旧正向 action-value 不得继续生成 positive open seed。
+- [ ] 【未验证：缺最新亏损后续决策样本】`latest_complete_episode_loss=true` 时旧正向 action-value 不得继续赋予 `real/scale` 正向放大资格。
+- [ ] 【未验证：缺最新亏损且强当日证据样本】最新完整周期亏损后，当日强实时证据仍必须能够进入非零差异化 `probe`。
 - [ ] 【未验证：待空库新回测】正的 `mean_return_on_notional` 必须形成正向排名学习信号。
 - [ ] 【未验证：待空库新回测】负的 `mean_return_on_notional` 必须形成负向排名学习信号。
 - [ ] 【未验证：缺后续消费样本】完整 episode 的 `worst_return_on_notional` 必须形成排名尾部学习信号。
 - [ ] 【未验证：待空库新回测】人民币 `reward_sum` 不得进入排名学习分。
 - [ ] 【未验证：待空库新回测】人民币 `reward_mean` 不得进入排名学习分。
+- [ ] 【未验证：待空库新回测】PM 仓位学习的正负方向必须由完整 episode 的 `mean_return_on_notional` 决定。
+- [ ] 【未验证：缺人民币盈亏与收益率冲突样本】正的人民币 `reward_sum/reward_mean` 不得在 `mean_return_on_notional<=0` 时赋予正向仓位学习资格。
+- [ ] 【未验证：缺人民币盈亏与收益率冲突样本】负的人民币 `reward_sum/reward_mean` 不得在 `mean_return_on_notional>0` 时形成负向仓位学习方向。
+- [ ] 【未验证：缺成熟放大样本】`alpha_scale` 必须要求成熟 action-value 的 `mean_return_on_notional>0`。
+- [ ] 【未验证：缺策略失效真实样本】策略失效统计必须只使用同 ticker、side、setup、horizon 和 market_regime 的最近最多 5 个完整 episode。
+- [ ] 【未验证：缺策略失效样本下限对照】最近完整 episode 数少于现有 `cap_min_samples` 时，不得因近期收益率规则进入 `capped`。
+- [ ] 【未验证：缺策略失效真实样本】最近完整 episode 数达到现有 `cap_min_samples` 且平均 `return_on_notional<0` 时必须进入 `capped`。
+- [ ] 【未验证：缺策略失效真实样本】近期收益率规则触发 `capped` 时必须记录 `reason=same_scope_recent_return_on_notional_negative`。
+- [ ] 【未验证：缺跨作用域失效对照样本】一个完整作用域进入 `capped` 不得使其他 ticker、side、setup、horizon 或 market_regime 同步降级。
+- [ ] 【未验证：缺 capped 后强证据样本】同作用域进入 `capped` 后，当日强实时证据仍必须能够进入差异化 `probe` 重新验证。
+- [ ] 【未验证：缺策略恢复真实样本】最近完整 episode 平均 `return_on_notional` 不再为负时，不得继续使用 `same_scope_recent_return_on_notional_negative` 维持 `capped`。
+- [ ] 【未验证：缺策略恢复真实样本】策略恢复后的 `real/scale` 资格必须继续使用现有样本数、置信度、Profile 生命周期和正收益门槛。
 - [ ] 【未验证：缺跨品种样本】在作用域匹配级别、样本数、置信度和时效相同的条件下，相同完整周期收益率不得因品种不同而产生不同学习分。
 - [ ] 【未验证：缺不同合约乘数样本】在作用域匹配级别、样本数、置信度和时效相同的条件下，相同完整周期收益率不得因合约乘数不同而产生不同学习分。
 - [ ] 【未验证：缺不同人民币盈亏样本】在作用域匹配级别、样本数、置信度和时效相同的条件下，相同完整周期收益率不得因人民币盈亏绝对额不同而产生不同学习分。
@@ -70,8 +104,8 @@
 - [ ] 【未验证：待空库新回测】每条新生成的 `fast_candidate_alpha` 必须来自 `missed_alpha_accountability` 学习事件。
 - [ ] 【未验证：缺真实样本】`fast-candidate` 晋升必须使用固定 5 日观察窗口。
 - [ ] 【未验证：缺真实样本】`fast-candidate` 晋升只能使用同作用域样本。
-- [ ] 【未验证：缺真实样本】`fast-candidate` 晋升统计必须包含完整正样本。
-- [ ] 【未验证：缺真实样本】`fast-candidate` 晋升统计必须包含完整负样本。
+- [ ] 【未验证：缺真实样本】同作用域存在固定 5 日完整正样本时，该正样本必须计入 `fast-candidate` 晋升统计。
+- [ ] 【未验证：缺真实样本】同作用域存在固定 5 日完整负样本时，该负样本必须计入 `fast-candidate` 晋升统计。
 - [ ] 【未验证：待空库新回测】入场前已经失效的未交易记录不得支持政策晋升。
 - [ ] 【未验证：缺真实样本】已经到期的未交易记录不得支持政策晋升。
 - [ ] 【未验证：待空库新回测】缺少 FAC 可执行依据的未交易记录不得支持政策晋升。
@@ -96,6 +130,36 @@
 - [ ] 【未验证：缺技术参数校准样本】技术参数校准实际采用的政策编号必须写入现有 `learning_impact_summary`。
 - [ ] 【未验证：缺技术参数校准样本】技术参数校准的参数前后值必须写入现有 `learning_impact_summary`。
 - [ ] 【未验证：待空库新回测】上述 `learning_impact_summary` 必须随现有 `action_evidence_contract` 落入持久化 signal artifact。
+- [ ] 【未验证：缺完整 episode 后续分析样本】分析师安全投影必须包含同完整作用域 `mean_return_on_notional`。
+- [ ] 【未验证：缺完整 episode 后续分析样本】分析师安全投影必须包含 `latest_complete_episode_return_on_notional`。
+- [ ] 【未验证：缺完整 episode 后续分析样本】分析师安全投影必须包含 `latest_complete_episode_date`。
+- [ ] 【未验证：缺完整 episode 后续分析样本】分析师安全投影必须包含 `latest_complete_episode_outcome`。
+- [ ] 【未验证：缺完整 episode 后续分析样本】正式开仓 episode 的 `learning_economics_basis` 必须为 `after_fee_return_on_notional`。
+- [ ] 【未验证：缺最新亏损后续分析样本】同完整作用域最新完整周期亏损后，分析师 `positive_strength` 必须为0。
+- [ ] 【未验证：缺最新亏损后续分析样本】同完整作用域最新完整周期亏损后，分析师 `negative_strength` 必须大于0。
+- [ ] 【未验证：缺最新亏损后续分析样本】同完整作用域最新完整周期亏损后，`signal_calibration.calibration_bias` 必须为 `negative_evidence_calibration`。
+- [ ] 【未验证：缺最新亏损后续分析样本】同完整作用域最新完整周期亏损后，`signal_calibration.positive_amplification_suspended` 必须为真。
+- [ ] 【未验证：缺最新亏损与旧正向Profile并存样本】同完整作用域最新完整周期亏损后，旧正向 Profile 不得进入分析师正向校准。
+- [ ] 【未验证：缺跨品种同收益率分析样本】学习质量参数相同时，相同 `mean_return_on_notional` 不得因品种不同产生不同分析师学习强度。
+- [ ] 【未验证：缺不同乘数同收益率分析样本】学习质量参数相同时，相同 `mean_return_on_notional` 不得因合约乘数不同产生不同分析师学习强度。
+- [ ] 【未验证：缺不同人民币盈亏同收益率分析样本】学习质量参数相同时，相同 `mean_return_on_notional` 不得因人民币 `reward_mean/net_pnl` 不同产生不同分析师学习强度。
+- [ ] 【未验证：缺不同手数同收益率分析样本】学习质量参数相同时，相同 `mean_return_on_notional` 不得因交易手数不同产生不同分析师学习强度。
+- [ ] 【未验证：缺跨品种同收益率触发样本】相同开仓 episode `return_on_notional` 不得因品种不同产生不同 `trigger_confirmation_adjustment`。
+- [ ] 【未验证：缺不同乘数同收益率触发样本】相同开仓 episode `return_on_notional` 不得因合约乘数不同产生不同 `trigger_confirmation_adjustment`。
+- [ ] 【未验证：缺不同人民币盈亏同收益率触发样本】相同开仓 episode `return_on_notional` 不得因人民币盈亏不同产生不同 `trigger_confirmation_adjustment`。
+- [ ] 【未验证：缺不同手数同收益率触发样本】相同开仓 episode `return_on_notional` 不得因交易手数不同产生不同 `trigger_confirmation_adjustment`。
+- [ ] 【未验证：缺开仓盈利 episode 样本】开仓 episode 的手续费后 `return_on_notional>0` 时必须生成 `standard_confirmation_supported`。
+- [ ] 【未验证：缺普通开仓亏损 episode 样本】开仓 episode 的手续费后 `-0.02<return_on_notional<0` 时必须生成 `stronger_confirmation_required`。
+- [ ] 【未验证：缺严重开仓亏损 episode 样本】开仓 episode 的手续费后 `return_on_notional<=-0.02` 时必须生成 `strict_confirmation_required`。
+- [ ] 【未验证：缺分析师学习作用样本】人民币 `reward_mean/net_pnl` 不得进入开仓 episode 的分析师学习强度。
+- [ ] 【未验证：缺开仓 episode 学习落库样本】人民币 `net_pnl` 必须继续保留为开仓 episode 的审计事实。
+- [ ] 【未验证：缺分析师学习作用样本】分析师学习校准不得生成交易方向。
+- [ ] 【未验证：缺分析师学习作用样本】分析师学习校准不得生成交易手数。
+- [ ] 【未验证：缺分析师学习作用样本】分析师学习校准不得生成保证金比例。
+- [ ] 【未验证：缺分析师学习作用样本】分析师学习校准不得生成交易权限。
+- [ ] 【未验证：缺分析师学习作用样本】分析师学习校准不得新增 PM Rank。
+- [ ] 【未验证：缺分析师学习作用样本】分析师学习校准不得新增 Trader 执行路径。
+- [ ] 【未验证：缺分析师学习作用样本】分析师学习校准不得新增盘中退出路径。
 
 ## 回测结果评价
 

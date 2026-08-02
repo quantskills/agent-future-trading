@@ -48,3 +48,13 @@
 （1）[排名尾部学习信号独立生效] `pm_signal_fusion.py`让完整周期的`worst_return_on_notional`为负时独立形成尾部风险信号，不再要求该周期的平均收益同时为负；`test_phase_flow_regression.py`覆盖平均收益为正、最差收益为负时同时保留正向学习并产生尾部扣分。原因：修复盈利周期中的真实最差结果未进入排名尾部学习分的问题。
 
 （2）[未交易fast-candidate政策单源] `research_learning.py`停止由candidate/watchlist Profile生成`fast_candidate_alpha`，`research_memory_writers.py`删除未交易反事实按多周期最佳结果生成成熟`alpha_promotion`的旁路，并让固定5日未交易路径只按自身`missed_alpha_accountability`事件精确停用政策；`adaptive_policy_safety.py`拒绝错误来源fast-candidate及历史未交易反事实成熟alpha，配置删除失去生产用途的阈值；回归覆盖真实Alpha政策保持、Profile不生成fast-candidate、固定5日政策生成与来源隔离、停用归属和消费拦截。原因：消除两条政策生产路径共用同名政策、跨来源停用及未交易影子结果越权晋升成熟Alpha的问题，不改变真实成交Alpha、其他政策、排名、资金与试仓参数。
+
+==========2026年08月02日==========
+
+（1）[学习时效、收益率同口径与策略修复闭环] `alpha_setup.py`为同完整作用域action-value写入最新完整周期手续费后名义收益率，并以最近最多5个完整周期平均收益复用既有`capped`及恢复门槛；`pm_signal_fusion.py`让最新亏损优先清零旧正向学习和Profile加分，Rank与`candidate_quality`共享同一时效学习结果；`portfolio_manager.py`让positive open seed、probe/real/scale仓位学习统一优先读取`return_on_notional`，保留0.8%～1.5%差异化试探和强当日证据试探资格。原因：阻止旧盈利记忆在最新同类亏损后继续抬高排名和仓位，同时不压死重新验证与恢复放大路径。
+
+（2）[弱机会价格延续与量能确认] `trader_intraday_execution.py`只对既有`stronger/strict`触发确认追加下一根完整15分钟价格延续和相对量能校验，`standard`保持原触发；`dev.yaml`登记4根量能参考窗口和1.0相对量能阈值，回归覆盖弱量阻断、标准触发不受影响及原 stronger/strict 路径。原因：减少依赖历史亏损校准或弱冲突候选被短暂价格突破和低参与量错误成交，不新增Trader方向、手数、退出或研究消费权限。
+
+（3）[分析师与触发确认学习同口径] `alpha_setup.py`把平均及最新完整周期手续费后名义收益率写入既有分析师安全投影，开仓`entry_quality_outcome`的正负、权重和确认等级改由`return_on_notional`生成，并以既有2%名义收益率满权重边界区分stronger与strict；`analyst_learning_calibration.py`删除人民币reward/net_pnl对开仓证据强度的影响，并让最新精确作用域亏损同步撤销旧正向Profile校准。回归覆盖安全投影、最新亏损优先、分析师学习强度、触发确认的人民币规模不变性及收益率严重程度。原因：关闭旧正向学习经分析师校准间接抬高当日证据的残余路径，并统一不同品种、乘数和手数的学习经济口径，不新增Rank、交易、风控或退出路径。
+
+（4）[正式开仓收益率缺失时拒绝分析师采用] `alpha_setup.py`让正式开仓episode缺少`return_on_notional`时固定生成neutral且分析师不可用的校准契约，禁止按人民币reward或action preference回退为正负校准；`test_phase_flow_regression.py`覆盖正负人民币盈亏下的分析师安全投影拒绝，以及触发确认保持neutral。原因：关闭异常或遗留不完整episode绕过手续费后名义收益率口径进入分析师学习的防御缺口，不改变完整episode、PM Rank、资金、Trader或退出路径。

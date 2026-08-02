@@ -187,22 +187,48 @@ def _entry_quality_outcome_from_sample(
         else _safe_float(sample.get("net_pnl")) - _safe_float(sample.get("commission"))
     )
     is_entry_action = action_lane == "open"
+    episode_return_on_notional_value = (
+        result.get("return_on_notional")
+        if isinstance(result, Mapping)
+        else None
+    )
+    episode_return_on_notional = (
+        _safe_float(episode_return_on_notional_value)
+        if is_entry_action and episode_return_on_notional_value is not None
+        else None
+    )
     deployed = str(deployment.get("deployment_tier") or "").lower() in {
         "capital_deployed",
         "exploration_or_conditional_probe",
         "position_changed_without_capital_queue_selection",
     }
-    loss_episode = bool(is_entry_action and deployed and net_pnl < 0)
-    tail_loss_episode = bool(loss_episode and net_pnl <= -1000.0)
-    positive_entry_episode = bool(is_entry_action and deployed and net_pnl > 0)
+    loss_episode = bool(
+        is_entry_action
+        and deployed
+        and episode_return_on_notional is not None
+        and episode_return_on_notional < 0.0
+    )
+    tail_loss_episode = bool(
+        loss_episode and abs(float(episode_return_on_notional)) >= 0.02
+    )
+    positive_entry_episode = bool(
+        is_entry_action
+        and deployed
+        and episode_return_on_notional is not None
+        and episode_return_on_notional > 0.0
+    )
     penalty_weight = 0.0
     support_weight = 0.0
     if loss_episode:
-        penalty_weight = min(1.0, max(0.10, abs(net_pnl) / 10000.0))
-    if tail_loss_episode:
-        penalty_weight = min(1.0, max(penalty_weight, 0.55))
+        penalty_weight = min(
+            1.0,
+            max(0.10, abs(float(episode_return_on_notional)) / 0.02),
+        )
     if positive_entry_episode:
-        support_weight = min(1.0, max(0.10, net_pnl / 10000.0))
+        support_weight = min(
+            1.0,
+            max(0.10, float(episode_return_on_notional) / 0.02),
+        )
     if tail_loss_episode:
         verdict = "entry_tail_loss_revalidate"
         trigger_verdict = "trigger_tail_loss_revalidate"
@@ -232,6 +258,8 @@ def _entry_quality_outcome_from_sample(
         "tail_loss_episode": tail_loss_episode,
         "positive_entry_episode": positive_entry_episode,
         "net_pnl": net_pnl,
+        "return_on_notional": episode_return_on_notional,
+        "learning_economics_basis": "after_fee_return_on_notional",
         "penalty_weight": round(penalty_weight, 4),
         "support_weight": round(support_weight, 4),
         "trigger_quality_verdict": trigger_verdict,
@@ -549,11 +577,43 @@ def _signal_calibration_contract(
     action_preference: str,
     amplification_scope_quality: str,
     reward_source: str,
+    mean_return_on_notional: float | None = None,
+    latest_complete_episode_return_on_notional: float | None = None,
+    latest_complete_episode_date: str | None = None,
+    latest_complete_episode_outcome: str | None = None,
 ) -> Dict[str, Any]:
     lane = _action_value_lane(action_name)
     family = canonical_action_family(action_name)
     preference_text = str(action_preference or "").lower()
-    if lane in {"exit", "reduce"} and preference_text.startswith("positive_"):
+    formal_entry_episode = bool(
+        family == "open_add_new_risk"
+        and lane in {"open", "add", "scale", "increase"}
+        and reward_source in {"trade_episode", "episode_trade"}
+    )
+    missing_entry_episode_return = bool(
+        formal_entry_episode and mean_return_on_notional is None
+    )
+    entry_episode_learning = bool(
+        formal_entry_episode
+        and mean_return_on_notional is not None
+    )
+    latest_complete_episode_loss = bool(
+        entry_episode_learning
+        and amplification_scope_quality == "exact_real_state"
+        and latest_complete_episode_return_on_notional is not None
+        and latest_complete_episode_return_on_notional < 0.0
+    )
+    if missing_entry_episode_return:
+        calibration_bias = "neutral_evidence_context"
+    elif latest_complete_episode_loss:
+        calibration_bias = "negative_evidence_calibration"
+    elif entry_episode_learning and float(mean_return_on_notional) > 0.0:
+        calibration_bias = "positive_evidence_calibration"
+    elif entry_episode_learning and float(mean_return_on_notional) < 0.0:
+        calibration_bias = "negative_evidence_calibration"
+    elif entry_episode_learning:
+        calibration_bias = "neutral_evidence_context"
+    elif lane in {"exit", "reduce"} and preference_text.startswith("positive_"):
         calibration_bias = "questions_same_side_continuation"
     elif lane == "execution":
         calibration_bias = "execution_context_only"
@@ -573,8 +633,37 @@ def _signal_calibration_contract(
         "source_quality": amplification_scope_quality,
         "reward_source": reward_source,
         "calibration_bias": calibration_bias,
-        "usable_by": ["analysis_team"],
-        "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context", "fresh_data_questioning"],
+        "learning_economics_basis": (
+            "after_fee_return_on_notional"
+            if formal_entry_episode
+            else "lifecycle_reward"
+        ),
+        "mean_return_on_notional": (
+            mean_return_on_notional if entry_episode_learning else None
+        ),
+        "latest_complete_episode_return_on_notional": (
+            latest_complete_episode_return_on_notional
+            if entry_episode_learning
+            else None
+        ),
+        "latest_complete_episode_date": (
+            latest_complete_episode_date if entry_episode_learning else None
+        ),
+        "latest_complete_episode_outcome": (
+            latest_complete_episode_outcome if entry_episode_learning else None
+        ),
+        "positive_amplification_suspended": latest_complete_episode_loss,
+        "usable_by": [] if missing_entry_episode_return else ["analysis_team"],
+        "allowed_effects": (
+            []
+            if missing_entry_episode_return
+            else ["evidence_quality_calibration", "setup_reliability_context", "fresh_data_questioning"]
+        ),
+        "unusable_reason": (
+            "missing_return_on_notional"
+            if missing_entry_episode_return
+            else None
+        ),
         "forbidden_effects": [
             "trade_authority",
             "lots",
@@ -790,6 +879,12 @@ def _profile_thresholds(cfg: Mapping[str, Any]) -> Dict[str, Any]:
         "cap_min_loss_abs": abs(float(profile_cfg.get("cap_min_loss_abs", 8000.0) or 8000.0)),
         "cap_net_loss_abs": abs(float(profile_cfg.get("cap_net_loss_abs", 1500.0) or 1500.0)),
         "cap_profit_factor_below": float(profile_cfg.get("cap_profit_factor_below", 0.90) or 0.90),
+        "negative_expectancy_window_complete_episodes": int(
+            profile_cfg.get("negative_expectancy_window_complete_episodes", 5) or 5
+        ),
+        "cap_mean_return_on_notional_below": float(
+            profile_cfg.get("cap_mean_return_on_notional_below", 0.0) or 0.0
+        ),
         "reject_min_samples": int(profile_cfg.get("reject_min_samples", 5) or 5),
         "reject_min_loss_abs": abs(float(profile_cfg.get("reject_min_loss_abs", 20000.0) or 20000.0)),
         "reject_profit_factor_below": float(profile_cfg.get("reject_profit_factor_below", 0.65) or 0.65),
@@ -800,7 +895,10 @@ def _profile_thresholds(cfg: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _stats_from_rows(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+def _stats_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+    cfg: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
     row_list = [row for row in rows if isinstance(row, Mapping)]
     trade_rows = [
         row
@@ -824,6 +922,28 @@ def _stats_from_rows(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
     win_rate = (win_count / trade_count) if trade_count else 0.0
     profit_factor = (gross_profit / abs(gross_loss)) if gross_loss < 0 else (99.0 if gross_profit > 0 else 0.0)
     holding_days = [_safe_int(row.get("holding_days")) for row in trade_rows if _safe_int(row.get("holding_days")) > 0]
+    ordered_episode_returns = [
+        episode_return
+        for _, episode_return in sorted(
+            (
+                (row, _episode_return_on_notional_for_row(row))
+                for row in trade_rows
+            ),
+            key=lambda item: (
+                str(item[0].get("trading_date") or "")[:10],
+                str(item[0].get("created_at") or ""),
+            ),
+        )
+        if episode_return is not None
+    ]
+    expectancy_window = max(
+        1,
+        _profile_thresholds(cfg or {}).get(
+            "negative_expectancy_window_complete_episodes",
+            5,
+        ),
+    )
+    recent_episode_returns = ordered_episode_returns[-expectancy_window:]
     return {
         "sample_count": sample_count,
         "trade_count": trade_count,
@@ -838,6 +958,13 @@ def _stats_from_rows(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
         "win_rate": win_rate,
         "max_loss": min(pnl_values) if pnl_values else 0.0,
         "avg_holding_days": (sum(holding_days) / len(holding_days)) if holding_days else 0.0,
+        "recent_complete_episode_count": len(recent_episode_returns),
+        "recent_mean_return_on_notional": (
+            sum(recent_episode_returns) / len(recent_episode_returns)
+            if recent_episode_returns
+            else None
+        ),
+        "negative_expectancy_window_complete_episodes": expectancy_window,
     }
 
 
@@ -849,6 +976,23 @@ def classify_lifecycle(stats: Mapping[str, Any], cfg: Mapping[str, Any]) -> Dict
     net_pnl = _safe_float(stats.get("net_pnl"))
     profit_factor = _safe_float(stats.get("profit_factor"))
     max_loss = _safe_float(stats.get("max_loss"))
+    recent_complete_episode_count = _safe_int(
+        stats.get("recent_complete_episode_count")
+    )
+    recent_mean_return_on_notional_value = stats.get(
+        "recent_mean_return_on_notional"
+    )
+    recent_mean_return_on_notional = (
+        _safe_float(recent_mean_return_on_notional_value)
+        if recent_mean_return_on_notional_value is not None
+        else None
+    )
+    recent_negative_expectancy = bool(
+        recent_complete_episode_count >= t["cap_min_samples"]
+        and recent_mean_return_on_notional is not None
+        and recent_mean_return_on_notional
+        < t["cap_mean_return_on_notional_below"]
+    )
 
     state = "candidate"
     reason = "insufficient_samples_or_edge"
@@ -859,6 +1003,9 @@ def classify_lifecycle(stats: Mapping[str, Any], cfg: Mapping[str, Any]) -> Dict
     ):
         state = "rejected"
         reason = "same_scope_negative_expectancy"
+    elif recent_negative_expectancy:
+        state = "capped"
+        reason = "same_scope_recent_return_on_notional_negative"
     elif (
         sample_count >= t["cap_min_samples"]
         and (
@@ -919,6 +1066,9 @@ def classify_lifecycle(stats: Mapping[str, Any], cfg: Mapping[str, Any]) -> Dict
         "profile_state_hint_boundary": "profile lifecycle hint only; not an action preference or trade command",
         "confidence_score": confidence,
         "max_position_impact": max_position_impact,
+        "recent_complete_episode_count": recent_complete_episode_count,
+        "recent_mean_return_on_notional": recent_mean_return_on_notional,
+        "recent_negative_expectancy": recent_negative_expectancy,
     }
 
 
@@ -1032,7 +1182,7 @@ def upsert_alpha_setup_sample_and_profile(
         (config_id, scope_key, lookback_start, str(trading_date)[:10]),
     )
     rows = [dict(row) for row in cursor.fetchall()]
-    stats = _stats_from_rows(rows)
+    stats = _stats_from_rows(rows, cfg)
     lifecycle = classify_lifecycle(stats, cfg)
     valid_until = _valid_until(str(trading_date)[:10], _profile_thresholds(cfg)["valid_days"])
     contract = build_next_round_memory_contract(
@@ -1235,7 +1385,46 @@ def _upsert_action_values(
             continue
         action_profile_lifecycle = profile_lifecycle
         if canonical_action_family(action_name) == "open_add_new_risk":
-            action_profile_lifecycle = classify_lifecycle(_stats_from_rows(reward_rows), cfg)
+            action_profile_lifecycle = classify_lifecycle(
+                _stats_from_rows(reward_rows, cfg),
+                cfg,
+            )
+        episode_return_rows = [
+            (row, episode_return)
+            for row in reward_rows
+            for episode_return in [_episode_return_on_notional_for_row(row)]
+            if episode_return is not None
+        ]
+        latest_complete_episode = max(
+            episode_return_rows,
+            key=lambda item: (
+                str(item[0].get("trading_date") or "")[:10],
+                str(item[0].get("created_at") or ""),
+            ),
+            default=None,
+        )
+        latest_complete_episode_row = (
+            latest_complete_episode[0] if latest_complete_episode else None
+        )
+        latest_complete_episode_return_on_notional = (
+            latest_complete_episode[1] if latest_complete_episode else None
+        )
+        latest_complete_episode_date = (
+            str(latest_complete_episode_row.get("trading_date") or "")[:10]
+            if isinstance(latest_complete_episode_row, Mapping)
+            else None
+        )
+        latest_complete_episode_outcome = (
+            "profit"
+            if latest_complete_episode_return_on_notional is not None
+            and latest_complete_episode_return_on_notional > 0
+            else "loss"
+            if latest_complete_episode_return_on_notional is not None
+            and latest_complete_episode_return_on_notional < 0
+            else "flat"
+            if latest_complete_episode_return_on_notional is not None
+            else None
+        )
         latest_reward_row = max(
             reward_rows,
             key=lambda item: (
@@ -1323,6 +1512,12 @@ def _upsert_action_values(
             action_preference=action_preference,
             amplification_scope_quality=amplification_scope_quality,
             reward_source=reward_source,
+            mean_return_on_notional=mean_return_on_notional,
+            latest_complete_episode_return_on_notional=(
+                latest_complete_episode_return_on_notional
+            ),
+            latest_complete_episode_date=latest_complete_episode_date,
+            latest_complete_episode_outcome=latest_complete_episode_outcome,
         )
         payload = {
             "research_output_contract_version": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
@@ -1344,6 +1539,11 @@ def _upsert_action_values(
             "mean_return_on_notional": mean_return_on_notional,
             "worst_return_on_notional": worst_return_on_notional,
             "episode_return_on_notional_count": len(return_on_notional_values),
+            "latest_complete_episode_return_on_notional": (
+                latest_complete_episode_return_on_notional
+            ),
+            "latest_complete_episode_date": latest_complete_episode_date,
+            "latest_complete_episode_outcome": latest_complete_episode_outcome,
             "win_rate": win_rate,
             "profile_lifecycle": dict(action_profile_lifecycle),
             "source": "alpha_setup_profile_action_value",
@@ -1496,6 +1696,10 @@ def analyst_signal_calibration_prompt_line(action_value: Mapping[str, Any]) -> s
     source_quality = str(signal_calibration.get("source_quality") or payload.get("amplification_scope_quality") or "unknown")
     sample_count = _safe_int(action_value.get("sample_count"))
     confidence = _safe_float(action_value.get("confidence_score"))
+    mean_return = signal_calibration.get("mean_return_on_notional")
+    latest_return = signal_calibration.get(
+        "latest_complete_episode_return_on_notional"
+    )
     product_view = (
         action_value.get("product_learning_calibration_view")
         if isinstance(action_value.get("product_learning_calibration_view"), Mapping)
@@ -1521,7 +1725,9 @@ def analyst_signal_calibration_prompt_line(action_value: Mapping[str, Any]) -> s
         f"{action_value.get('horizon_class')}/{action_value.get('market_regime')}: "
         f"setup={action_value.get('setup_type')}, action={action_value.get('action_name')}, lane={lane}, "
         f"signal_calibration_bias={bias}, source_quality={source_quality}, n={sample_count}, "
-        f"conf={confidence:.2f}, analyst_allowed={allowed or 'evidence_quality_calibration'}, "
+        f"conf={confidence:.2f}, mean_return_on_notional={mean_return}, "
+        f"latest_complete_episode_return_on_notional={latest_return}, "
+        f"analyst_allowed={allowed or 'evidence_quality_calibration'}, "
         f"analyst_forbidden={forbidden or 'trade_authority,lots,margin_ratio,direction_override'}."
         f"{entry_suffix} "
         "Analyst use only: calibrate evidence quality, setup reliability, and fresh-data questions; "
@@ -1538,6 +1744,12 @@ def _analyst_signal_calibration_view(signal_calibration: Mapping[str, Any]) -> D
         "source_quality",
         "reward_source",
         "calibration_bias",
+        "learning_economics_basis",
+        "mean_return_on_notional",
+        "latest_complete_episode_return_on_notional",
+        "latest_complete_episode_date",
+        "latest_complete_episode_outcome",
+        "positive_amplification_suspended",
         "usable_by",
         "allowed_effects",
         "forbidden_effects",
@@ -1604,6 +1816,8 @@ def _entry_quality_calibration_view(value: Mapping[str, Any]) -> Dict[str, Any]:
         "trigger_confirmation_adjustment": _clean_token(
             outcome.get("trigger_confirmation_adjustment"), "neutral"
         ),
+        "return_on_notional": outcome.get("return_on_notional"),
+        "learning_economics_basis": outcome.get("learning_economics_basis"),
         "support_weight": _bounded_analyst_weight(outcome.get("support_weight")),
         "penalty_weight": _bounded_analyst_weight(outcome.get("penalty_weight")),
         "not_trade_authority": True,
@@ -1701,6 +1915,12 @@ def compact_action_value_for_analyst_trace(action_value: Mapping[str, Any]) -> D
         "action_name": action_value.get("action_name"),
         "sample_count": action_value.get("sample_count"),
         "confidence_score": action_value.get("confidence_score"),
+        "mean_return_on_notional": payload.get("mean_return_on_notional"),
+        "latest_complete_episode_return_on_notional": payload.get(
+            "latest_complete_episode_return_on_notional"
+        ),
+        "latest_complete_episode_date": payload.get("latest_complete_episode_date"),
+        "latest_complete_episode_outcome": payload.get("latest_complete_episode_outcome"),
         "valid_until": action_value.get("valid_until"),
         "research_output_contract_version": payload.get("research_output_contract_version"),
         "action_value_lane": (

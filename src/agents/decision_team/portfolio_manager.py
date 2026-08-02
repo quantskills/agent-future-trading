@@ -2761,7 +2761,8 @@ def _step4_capital_plan(
         qualified_positive
         and alpha_ev.get("qualified_positive_expectancy")
         and int(action_stats.get("sample_count") or 0) >= mature_sample_count
-        and _safe_float(action_stats.get("reward_sum"), 0.0) > 0.0
+        and action_stats.get("mean_return_on_notional") is not None
+        and _safe_float(action_stats.get("mean_return_on_notional"), 0.0) > 0.0
     )
     strong_confirmation = bool(
         trade_authority.get("strong_market_confirmation")
@@ -4457,6 +4458,19 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
             if row.get("worst_return_on_notional") is not None
             else payload.get("worst_return_on_notional")
         ),
+        "latest_complete_episode_return_on_notional": (
+            row.get("latest_complete_episode_return_on_notional")
+            if row.get("latest_complete_episode_return_on_notional") is not None
+            else payload.get("latest_complete_episode_return_on_notional")
+        ),
+        "latest_complete_episode_date": (
+            row.get("latest_complete_episode_date")
+            or payload.get("latest_complete_episode_date")
+        ),
+        "latest_complete_episode_outcome": (
+            row.get("latest_complete_episode_outcome")
+            or payload.get("latest_complete_episode_outcome")
+        ),
         "win_rate": row.get("win_rate"),
         "confidence_score": row.get("confidence_score"),
         "action_preference": _action_value_preference(row),
@@ -4677,6 +4691,9 @@ def _normalize_alpha_setup_action_value(row: dict) -> dict:
         "mean_return_on_notional",
         "worst_return_on_notional",
         "episode_return_on_notional_count",
+        "latest_complete_episode_return_on_notional",
+        "latest_complete_episode_date",
+        "latest_complete_episode_outcome",
         "tail_loss_count",
         "real_trade_reward_count",
         "counterfactual_reward_count",
@@ -5193,6 +5210,22 @@ def _action_value_int(row: dict, key: str, default: int = 0) -> int:
         return default
 
 
+def _action_value_return_on_notional(
+    row: dict,
+    *,
+    key: str = "mean_return_on_notional",
+) -> float | None:
+    if not isinstance(row, dict):
+        return None
+    payload = _action_value_payload(row)
+    value = row.get(key)
+    if value is None:
+        value = payload.get(key)
+    if value is None:
+        return None
+    return _safe_float(value, 0.0)
+
+
 def _action_value_has_complete_state(row: dict, ticker: str | None = None, side: str | None = None) -> bool:
     if not isinstance(row, dict):
         return False
@@ -5536,8 +5569,6 @@ def _positive_open_action_value_seed(
     ev_cfg = (pm_config.get("alpha_setup_ev_fusion") or {})
     min_action_conf = float(ev_cfg.get("min_action_value_confidence", 0.35) or 0.35)
     min_action_samples = int(ev_cfg.get("real_trade_min_action_value_samples", ev_cfg.get("min_action_value_samples", 2)) or 2)
-    positive_reward_min = float(ev_cfg.get("positive_reward_mean_min", 0.0) or 0.0)
-    positive_sum_min = float(ev_cfg.get("real_trade_positive_reward_sum_min", 0.0) or 0.0)
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
     preferred_side = str(scorecard.get("preferred_side") or "").strip().lower()
     if preferred_side not in {"long", "short"}:
@@ -5554,12 +5585,24 @@ def _positive_open_action_value_seed(
             preference = _action_value_preference(row)
             if preference not in _POSITIVE_OPEN_ACTION_PREFERENCES:
                 continue
+            latest_episode_return = row.get(
+                "latest_complete_episode_return_on_notional"
+            )
+            if latest_episode_return is not None and _safe_float(
+                latest_episode_return,
+                0.0,
+            ) < 0.0:
+                continue
             if not _action_value_can_support_real_amplification(row, ticker, side):
                 continue
+            mean_return_on_notional_value = _action_value_return_on_notional(row)
+            positive_episode_economics = bool(
+                mean_return_on_notional_value is not None
+                and mean_return_on_notional_value > 0.0
+            )
             exact_positive_candidate = bool(
                 preference in _POSITIVE_OPEN_ACTION_PREFERENCES
-                and _safe_float(row.get("reward_mean"), 0.0) >= positive_reward_min
-                and _safe_float(row.get("reward_sum"), 0.0) > 0
+                and positive_episode_economics
             )
             mature_positive = bool(
                 int(row.get("sample_count") or 0) >= min_action_samples
@@ -5567,9 +5610,7 @@ def _positive_open_action_value_seed(
             )
             if not (mature_positive or exact_positive_candidate):
                 continue
-            if _safe_float(row.get("reward_mean"), 0.0) < positive_reward_min:
-                continue
-            if _safe_float(row.get("reward_sum"), 0.0) < positive_sum_min:
+            if not positive_episode_economics:
                 continue
             evidence = _current_open_evidence_snapshot(
                 side=side,
@@ -5589,8 +5630,11 @@ def _positive_open_action_value_seed(
                 "candidate_positive_action_preference": bool(exact_positive_candidate and not mature_positive),
                 "rank": (
                     1 if mature_positive else 0,
-                    _safe_float(row.get("reward_sum"), 0.0),
-                    _safe_float(row.get("reward_mean"), 0.0),
+                    (
+                        mean_return_on_notional_value
+                        if mean_return_on_notional_value is not None
+                        else 0.0
+                    ),
                     _safe_float(row.get("confidence_score"), 0.0),
                     int(row.get("sample_count") or 0),
                 ),
@@ -7556,8 +7600,7 @@ def _apply_alpha_setup_ev_position_control(
             scope_rank,
             _safe_float(row.get("confidence_score"), 0.0),
             int(row.get("sample_count") or 0),
-            _safe_float(row.get("reward_mean"), 0.0),
-            _safe_float(row.get("reward_sum"), 0.0),
+            _safe_float(row.get("mean_return_on_notional"), 0.0),
         )
 
     intent_matched_action_values = [
@@ -7583,7 +7626,47 @@ def _apply_alpha_setup_ev_position_control(
     action_tail_loss_count = _action_value_int(best_action_value, "tail_loss_count")
     action_loss_reward_count = _action_value_int(best_action_value, "loss_reward_count")
     action_worst_reward = _safe_float(_action_value_payload(best_action_value).get("worst_reward"), 0.0)
+    action_mean_return_on_notional_value = _action_value_return_on_notional(
+        best_action_value
+    )
+    action_mean_return_on_notional = (
+        action_mean_return_on_notional_value
+        if action_mean_return_on_notional_value is not None
+        else 0.0
+    )
+    action_worst_return_on_notional_value = _action_value_return_on_notional(
+        best_action_value,
+        key="worst_return_on_notional",
+    )
+    action_worst_return_on_notional = (
+        action_worst_return_on_notional_value
+        if action_worst_return_on_notional_value is not None
+        else action_mean_return_on_notional
+    )
+    positive_episode_economics = bool(
+        action_mean_return_on_notional_value is not None
+        and action_mean_return_on_notional_value > 0.0
+    )
+    negative_episode_economics = bool(
+        action_mean_return_on_notional_value is not None
+        and action_mean_return_on_notional_value < 0.0
+    )
     action_preference = _action_value_preference(best_action_value)
+    latest_complete_episode_return_value = best_action_value.get(
+        "latest_complete_episode_return_on_notional"
+    )
+    latest_complete_episode_return_on_notional = (
+        _safe_float(latest_complete_episode_return_value, 0.0)
+        if latest_complete_episode_return_value is not None
+        else None
+    )
+    latest_complete_episode_loss = bool(
+        action_scope_quality == "exact_real_state"
+        and str(best_action_value.get("reward_source") or "").strip().lower()
+        in {"trade_episode", "episode_trade"}
+        and latest_complete_episode_return_on_notional is not None
+        and latest_complete_episode_return_on_notional < 0.0
+    )
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
     side_scorecard = scorecard.get(target_side) if isinstance(scorecard.get(target_side), dict) else {}
@@ -7609,14 +7692,7 @@ def _apply_alpha_setup_ev_position_control(
     min_action_conf = float(ev_cfg.get("min_action_value_confidence", 0.35) or 0.35)
     min_action_samples = int(ev_cfg.get("min_action_value_samples", 2) or 2)
     real_trade_min_samples = int(ev_cfg.get("real_trade_min_action_value_samples", min_action_samples) or min_action_samples)
-    real_trade_negative_sum = float(
-        ev_cfg.get("real_trade_negative_reward_sum_max", ev_cfg.get("negative_reward_sum_max", -500.0)) or -500.0
-    )
-    real_trade_positive_sum = float(ev_cfg.get("real_trade_positive_reward_sum_min", 0.0) or 0.0)
     min_support_confidence = float(ev_cfg.get("real_trade_min_analyst_confidence", 0.45) or 0.45)
-    positive_reward_min = float(ev_cfg.get("positive_reward_mean_min", 0.0) or 0.0)
-    negative_reward_max = float(ev_cfg.get("negative_reward_mean_max", -1e-9) or -1e-9)
-    negative_sum_max = float(ev_cfg.get("negative_reward_sum_max", -500.0) or -500.0)
     positive_scale_multiplier = float(ev_cfg.get("positive_expectancy_multiplier", 1.15) or 1.15)
     unknown_probe_multiplier = float(ev_cfg.get("unknown_expectancy_probe_multiplier", 0.50) or 0.50)
     negative_cap_multiplier = float(ev_cfg.get("negative_expectancy_multiplier", 0.20) or 0.20)
@@ -7701,15 +7777,14 @@ def _apply_alpha_setup_ev_position_control(
         best_action_value
         and action_real_amplification_support
         and action_preference in _POSITIVE_OPEN_ACTION_PREFERENCES
-        and action_reward_mean >= positive_reward_min
-        and action_reward_sum > 0
+        and positive_episode_economics
     )
     positive_action_value_candidate = (
         (action_value_usable or exact_candidate_positive_action_value)
         and action_exact_ticker_support
         and action_preference in _POSITIVE_OPEN_ACTION_PREFERENCES
-        and action_reward_mean >= positive_reward_min
-        and action_reward_sum >= 0
+        and positive_episode_economics
+        and not latest_complete_episode_loss
     )
     tail_loss_blocks_real_amplification = bool(action_tail_loss_count > 0 and not strong_realtime_evidence)
     positive_action_value = (
@@ -7722,25 +7797,28 @@ def _apply_alpha_setup_ev_position_control(
         action_value_usable
         and action_exact_ticker_support
         and (
-            action_reward_mean <= negative_reward_max
-            or action_reward_sum <= negative_sum_max
+            negative_episode_economics
             or action_tail_loss_count > 0
         )
     )
     positive_profile_raw = state in {"deployable", "protected"} and net_pnl > 0 and profit_factor >= 1.0
-    positive_profile = positive_profile_raw and not open_action_value_missing
+    positive_profile = (
+        positive_profile_raw
+        and not open_action_value_missing
+        and not latest_complete_episode_loss
+    )
     negative_profile = state in {"capped", "rejected"} or (sample_count >= 2 and net_pnl < 0 and profit_factor < 1.0)
     qualified_positive_expectancy = bool(
         (
             positive_action_value
             and action_sample_count >= real_trade_min_samples
-            and action_reward_sum >= real_trade_positive_sum
+            and positive_episode_economics
             and not tail_loss_blocks_real_amplification
         )
         or (
             positive_profile
             and sample_count >= real_trade_min_samples
-            and net_pnl >= real_trade_positive_sum
+            and positive_episode_economics
             and not open_action_value_missing
         )
     )
@@ -7748,7 +7826,7 @@ def _apply_alpha_setup_ev_position_control(
         (
             negative_action_value
             and action_sample_count >= real_trade_min_samples
-            and action_reward_sum <= real_trade_negative_sum
+            and negative_episode_economics
         )
         or negative_profile
     ) and not strong_realtime_evidence
@@ -7834,6 +7912,14 @@ def _apply_alpha_setup_ev_position_control(
         "qualified_positive_expectancy": qualified_positive_expectancy,
         "repeat_loss_without_new_evidence": repeat_loss_without_new_evidence,
         "tail_loss_blocks_real_amplification": tail_loss_blocks_real_amplification,
+        "latest_complete_episode_return_on_notional": (
+            latest_complete_episode_return_on_notional
+        ),
+        "latest_complete_episode_date": best_action_value.get(
+            "latest_complete_episode_date"
+        ),
+        "latest_complete_episode_loss": latest_complete_episode_loss,
+        "positive_amplification_suspended": latest_complete_episode_loss,
         "strong_realtime_evidence": strong_realtime_evidence,
         "strong_market_confirmation": strong_market_confirmation,
         "technical_supports_side": technical_supports_side,
@@ -7855,6 +7941,8 @@ def _apply_alpha_setup_ev_position_control(
             "sample_count": action_sample_count,
             "reward_mean": action_reward_mean,
             "reward_sum": action_reward_sum,
+            "mean_return_on_notional": action_mean_return_on_notional,
+            "worst_return_on_notional": action_worst_return_on_notional,
             "win_rate": action_win_rate,
             "confidence_score": action_confidence,
             "action_preference": action_preference,
@@ -7865,6 +7953,13 @@ def _apply_alpha_setup_ev_position_control(
             "loss_reward_count": action_loss_reward_count,
             "tail_loss_count": action_tail_loss_count,
             "worst_reward": action_worst_reward,
+            "latest_complete_episode_return_on_notional": (
+                latest_complete_episode_return_on_notional
+            ),
+            "latest_complete_episode_date": best_action_value.get(
+                "latest_complete_episode_date"
+            ),
+            "latest_complete_episode_loss": latest_complete_episode_loss,
         },
         "multiplier": multiplier,
         "max_profile_impact": max_profile_impact,

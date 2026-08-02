@@ -134,7 +134,10 @@
 - 同品种同方向频繁交易且已结算表现差的样本，会被投资组合经理交易磨损控制缩放仓位；该机制不改变账务事实，也不是品种黑名单。
 - 研究员输出的 `alpha_setup_sample/profile/action_value` 会在未来交易日被 `decision_memory_retrieval` 读取。检索必须满足历史样本 `trading_date < decision_date`，优先同品种/同方向/同 setup/同 regime；同板块样本只能作弱先验，不能直接授权开仓。投资组合经理将 open/hold/exit 样本转成仓位生命周期偏好，影响未来机会评分、排序、保护性减仓或退出；execution 样本只能由投资组合经理写入最终合约的执行 profile，交易员不直接读取研究 action-value。
 - 研究员还可以输出机会排序偏好候选，用于未来投资组合经理的 `opportunity_score` 和资金部署优先级。排序偏好不是品种黑名单，也不是交易命令；它必须和当日证据、资金、审计员审计、唯一 `final_action_contract` 一起生效。
-- 投资组合经理排序必须体现全周期学习：完整 episode 的 open/add/hold/reduce/exit/conditional_monitor/execution action-value 和 `memory_side_role` 优先于单日噪声；正负学习按平均名义收益率计分，尾部学习按最差名义收益率计分，人民币盈亏不进入 Rank；`positive_learning` 可以支持已验证 alpha 从 probe 晋升到更高合规仓位，`recent_tail_loss_penalty` 可以降低排名并抵消旧正向学习。资金迁移目标是让强 alpha 得到放大、失效 alpha 及时降温，而不是靠静态门控减少交易。
+- 投资组合经理排序必须体现全周期学习：完整 episode 的 open/add/hold/reduce/exit/conditional_monitor/execution action-value 和 `memory_side_role` 优先于单日噪声；正负学习、候选仓位放大均统一使用手续费后名义收益率，尾部学习按最差名义收益率计分，人民币盈亏不进入 Rank；同完整作用域最新完整亏损立即撤销旧正向学习和正向 Profile 加分，但当日强证据仍可按既有 0.8%～1.5% 差异化 probe 验证。最近最多5个完整周期达到样本下限且平均收益转负时复用 `capped`，新 probe 恢复盈利后再按既有门槛恢复 real/scale；资金迁移目标是让强 alpha 得到放大、失效 alpha 及时降温，而不是靠静态门控减少交易。
+- 分析师对正式open/add学习的证据校准强度与PM读取同一份手续费后名义收益率；安全投影保留平均及最新完整周期收益率，不保留人民币reward。最新同完整作用域亏损同时撤销分析师旧正向Profile校准，不改分析师方向权限、PM唯一Rank或FAC生成路径。
+- 对 `trigger_confirmation_adjustment=stronger/strict` 的入场，Trader 在既有 FAC 内同时验证下一根完整15分钟线价格延续和相对量能；standard 候选不加该门。该确认只决定已审计入场 FAC 是否成交，不改变 PM 方向、手数、rank 或下一交易日唯一退出 FAC。
+- 开仓episode生成`trigger_confirmation_adjustment`时只读取手续费后`return_on_notional`，相同收益率不得因品种、乘数、人民币盈亏或手数不同产生不同等级；人民币盈亏继续进入结算、审计和既有生命周期统计。
 
 ### 12. 与真实期货市场的符合度
 

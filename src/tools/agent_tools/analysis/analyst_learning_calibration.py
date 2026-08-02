@@ -128,16 +128,18 @@ def _row_side_matches_signal(row: Mapping[str, Any], direction: str) -> bool:
 def _row_strength(row: Mapping[str, Any]) -> float:
     samples = _safe_int(row.get("sample_count"))
     confidence = _safe_float(row.get("confidence_score"))
-    reward_mean = _safe_float(row.get("reward_mean"))
     win_rate = _safe_float(row.get("win_rate"), 0.5)
-    pnl = _safe_float(row.get("net_pnl"))
     sample_component = min(0.20, samples / 50.0)
     confidence_component = min(0.25, confidence * 0.25)
-    reward_component = min(0.20, abs(reward_mean) / 10000.0)
     win_component = min(0.15, abs(win_rate - 0.5) * 0.30)
-    pnl_component = min(0.10, abs(pnl) / 50000.0)
+    mean_return_on_notional = row.get("mean_return_on_notional")
+    return_component = (
+        min(0.30, abs(_safe_float(mean_return_on_notional)) * 10.0)
+        if mean_return_on_notional is not None
+        else 0.0
+    )
     strength = _clip(
-        sample_component + confidence_component + reward_component + win_component + pnl_component,
+        sample_component + confidence_component + win_component + return_component,
         0.0,
         0.55,
     )
@@ -191,6 +193,10 @@ def _analyst_safe_action_value_row(row: Mapping[str, Any]) -> Dict[str, Any] | N
     if not isinstance(product_view, Mapping):
         payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
         product_view = payload.get("product_learning_calibration_view")
+    def calibration_value(name: str) -> Any:
+        value = row.get(name)
+        return value if value is not None else calibration.get(name)
+
     safe_row = {
         "source_learning_record_id": row.get("source_learning_record_id") or row.get("id"),
         "ticker": row.get("ticker"),
@@ -208,6 +214,16 @@ def _analyst_safe_action_value_row(row: Mapping[str, Any]) -> Dict[str, Any] | N
         "canonical_action_family": row.get("canonical_action_family"),
         "sample_count": row.get("sample_count"),
         "confidence_score": row.get("confidence_score"),
+        "mean_return_on_notional": calibration_value("mean_return_on_notional"),
+        "latest_complete_episode_return_on_notional": calibration_value(
+            "latest_complete_episode_return_on_notional"
+        ),
+        "latest_complete_episode_date": calibration_value(
+            "latest_complete_episode_date"
+        ),
+        "latest_complete_episode_outcome": calibration_value(
+            "latest_complete_episode_outcome"
+        ),
         "signal_calibration": dict(calibration),
     }
     if str(row.get("retrieval_match_level") or "") == _CROSS_REGIME_RETRIEVAL_MATCH:
@@ -219,6 +235,18 @@ def _analyst_safe_action_value_row(row: Mapping[str, Any]) -> Dict[str, Any] | N
 
 def _row_is_negative(row: Mapping[str, Any]) -> bool:
     calibration = _signal_calibration(row)
+    latest_return = row.get("latest_complete_episode_return_on_notional")
+    mean_return = row.get("mean_return_on_notional")
+    entry_return_economics = bool(
+        calibration
+        and str(calibration.get("learning_economics_basis") or "").strip()
+        == "after_fee_return_on_notional"
+        and mean_return is not None
+    )
+    if entry_return_economics:
+        if latest_return is not None and _safe_float(latest_return) < 0.0:
+            return True
+        return _safe_float(mean_return) < 0.0
     if calibration:
         bias = str(calibration.get("calibration_bias") or "").lower()
         return bias in {
@@ -233,6 +261,18 @@ def _row_is_negative(row: Mapping[str, Any]) -> bool:
 
 def _row_is_positive(row: Mapping[str, Any]) -> bool:
     calibration = _signal_calibration(row)
+    latest_return = row.get("latest_complete_episode_return_on_notional")
+    mean_return = row.get("mean_return_on_notional")
+    entry_return_economics = bool(
+        calibration
+        and str(calibration.get("learning_economics_basis") or "").strip()
+        == "after_fee_return_on_notional"
+        and mean_return is not None
+    )
+    if entry_return_economics:
+        if latest_return is not None and _safe_float(latest_return) < 0.0:
+            return False
+        return _safe_float(mean_return) > 0.0
     if calibration:
         bias = str(calibration.get("calibration_bias") or "").lower()
         return bias == "positive_evidence_calibration"
@@ -360,6 +400,45 @@ def _row_trigger_identity(row: Mapping[str, Any]) -> tuple[str, bool]:
         return "", False
     trigger = next(iter(values))
     return trigger, trigger in _CANONICAL_TRIGGER_IDENTITIES
+
+
+def _entry_learning_scope_identity(row: Mapping[str, Any]) -> tuple[str, ...]:
+    product_view = _product_learning_view(row)
+    setup_type, setup_valid = _row_setup_identity(row)
+    trigger_key, trigger_valid = _row_trigger_identity(row)
+    if not setup_valid or not trigger_valid:
+        return ()
+    return (
+        str(row.get("ticker") or product_view.get("ticker") or "").strip().upper(),
+        _normalized_identity(row.get("side") or product_view.get("side")),
+        _normalized_identity(
+            row.get("horizon_class") or product_view.get("horizon_class")
+        ),
+        canonical_market_regime(
+            row.get("market_regime") or product_view.get("market_regime"),
+            "*",
+        ),
+        setup_type,
+        _normalized_identity(
+            row.get("data_combo") or product_view.get("evidence_combo") or "*"
+        ),
+        trigger_key,
+    )
+
+
+def _latest_exact_entry_loss(row: Mapping[str, Any]) -> bool:
+    calibration = _signal_calibration(row)
+    if not calibration:
+        return False
+    latest_return = row.get("latest_complete_episode_return_on_notional")
+    return bool(
+        str(calibration.get("learning_economics_basis") or "").strip()
+        == "after_fee_return_on_notional"
+        and str(calibration.get("source_quality") or "").strip()
+        == "exact_real_state"
+        and latest_return is not None
+        and _safe_float(latest_return) < 0.0
+    )
 
 
 def _current_entry_identity(signal: AnalystSignal) -> tuple[str, str]:
@@ -714,7 +793,19 @@ def calibrate_signal_with_learning_context(
     )
     if unsafe_contract_count > 0:
         rejected_reasons["analyst_calibration_contract_invalid"] += unsafe_contract_count
-    positive_rows = [row for row in matched if _row_is_positive(row)]
+    latest_loss_scope_identities = {
+        scope_identity
+        for row in matched
+        if _latest_exact_entry_loss(row)
+        for scope_identity in [_entry_learning_scope_identity(row)]
+        if scope_identity
+    }
+    positive_rows = [
+        row
+        for row in matched
+        if _row_is_positive(row)
+        and _entry_learning_scope_identity(row) not in latest_loss_scope_identities
+    ]
     negative_rows = [row for row in matched if _row_is_negative(row)]
     broad_positive_rows = [row for row in broad if _row_is_positive(row)]
     broad_negative_rows = [row for row in broad if _row_is_negative(row)]

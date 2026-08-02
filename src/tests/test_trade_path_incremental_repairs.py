@@ -510,6 +510,72 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
             "stronger_confirmation_required",
         )
 
+    def test_stronger_breakout_rejects_low_participation_follow_through(self):
+        result = select_intraday_execution(
+            signal_bars=[
+                {"datetime": "2025-03-26 09:45:00", "open": 100.0, "high": 100.8, "low": 99.8, "close": 100.5, "volume": 100},
+                {"datetime": "2025-03-26 10:00:00", "open": 101.0, "high": 102.5, "low": 100.8, "close": 102.0, "volume": 10},
+                {"datetime": "2025-03-26 10:15:00", "open": 102.0, "high": 102.8, "low": 101.5, "close": 102.2, "volume": 10},
+            ],
+            execution_bars=[
+                {"datetime": "2025-03-26 09:30:00", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 10:16:00", "open": 102.3, "high": 102.5, "low": 102.0, "close": 102.2, "volume": 10},
+            ],
+            action="open_long",
+            config={
+                "opening_range_minutes": 1,
+                "min_execution_volume": 1,
+                "stronger_confirmation_volume_lookback_bars": 4,
+                "stronger_confirmation_min_volume_ratio": 1.0,
+            },
+            decision_context={
+                "execution_contract": {
+                    **_entry_execution_boundary("long"),
+                    "execution_profile": "breakout",
+                    "trigger_source": "technical_breakout",
+                    "entry_trigger": canonical_entry_trigger("breakout", "long"),
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                    "trigger_confirmation_adjustment": "stronger_confirmation_required",
+                }
+            },
+        )
+
+        self.assertFalse(result.should_execute)
+        self.assertEqual(result.reason, "intraday_trigger_not_met")
+
+    def test_standard_breakout_is_not_routed_through_stronger_volume_gate(self):
+        result = select_intraday_execution(
+            signal_bars=[
+                {"datetime": "2025-03-26 09:45:00", "open": 100.0, "high": 100.8, "low": 99.8, "close": 100.5, "volume": 100},
+                {"datetime": "2025-03-26 10:00:00", "open": 101.0, "high": 102.5, "low": 100.8, "close": 102.0, "volume": 10},
+            ],
+            execution_bars=[
+                {"datetime": "2025-03-26 09:30:00", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 10:01:00", "open": 102.1, "high": 102.3, "low": 101.9, "close": 102.1, "volume": 10},
+            ],
+            action="open_long",
+            config={
+                "opening_range_minutes": 1,
+                "min_execution_volume": 1,
+                "stronger_confirmation_min_volume_ratio": 1.0,
+            },
+            decision_context={
+                "execution_contract": {
+                    **_entry_execution_boundary("long"),
+                    "execution_profile": "breakout",
+                    "trigger_source": "technical_breakout",
+                    "entry_trigger": canonical_entry_trigger("breakout", "long"),
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                    "trigger_confirmation_adjustment": "standard_confirmation_supported",
+                }
+            },
+        )
+
+        self.assertTrue(result.should_execute)
+        self.assertEqual(result.base_datetime, "2025-03-26 10:01:00")
+
     def test_stronger_vwap_waits_for_next_completed_bar(self):
         result = select_intraday_execution(
             signal_bars=[
