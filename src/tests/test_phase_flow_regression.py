@@ -79,6 +79,7 @@ from agents.decision_team.portfolio_manager import (
     _attach_incomplete_prior_diagnostics_to_contract_state,
     _normalize_alpha_setup_action_value,
     _select_learning_trace_action_values,
+    _position_pnl_ratio,
     finalize_pm_full_market_contracts,
     _sign_pm_memory_state,
     _to_recommendation_action,
@@ -3413,6 +3414,69 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertFalse(summary["positive_amplification_suspended"])
         self.assertGreater(summary["positive_learning_signal"], 0.0)
 
+    def test_positive_learning_cannot_resolve_current_dominant_opposition(self):
+        learned = self._action_value(
+            action_preference="positive_candidate_open",
+            lane="open",
+            reward_mean=5000.0,
+            reward_sum=20000.0,
+            mean_return_on_notional=0.05,
+        )
+        row = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[self._tradeable_signal()],
+            market_confirmation={"confirmation_score": 0.75},
+            data_quality_summary={},
+            signal_collection_contract={
+                "evidence_fusion": {
+                    "multi_evidence_consensus_score": 0.40,
+                    "cross_analyst_conflicts": ["technical_vs_fundamental"],
+                    "dominant_opposing_evidence": ["fundamental_opposes_short"],
+                }
+            },
+            alpha_setup_action_values=[learned],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )["short"]
+
+        self.assertGreater(row["validated_learning_delta"], 0.0)
+        self.assertIn(
+            "dominant_opposing_evidence_requires_pm_resolution",
+            row["gating_failures"],
+        )
+        self.assertEqual(row["final_state"], "watch_for_trigger")
+
+    def test_candidate_and_watchlist_profiles_do_not_add_positive_rank_value(self):
+        common = {
+            "ticker": "TA",
+            "analyst_signals": [self._tradeable_signal()],
+            "market_confirmation": {"confirmation_score": 0.70},
+            "data_quality_summary": {},
+            "formal_setup_by_side": {
+                "short": "trend_breakout_setup",
+                "long": "",
+            },
+            "decision_date": "2025-03-15",
+            "config": self._scorecard_config(),
+        }
+        for lifecycle_state in ("candidate", "watchlist"):
+            row = build_opportunity_scorecard(
+                **common,
+                alpha_setup_profiles=[{
+                    "ticker": "TA",
+                    "side": "short",
+                    "setup_type": "trend_breakout_setup",
+                    "lifecycle_state": lifecycle_state,
+                    "sample_count": 20,
+                    "confidence_score": 0.95,
+                    "net_pnl": 50000.0,
+                }],
+            )["short"]
+            self.assertEqual(
+                row["opportunity_score_components"]["alpha_profile_adjustment"],
+                0.0,
+            )
+
     def test_scorecard_excludes_cross_setup_profile_from_formal_rank(self):
         signal = self._tradeable_signal()
         profiles = [
@@ -5038,6 +5102,22 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 "close": 3475.0,
                 "volume": 10,
             },
+            {
+                "datetime": "2025-03-03 10:02:00",
+                "open": 3475.0,
+                "high": 3478.0,
+                "low": 3468.0,
+                "close": 3470.0,
+                "volume": 10,
+            },
+            {
+                "datetime": "2025-03-03 10:03:00",
+                "open": 3470.0,
+                "high": 3473.0,
+                "low": 3465.0,
+                "close": 3468.0,
+                "volume": 10,
+            },
         ]
         untriggered = select_intraday_execution(
             signal_bars=[
@@ -5068,7 +5148,23 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                     "low": 3478.0,
                     "close": 3480.0,
                     "volume": 10,
-                }
+                },
+                {
+                    "datetime": "2025-03-03 10:01:00",
+                    "open": 3478.0,
+                    "high": 3482.0,
+                    "low": 3470.0,
+                    "close": 3475.0,
+                    "volume": 10,
+                },
+                {
+                    "datetime": "2025-03-03 10:02:00",
+                    "open": 3475.0,
+                    "high": 3478.0,
+                    "low": 3468.0,
+                    "close": 3470.0,
+                    "volume": 10,
+                },
             ],
             execution_bars=one_minute_bars,
             action="open_short",
@@ -5077,7 +5173,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             finalize_untriggered=True,
         )
         self.assertTrue(triggered.should_execute)
-        self.assertEqual(triggered.base_datetime, "2025-03-03 10:01:00")
+        self.assertEqual(triggered.base_datetime, "2025-03-03 10:03:00")
 
     def test_existing_short_unchanged_is_hold_not_open_short(self):
         intent = recommendation_intent_from_lots(current_lots=-1, target_lots=-1)
@@ -10795,11 +10891,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     (row_id, confidence, event_id),
                 )
             hypothesis_rows = [
-                ("hypothesis-past", "2025-03-07", 0.70),
-                ("hypothesis-same", "2025-03-10", 0.95),
-                ("hypothesis-future", "2025-03-20", 0.90),
+                ("hypothesis-past", "2025-03-07", 0.70, "validated"),
+                ("hypothesis-candidate", "2025-03-06", 0.99, "candidate"),
+                ("hypothesis-same", "2025-03-10", 0.95, "validated"),
+                ("hypothesis-future", "2025-03-20", 0.90, "validated"),
             ]
-            for row_id, source_date, confidence in hypothesis_rows:
+            for row_id, source_date, confidence, status in hypothesis_rows:
                 cursor.execute(
                     """
                     INSERT INTO exploratory_hypothesis (
@@ -10810,10 +10907,10 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                         valid_until, payload_json
                     ) VALUES (?, 'cfg', ?, 'research', 'RB:long', 'RB',
                         'ferrous', 'long', 'short', 'trend', 'test hypothesis',
-                        'test evidence', 'prior only', ?, 4, 'candidate',
+                        'test evidence', 'prior only', ?, 4, ?,
                         ?, '2025-04-01', '{}')
                     """,
-                    (row_id, source_date, confidence, source_date),
+                    (row_id, source_date, confidence, status, source_date),
                 )
             conn.commit()
             conn.close()
@@ -13976,7 +14073,8 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             conn.execute(
                 "CREATE TABLE futures_transactions (id TEXT, config_id TEXT, ticker TEXT, "
                 "trading_date TEXT, action TEXT, lots INTEGER, source_type TEXT, "
-                "recommendation_id TEXT, execution_price REAL, price REAL, created_at TEXT)"
+                "recommendation_id TEXT, execution_price REAL, price REAL, "
+                "contract_multiplier REAL, created_at TEXT)"
             )
             conn.execute(
                 "CREATE TABLE futures_recommendation (id TEXT, signal_snapshot TEXT, "
@@ -13988,7 +14086,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             )
             conn.execute(
                 "CREATE TABLE ticker_daily_pnl (portfolio_id TEXT, trading_date TEXT, "
-                "ticker TEXT, settle_price REAL)"
+                "ticker TEXT, daily_pnl REAL, commission REAL, settle_price REAL)"
             )
             snapshot = json.dumps(
                 {
@@ -14010,10 +14108,11 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                 ("open-rec", snapshot),
             )
             conn.execute(
-                "INSERT INTO futures_transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO futures_transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     "tx-open", "cfg", "ZZ", "2025-03-20", "open_long", 2,
-                    "strategy", "open-rec", 100.0, 100.0, "2025-03-20 09:31:00",
+                    "strategy", "open-rec", 100.0, 100.0, 10.0,
+                    "2025-03-20 09:31:00",
                 ),
             )
             conn.execute("INSERT INTO portfolio VALUES (?, ?)", ("pf", "cfg"))
@@ -14022,11 +14121,11 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                 [("pf", "2025-03-20"), ("pf", "2025-03-21")],
             )
             conn.executemany(
-                "INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?)",
+                "INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?, ?, ?)",
                 [
-                    ("pf", "2025-03-20", "ZZ", 100.0),
-                    ("pf", "2025-03-21", "ZZ", 103.0),
-                    ("pf", "2025-03-24", "ZZ", 150.0),
+                    ("pf", "2025-03-20", "ZZ", 0.0, 20.0, 100.0),
+                    ("pf", "2025-03-21", "ZZ", 600.0, 0.0, 103.0),
+                    ("pf", "2025-03-24", "ZZ", 9999.0, 0.0, 150.0),
                 ],
             )
             conn.commit()
@@ -14047,6 +14146,10 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                 ticker="ZZ",
                 trading_date="2025-03-24",
                 current_lots=2,
+                current_position=SimpleNamespace(
+                    unrealized_pnl=-300.0,
+                    margin_used=10000.0,
+                ),
             )
 
             self.assertEqual(context["recommendation_id"], "open-rec")
@@ -14059,6 +14162,32 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             self.assertEqual(context["atr_stop_distance"], 2.0)
             self.assertEqual(context["opening_execution_price"], 100.0)
             self.assertEqual(context["best_prior_settlement_price"], 103.0)
+            self.assertEqual(context["settled_cycle_net_pnl"], 580.0)
+            self.assertEqual(context["cycle_net_pnl"], 280.0)
+            self.assertEqual(context["cycle_peak_net_pnl"], 580.0)
+            self.assertEqual(context["cycle_profit_drawdown"], 300.0)
+            self.assertEqual(context["cycle_open_notional"], 2000.0)
+            self.assertAlmostEqual(context["cycle_return_on_notional"], 0.14)
+            self.assertAlmostEqual(context["cycle_peak_return_on_notional"], 0.29)
+            self.assertAlmostEqual(
+                context["cycle_profit_drawdown_on_notional"],
+                0.15,
+            )
+            self.assertAlmostEqual(context["cycle_pnl_ratio"], 0.14)
+            self.assertAlmostEqual(context["cycle_margin_return_ratio"], 0.028)
+            self.assertAlmostEqual(
+                _position_pnl_ratio(
+                    SimpleNamespace(unrealized_pnl=-300.0, margin_used=10000.0),
+                ),
+                -0.03,
+            )
+            self.assertAlmostEqual(
+                _position_pnl_ratio(
+                    SimpleNamespace(unrealized_pnl=-300.0, margin_used=10000.0),
+                    context,
+                ),
+                0.14,
+            )
 
             atr_only_context = dict(context)
             atr_only_context["position_invalidation_level"] = 0.0
@@ -14259,6 +14388,52 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             _is_lifecycle_exit_required_reason(["new_position_loss_revalidation_failed"])
         )
         self.assertFalse(_is_lifecycle_exit_required_reason(["cooling_period"]))
+
+    def test_complete_cycle_profit_giveback_requires_current_revalidation(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=-500.0,
+        )
+        ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-06",
+            position_ratio=0.10,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.40),
+                AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.20, "confidence": 0.40},
+            short_scores={"score": 0.10, "confidence": 0.30},
+            market_confirmation={"confirmation_score": 0.35},
+            full_config={},
+            fusion_context={},
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={
+                "recommendation_id": "open-profit-giveback",
+                "held_trading_days": 3,
+                "expected_horizon_days": 5,
+                "cycle_return_on_notional": -0.001,
+                "cycle_peak_return_on_notional": 0.025,
+                "position_invalidation_level": 90.0,
+                "opening_execution_price": 100.0,
+            },
+            current_price=99.0,
+        )
+
+        self.assertAlmostEqual(ratio, 0.05)
+        self.assertIn("profit_giveback_revalidation_failed", reasons)
+        detail = diagnostics["holding_rebalance_control"]
+        self.assertTrue(detail["profit_giveback_revalidation_due"])
+        self.assertTrue(detail["profit_giveback_revalidation_failed"])
+        self.assertEqual(
+            detail["decision"],
+            "reduce_failed_profit_giveback_revalidation",
+        )
 
     def test_new_losing_position_without_same_day_revalidation_exits_at_two_percent(self):
         position = SimpleNamespace(
@@ -19751,6 +19926,50 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertEqual(result["target_lots"], 0)
         self.assertEqual(result["reason"], "time_stop")
         self.assertFalse(result["same_direction_supported"])
+
+    def test_time_stop_uses_opening_fac_authority_instead_of_setup_name(self):
+        current_position = SimpleNamespace(entry_date="2025-02-10", entry_price=3000.0)
+        config = {
+            "execution": {
+                "exit_policy": {
+                    "enabled": True,
+                    "defaults": {"trend_time_stop_days": 5, "probe_time_stop_days": 2},
+                }
+            }
+        }
+        probe = evaluate_exit_policy(
+            ticker="M",
+            current_price=2990.0,
+            current_lots=10,
+            target_lots=5,
+            lifecycle={
+                "opening_authority_type": "exploration_probe",
+                "template_state": "protected",
+                "setup_type": "trend_breakout_setup",
+            },
+            current_position=current_position,
+            trading_date="2025-02-14",
+            config=config,
+        )
+        real = evaluate_exit_policy(
+            ticker="M",
+            current_price=2990.0,
+            current_lots=10,
+            target_lots=5,
+            lifecycle={
+                "opening_authority_type": "real_budget_entry",
+                "template_state": "watchlist",
+                "setup_type": "probe_like_name",
+            },
+            current_position=current_position,
+            trading_date="2025-02-14",
+            config=config,
+        )
+
+        self.assertTrue(probe["exit_required"])
+        self.assertTrue(probe["is_probe"])
+        self.assertFalse(real["exit_required"])
+        self.assertFalse(real["is_probe"])
 
     def test_phase2_honors_dynamic_opportunity_budget_from_phase1(self):
         portfolio = Portfolio(

@@ -36,6 +36,7 @@ from tools.common.alpha_setup import (
 from tools.agent_tools.analysis.analyst_data_usage import data_usage_from_snapshot
 from tools.agent_tools.research import research_memory_writers
 from tools.common.order_semantics import recommendation_intent_from_lots
+from tools.common.learning_identity import canonical_market_regime
 from util.futures_audit import categorize_no_trade_reason
 from util.logger import logger
 
@@ -73,6 +74,8 @@ class ExploratoryHypothesisItem(BaseModel):
     side: str = Field(default="*")
     horizon_class: str = Field(default="*")
     market_regime: str = Field(default="*")
+    setup_type: str = Field(default="*")
+    support_episode_ids: List[str] = Field(default_factory=list)
     evidence_summary: str = Field(default="")
     suggested_use: str = Field(default="structured research hypothesis only; validate with future samples")
     entry_timing_hint: str = Field(default="")
@@ -309,7 +312,34 @@ def _validate_causal_llm_output(output: CausalReviewLLMOutput) -> dict:
     return payload
 
 
-def _validate_exploratory_llm_output(output: ExploratoryHypothesisLLMOutput) -> list[dict]:
+def _episode_matches_hypothesis_scope(
+    episode: Mapping[str, Any],
+    hypothesis: Mapping[str, Any],
+) -> bool:
+    hypothesis_ticker = str(hypothesis.get("ticker") or "*").strip().upper()
+    identity_keys = (
+        ("ticker",) if hypothesis_ticker not in {"", "*"} else ("sector",)
+    ) + ("side", "setup_type", "market_regime")
+    for key in identity_keys:
+        if key == "ticker":
+            expected = hypothesis_ticker
+            actual = str(episode.get(key) or "").strip().upper()
+        elif key == "market_regime":
+            expected = canonical_market_regime(hypothesis.get(key), "*")
+            actual = canonical_market_regime(episode.get(key), "unknown")
+        else:
+            expected = str(hypothesis.get(key) or "*").strip().lower()
+            actual = str(episode.get(key) or "").strip().lower()
+        if expected not in {"", "*"} and actual != expected:
+            return False
+    return True
+
+
+def _validate_exploratory_llm_output(
+    output: ExploratoryHypothesisLLMOutput,
+    *,
+    episodes_by_id: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[dict]:
     validated: list[dict] = []
     forbidden_text = ("target_lots", "lots=", "margin_ratio", "direct trade authority")
     for item in output.hypotheses or []:
@@ -319,6 +349,13 @@ def _validate_exploratory_llm_output(output: ExploratoryHypothesisLLMOutput) -> 
         validation_plan = str(payload.get("validation_plan") or "").strip()
         side = str(payload.get("side") or "*").strip().lower()
         confidence = _review_helpers._safe_float(payload.get("confidence_score"), -1.0)
+        support_episode_ids = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in (payload.get("support_episode_ids") or [])
+                if str(item or "").strip()
+            )
+        )
         if not text or not evidence or not validation_plan:
             continue
         if side not in {"long", "short", "flat", "*"}:
@@ -328,8 +365,21 @@ def _validate_exploratory_llm_output(output: ExploratoryHypothesisLLMOutput) -> 
         combined = " ".join(str(value or "") for value in payload.values()).lower()
         if any(token in combined for token in forbidden_text):
             continue
+        if episodes_by_id is not None:
+            support_episode_ids = [
+                episode_id
+                for episode_id in support_episode_ids
+                if episode_id in episodes_by_id
+                and _episode_matches_hypothesis_scope(
+                    episodes_by_id[episode_id],
+                    payload,
+                )
+            ]
+            if not support_episode_ids:
+                continue
         payload["side"] = side
         payload["confidence_score"] = confidence
+        payload["support_episode_ids"] = support_episode_ids
         validated.append(payload)
     return validated
 
@@ -2000,7 +2050,7 @@ def run_researcher_causal_review(
         evidence_pack_id=evidence["evidence_pack_id"],
         candidate_type="post_trade_causal_research",
         confidence_score=_review_helpers._safe_float(candidate_payload.get("confidence_score"), 0.0),
-        rule_validation_status="deterministic_output_validation_passed",
+        rule_validation_status="notes_only_pending_rule_validation",
         created_at=_review_helpers._utc_now(),
         valid_until=(
             datetime.strptime(str(trading_date)[:10], "%Y-%m-%d") + timedelta(days=10)
@@ -2008,6 +2058,146 @@ def run_researcher_causal_review(
         payload_json=_review_helpers._json_dumps(candidate_payload),
     )
     return 1
+
+
+def _compact_episode_daily_facts(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    trace = (
+        payload.get("position_lifecycle_trace")
+        if isinstance(payload.get("position_lifecycle_trace"), Mapping)
+        else {}
+    )
+    compact_days: List[Dict[str, Any]] = []
+    pair = payload.get("pair") if isinstance(payload.get("pair"), Mapping) else {}
+    physical_pairs = (
+        pair.get("physical_pairs")
+        if isinstance(pair.get("physical_pairs"), list)
+        else [pair]
+    )
+    total_notional = sum(
+        abs(
+            _review_helpers._safe_float(item.get("open_price"), 0.0)
+            * _review_helpers._safe_int(item.get("lots"), 0)
+            * _review_helpers._safe_float(item.get("contract_multiplier"), 1.0)
+        )
+        for item in physical_pairs
+        if isinstance(item, Mapping)
+    )
+    final_return_on_notional = (
+        _review_helpers._safe_float(pair.get("return_on_notional"), 0.0)
+        if pair.get("return_on_notional") is not None
+        else None
+    )
+    running_net_pnl = 0.0
+    peak_net_pnl = 0.0
+    for day in trace.get("daily_facts") or []:
+        if not isinstance(day, Mapping):
+            continue
+        fac_facts: List[Dict[str, Any]] = []
+        for item in day.get("recommendations") or []:
+            if not isinstance(item, Mapping):
+                continue
+            contract = (
+                item.get("final_action_contract")
+                if isinstance(item.get("final_action_contract"), Mapping)
+                else {}
+            )
+            if contract:
+                evidence = (
+                    contract.get("evidence_used")
+                    if isinstance(contract.get("evidence_used"), Mapping)
+                    else {}
+                )
+                deployment = (
+                    contract.get("capital_deployment")
+                    if isinstance(contract.get("capital_deployment"), Mapping)
+                    else {}
+                )
+                fac_facts.append({
+                    "final_action": contract.get("final_action"),
+                    "target_lots": contract.get("target_lots"),
+                    "authority_type": contract.get("authority_type"),
+                    "reason_codes": list(contract.get("reason_codes") or []),
+                    "opportunity_score": evidence.get("opportunity_score"),
+                    "opportunity_rank": deployment.get("opportunity_rank"),
+                })
+        settlement_facts = [
+            dict(item)
+            for item in (day.get("ticker_settlement_facts") or [])
+            if isinstance(item, Mapping)
+        ]
+        for item in settlement_facts:
+            running_net_pnl += (
+                _review_helpers._safe_float(item.get("daily_pnl"), 0.0)
+                - _review_helpers._safe_float(item.get("commission"), 0.0)
+            )
+            peak_net_pnl = max(peak_net_pnl, running_net_pnl)
+        compact_days.append({
+            "trading_date": day.get("trading_date"),
+            "fac_facts": fac_facts,
+            "transactions": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "id",
+                        "action",
+                        "lots",
+                        "execution_price",
+                        "commission",
+                    )
+                    if key in item
+                }
+                for item in (day.get("transactions") or [])
+                if isinstance(item, Mapping)
+            ],
+            "ticker_settlement_facts": settlement_facts,
+            "evidence_state": dict(day.get("evidence_state") or {}),
+            "evidence_change": dict(day.get("evidence_change") or {}),
+            "invalidation_state": dict(day.get("invalidation_state") or {}),
+            "invalidation_change": dict(day.get("invalidation_change") or {}),
+            "cycle_return_on_notional_after_settlement": (
+                round(running_net_pnl / total_notional, 8)
+                if total_notional > 0
+                else None
+            ),
+            "cycle_peak_return_on_notional_after_settlement": (
+                round(peak_net_pnl / total_notional, 8)
+                if total_notional > 0
+                else None
+            ),
+            "cycle_profit_drawdown_return_on_notional_after_settlement": (
+                round(max(0.0, peak_net_pnl - running_net_pnl) / total_notional, 8)
+                if total_notional > 0
+                else None
+            ),
+        })
+    final_return = (
+        round(running_net_pnl / total_notional, 8)
+        if total_notional > 0
+        else final_return_on_notional
+    )
+    peak_return = (
+        round(peak_net_pnl / total_notional, 8)
+        if total_notional > 0
+        else (max(final_return or 0.0, 0.0) if final_return is not None else None)
+    )
+    return {
+        "fact_source": trace.get("fact_source"),
+        "open_date": trace.get("open_date"),
+        "close_date": trace.get("close_date"),
+        "daily_facts": compact_days,
+        "learning_economics_basis": "after_fee_return_on_notional",
+        "cycle_peak_return_on_notional": peak_return,
+        "cycle_final_return_on_notional": final_return,
+        "cycle_profit_drawdown_return_on_notional": (
+            round(max(0.0, peak_net_pnl - running_net_pnl) / total_notional, 8)
+            if total_notional > 0
+            else (
+                round(max(0.0, (peak_return or 0.0) - (final_return or 0.0)), 8)
+                if final_return is not None
+                else None
+            )
+        ),
+    }
 
 
 def _recent_trade_episodes_for_research(
@@ -2020,17 +2210,36 @@ def _recent_trade_episodes_for_research(
     cursor.execute(
         """
         SELECT id, ticker, side, sector, setup_type, horizon_class,
-               market_regime, open_date, close_date, holding_days, net_pnl,
-               return_on_notional, outcome_label, lesson_text
+               market_regime, open_date, close_date, holding_days,
+               return_on_notional, outcome_label, lesson_text,
+               payload_json, payload_artifact_path, payload_sha256
         FROM trade_episode_memory
         WHERE config_id = ?
-          AND (close_date IS NULL OR close_date <= ?)
-        ORDER BY ABS(net_pnl) DESC, close_date DESC, created_at DESC
+          AND close_date IS NOT NULL
+          AND close_date <= ?
+          AND return_on_notional IS NOT NULL
+        ORDER BY ABS(return_on_notional) DESC, close_date DESC, created_at DESC
         LIMIT ?
         """,
         (config_id, trading_date, int(limit)),
     )
-    return [dict(row) for row in cursor.fetchall()]
+    episodes: List[Dict[str, Any]] = []
+    for raw_row in cursor.fetchall():
+        row = dict(raw_row)
+        payload = load_externalized_json(
+            row.pop("payload_json", None),
+            row.pop("payload_artifact_path", None),
+            row.pop("payload_sha256", None),
+        )
+        payload = payload if isinstance(payload, Mapping) else {}
+        pair = payload.get("pair") if isinstance(payload.get("pair"), Mapping) else {}
+        if pair:
+            pair = dict(pair)
+            pair["return_on_notional"] = row.get("return_on_notional")
+            payload = {**dict(payload), "pair": pair}
+        row["position_lifecycle_trace"] = _compact_episode_daily_facts(payload)
+        episodes.append(row)
+    return episodes
 
 
 def write_exploratory_hypotheses(
@@ -2053,10 +2262,91 @@ def write_exploratory_hypotheses(
     min_episodes = int(research_cfg.get("min_episode_samples", 2) or 2)
     if len(episodes) < min_episodes:
         return {"rows": 0, "status": "insufficient_episode_samples", "episode_count": len(episodes)}
+    cursor.execute(
+        """
+        SELECT id
+        FROM trade_episode_memory
+        WHERE config_id = ?
+          AND close_date IS NOT NULL
+          AND close_date <= ?
+          AND return_on_notional IS NOT NULL
+        """,
+        (config_id, trading_date),
+    )
+    available_episode_ids = {
+        str(row["id"] if isinstance(row, sqlite3.Row) else row[0])
+        for row in cursor.fetchall()
+        if str(row["id"] if isinstance(row, sqlite3.Row) else row[0])
+    }
+    cursor.execute(
+        """
+        SELECT evidence_json
+        FROM learning_event_log
+        WHERE config_id = ? AND event_type = 'exploratory_hypothesis_generation'
+        ORDER BY trading_date DESC, created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (config_id,),
+    )
+    prior_generation = cursor.fetchone()
+    prior_episode_ids: set[str] = set()
+    if prior_generation is not None:
+        try:
+            prior_evidence = _review_helpers._json_loads(
+                prior_generation["evidence_json"]
+                if isinstance(prior_generation, sqlite3.Row)
+                else prior_generation[0]
+            ) or {}
+        except Exception:
+            prior_evidence = {}
+        prior_episode_ids = {
+            str(item or "")
+            for item in (prior_evidence.get("available_episode_ids") or [])
+            if str(item or "")
+        }
+    new_episode_ids = sorted(available_episode_ids - prior_episode_ids)
+    if prior_generation is not None and not new_episode_ids:
+        return {
+            "rows": 0,
+            "status": "no_new_complete_episode",
+            "episode_count": len(episodes),
+        }
+    research_memory_writers.insert_learning_event(
+        cursor,
+        config_id=config_id,
+        trading_date=trading_date,
+        event_type="exploratory_hypothesis_generation",
+        scope_type="research",
+        scope_key="complete_episode_set",
+        evidence={
+            "available_episode_ids": sorted(available_episode_ids),
+            "new_episode_ids": new_episode_ids,
+        },
+        action={"generation_attempted": True},
+        status="applied",
+    )
 
+    prompt_episode_limit = int(
+        research_cfg.get("max_prompt_episode_chars", 60000) or 60000
+    )
+    prompt_episodes: List[Dict[str, Any]] = []
+    for episode in episodes:
+        candidate_pack = {
+            "trading_date": trading_date,
+            "episodes": prompt_episodes + [episode],
+        }
+        if (
+            prompt_episodes
+            and len(_review_helpers._json_dumps(candidate_pack))
+            > prompt_episode_limit
+        ):
+            break
+        prompt_episodes.append(episode)
     prompt = build_researcher_exploratory_prompt(
         trading_date=trading_date,
-        episodes_json=_review_helpers._json_dumps({"trading_date": trading_date, "episodes": episodes})[:12000],
+        episodes_json=_review_helpers._json_dumps(
+            {"trading_date": trading_date, "episodes": prompt_episodes}
+        ),
     )
     if not bool(research_cfg.get("use_llm", True)):
         return {"rows": 0, "status": "llm_disabled", "episode_count": len(episodes)}
@@ -2068,7 +2358,10 @@ def write_exploratory_hypotheses(
             llm_config=cfg.get("llm", {}),
             pydantic_model=ExploratoryHypothesisLLMOutput,
         )
-        validated_hypotheses = _validate_exploratory_llm_output(output)
+        validated_hypotheses = _validate_exploratory_llm_output(
+            output,
+            episodes_by_id={str(item.get("id") or ""): item for item in prompt_episodes},
+        )
     except Exception:
         logger.warning(f"Researcher exploratory research rejected on {trading_date}")
         return {"rows": 0, "status": "llm_output_rejected", "episode_count": len(episodes)}
@@ -2125,6 +2418,32 @@ def write_exploratory_hypotheses(
         side = str(payload.get("side") or "*").lower()
         horizon = str(payload.get("horizon_class") or "*")
         regime = str(payload.get("market_regime") or "*")
+        setup_type = str(payload.get("setup_type") or "*").strip().lower()
+        hypothesis_scope_key = (
+            f"{ticker}:{sector}:{side}:{horizon}:{regime}:{setup_type}"
+        )
+        support_episode_ids = list(payload.get("support_episode_ids") or [])
+        support_episodes = [
+            item
+            for item in prompt_episodes
+            if str(item.get("id") or "") in set(support_episode_ids)
+        ]
+        if not support_episodes:
+            continue
+        support_sample_count = len(support_episodes)
+        cursor.execute(
+            """
+            SELECT id
+            FROM exploratory_hypothesis
+            WHERE config_id = ?
+              AND lower(scope_key) = lower(?)
+              AND lower(hypothesis_text) = lower(?)
+            LIMIT 1
+            """,
+            (config_id, hypothesis_scope_key, text),
+        )
+        if cursor.fetchone() is not None:
+            continue
         suggested_use = str(
             payload.get("suggested_use")
             or "structured research hypothesis only; validate with future samples"
@@ -2140,6 +2459,7 @@ def write_exploratory_hypotheses(
                 "side": side,
                 "horizon_class": horizon,
                 "market_regime": regime,
+                "setup_type": setup_type,
             },
             usable_memory=text,
             analysis_strategy_updates=[
@@ -2153,7 +2473,7 @@ def write_exploratory_hypotheses(
             validation_plan=[
                 payload.get("validation_plan") or "Track same-scope future samples before promotion.",
             ],
-            sample_count=len(episodes),
+            sample_count=support_sample_count,
             confidence_score=confidence,
         )
         event_id = research_memory_writers.insert_learning_event(
@@ -2162,8 +2482,13 @@ def write_exploratory_hypotheses(
             trading_date=trading_date,
             event_type="exploratory_hypothesis",
             scope_type="research",
-            scope_key=f"{ticker}:{sector}:{side}:{horizon}:{regime}",
-            evidence={"episode_count": len(episodes), "note_id": note_id, "agent_name": "researcher"},
+            scope_key=hypothesis_scope_key,
+            evidence={
+                "episode_count": support_sample_count,
+                "support_episode_ids": support_episode_ids,
+                "note_id": note_id,
+                "agent_name": "researcher",
+            },
             action={
                 "hypothesis_text": text,
                 "suggested_use": suggested_use,
@@ -2182,10 +2507,15 @@ def write_exploratory_hypotheses(
             "suggested_use": suggested_use,
             "source_note_id": note_id,
             "source_event_id": event_id,
+            "setup_type": setup_type,
+            "support_episode_ids": support_episode_ids,
+            "support_episode_count": support_sample_count,
+            "validation_mode": "research_only_same_scope_future_complete_episode",
             "hard_constraints": {
                 "max_total_margin_ratio": cfg.get("max_total_margin_ratio", 0.20),
                 "structured_hypothesis_only": True,
                 "candidate_hypothesis_cannot_control_position": True,
+                "candidate_hypothesis_research_only": True,
             },
             CONTRACT_KEY: hypothesis_contract,
         }
@@ -2204,7 +2534,7 @@ def write_exploratory_hypotheses(
             config_id=config_id,
             trading_date=trading_date,
             scope_type="research",
-            scope_key=f"{ticker}:{sector}:{side}:{horizon}:{regime}",
+            scope_key=hypothesis_scope_key,
             ticker=ticker,
             sector=sector,
             side=side,
@@ -2214,7 +2544,7 @@ def write_exploratory_hypotheses(
             evidence_summary=str(payload.get("evidence_summary") or ""),
             suggested_use=suggested_use,
             confidence_score=confidence,
-            sample_count=len(episodes),
+            sample_count=support_sample_count,
             status="candidate",
             created_at=now,
             valid_until=valid_until,
@@ -2225,7 +2555,183 @@ def write_exploratory_hypotheses(
             payload_summary_json=hypothesis_ext.summary_json,
         )
         rows += 1
-    return {"rows": rows, "status": "applied" if rows else "no_hypotheses", "episode_count": len(episodes)}
+    return {
+        "rows": rows,
+        "status": "applied" if rows else "no_hypotheses",
+        "episode_count": len(episodes),
+        "prompt_episode_count": len(prompt_episodes),
+    }
+
+
+def validate_exploratory_hypotheses(
+    cursor: sqlite3.Cursor,
+    *,
+    cfg: Dict[str, Any],
+    config_id: str,
+    trading_date: str,
+) -> Dict[str, Any]:
+    """Validate research hypotheses with future, same-scope real episodes only.
+
+    This is a shadow research transition. It updates exploratory_hypothesis but
+    deliberately does not write alpha samples, profiles, policies, or orders.
+    """
+    learning_cfg = cfg.get("learning", {}) or {}
+    research_cfg = learning_cfg.get("exploratory_research", {}) or {}
+    if not bool(research_cfg.get("enabled", True)):
+        return {"rows": 0, "status": "disabled", "validated": 0, "rejected": 0, "monitoring": 0}
+
+    min_samples = max(
+        1,
+        int(
+            research_cfg.get(
+                "validation_min_samples",
+                research_cfg.get("min_episode_samples", 2),
+            )
+            or 2
+        ),
+    )
+    min_mean_return = _review_helpers._safe_float(
+        research_cfg.get("validation_min_mean_return_on_notional"),
+        0.0,
+    )
+    cursor.execute(
+        """
+        SELECT *
+        FROM exploratory_hypothesis
+        WHERE config_id = ?
+          AND trading_date < ?
+          AND status IN ('candidate', 'monitoring', 'validated', 'rejected')
+        ORDER BY trading_date, created_at, id
+        """,
+        (config_id, trading_date),
+    )
+    hypotheses = [dict(row) for row in cursor.fetchall()]
+    counts: Counter[str] = Counter()
+    transitions: List[Dict[str, Any]] = []
+    for hypothesis in hypotheses:
+        payload = load_externalized_json(
+            hypothesis.get("payload_json"),
+            hypothesis.get("payload_artifact_path"),
+            hypothesis.get("payload_sha256"),
+        )
+        payload = dict(payload) if isinstance(payload, Mapping) else {}
+        scoped_hypothesis = {
+            **hypothesis,
+            "setup_type": payload.get("setup_type") or "*",
+        }
+        cursor.execute(
+            """
+            SELECT id, ticker, side, sector, setup_type, horizon_class,
+                   market_regime, close_date, trading_date,
+                   return_on_notional
+            FROM trade_episode_memory
+            WHERE config_id = ?
+              AND COALESCE(close_date, trading_date) > ?
+              AND COALESCE(close_date, trading_date) <= ?
+              AND return_on_notional IS NOT NULL
+            ORDER BY COALESCE(close_date, trading_date), created_at, id
+            """,
+            (config_id, hypothesis.get("trading_date"), trading_date),
+        )
+        matched = [
+            dict(row)
+            for row in cursor.fetchall()
+            if _episode_matches_hypothesis_scope(dict(row), scoped_hypothesis)
+        ]
+        returns = [
+            _review_helpers._safe_float(item.get("return_on_notional"), 0.0)
+            for item in matched
+        ]
+        latest_return = returns[-1] if returns else None
+        mean_return = sum(returns) / len(returns) if returns else None
+        expired = bool(
+            hypothesis.get("valid_until")
+            and str(hypothesis.get("valid_until"))[:10] < str(trading_date)[:10]
+        )
+        if len(returns) >= min_samples:
+            if mean_return is not None and mean_return <= min_mean_return:
+                next_status = "rejected"
+                outcome = "future_same_scope_non_positive_expectancy"
+            elif latest_return is not None and latest_return < 0.0:
+                next_status = "monitoring"
+                outcome = "latest_complete_loss_suspends_validated_prior"
+            else:
+                next_status = "validated"
+                outcome = "future_same_scope_positive_expectancy"
+        elif expired:
+            next_status = "rejected"
+            outcome = "expired_without_required_future_samples"
+        elif returns:
+            next_status = "monitoring"
+            outcome = (
+                "latest_complete_loss_awaiting_more_future_samples"
+                if latest_return is not None and latest_return < 0.0
+                else "awaiting_more_future_samples"
+            )
+        else:
+            next_status = "candidate"
+            outcome = "awaiting_first_future_sample"
+
+        payload["research_validation"] = {
+            "mode": "future_same_scope_complete_episode",
+            "economic_basis": "after_fee_return_on_notional",
+            "future_only": True,
+            "evaluated_through": str(trading_date)[:10],
+            "minimum_samples": min_samples,
+            "minimum_mean_return_on_notional": min_mean_return,
+            "sample_count": len(returns),
+            "matched_episode_ids": [str(item.get("id") or "") for item in matched],
+            "mean_return_on_notional": mean_return,
+            "latest_return_on_notional": latest_return,
+            "outcome": outcome,
+        }
+        contract = payload.get(CONTRACT_KEY)
+        if isinstance(contract, Mapping):
+            contract = dict(contract)
+            contract["maturity_state"] = next_status
+            contract["sample_count"] = len(returns)
+            contract["position_authority"] = "analysis_prior_only" if next_status == "validated" else "analysis_or_watchlist_only"
+            contract["max_position_impact"] = "no_direct_position_impact"
+            payload[CONTRACT_KEY] = contract
+        payload_ext = externalize_json_for_db(
+            payload,
+            category="exploratory_hypothesis",
+            record_id=str(hypothesis.get("id") or "unknown"),
+            field_name="payload",
+            config_id=config_id,
+            trading_date=str(hypothesis.get("trading_date") or trading_date),
+        )
+        research_memory_writers.update_exploratory_hypothesis_validation(
+            cursor,
+            hypothesis_id=str(hypothesis.get("id") or ""),
+            config_id=config_id,
+            status=next_status,
+            sample_count=len(returns),
+            payload_json=payload_ext.inline_value,
+            payload_artifact_path=payload_ext.artifact_path,
+            payload_sha256=payload_ext.sha256,
+            payload_size=payload_ext.size_bytes,
+            payload_summary_json=payload_ext.summary_json,
+        )
+        counts[next_status] += 1
+        if str(hypothesis.get("status") or "candidate") != next_status:
+            transitions.append(
+                {
+                    "hypothesis_id": hypothesis.get("id"),
+                    "from": hypothesis.get("status"),
+                    "to": next_status,
+                    "outcome": outcome,
+                }
+            )
+    return {
+        "rows": len(hypotheses),
+        "status": "applied" if hypotheses else "no_hypotheses_to_validate",
+        "validated": int(counts.get("validated", 0)),
+        "rejected": int(counts.get("rejected", 0)),
+        "monitoring": int(counts.get("monitoring", 0)),
+        "candidate": int(counts.get("candidate", 0)),
+        "transitions": transitions,
+    }
 
 
 def apply_researcher_learning(
@@ -2272,13 +2778,13 @@ def apply_researcher_learning(
         config_id=config_id,
         trading_date=trading_date,
     )
-    perf_counts = research_memory_writers.write_template_and_analyst_learning(
+    episode_rows = research_memory_writers.write_trade_episode_memory(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
     )
-    episode_rows = research_memory_writers.write_trade_episode_memory(
+    perf_counts = research_memory_writers.write_template_and_analyst_learning(
         cursor,
         cfg=cfg,
         config_id=config_id,
@@ -2447,6 +2953,12 @@ def apply_researcher_learning(
         config_id=config_id,
         trading_date=trading_date,
     )
+    exploratory_hypothesis_validation = validate_exploratory_hypotheses(
+        cursor,
+        cfg=cfg,
+        config_id=config_id,
+        trading_date=trading_date,
+    )
     exploratory_hypotheses = write_exploratory_hypotheses(
         cursor,
         cfg=cfg,
@@ -2489,6 +3001,7 @@ def apply_researcher_learning(
         "causal_review_candidates": causal_review_candidates,
         "validated_causal_rules": causal_rule_validation.get("validated_rules", 0),
         "causal_rule_validation_status_counts": causal_rule_validation.get("status_counts", {}),
+        "exploratory_hypothesis_validation": exploratory_hypothesis_validation,
         "exploratory_hypotheses": exploratory_hypotheses,
     }
 

@@ -38,6 +38,33 @@ ALPHA_RELEASE_MARKERS = (
     "recovering",
 )
 
+ACTION_VALUE_SCORE_COMPONENTS = (
+    "positive_learning",
+    "negative_learning",
+    "entry_quality_loss_penalty",
+    "trigger_quality_positive_bonus",
+    "trigger_quality_loss_penalty",
+)
+
+PROFILE_SCORE_COMPONENTS = ("alpha_profile_adjustment",)
+
+
+def _learning_score_component_values(
+    diagnostics: Mapping[str, Any] | None,
+) -> Dict[str, float]:
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    components = diagnostics.get("opportunity_score_components")
+    if not isinstance(components, Mapping):
+        components = {}
+    names = ACTION_VALUE_SCORE_COMPONENTS + PROFILE_SCORE_COMPONENTS
+    values: Dict[str, float] = {}
+    for name in names:
+        try:
+            values[name] = float(components.get(name) or 0.0)
+        except (TypeError, ValueError):
+            values[name] = 0.0
+    return values
+
 
 def _as_mapping_list(value: Any) -> List[Mapping[str, Any]]:
     if isinstance(value, Mapping):
@@ -167,6 +194,11 @@ def learning_mechanisms_from_context(
     reason_texts = [str(reason).lower() for reason in reasons or [] if reason]
     diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
     diagnostic_text = _json_text(diagnostics)
+    component_values = _learning_score_component_values(diagnostics)
+    if any(abs(component_values[name]) > 1e-12 for name in ACTION_VALUE_SCORE_COMPONENTS):
+        mechanisms.add("action_value_learning")
+    if any(abs(component_values[name]) > 1e-12 for name in PROFILE_SCORE_COMPONENTS):
+        mechanisms.add("alpha_setup_profile_learning")
 
     for text in reason_texts:
         if "alpha_promotion" in text or text in {item.lower() for item in CAPITAL_LEARNING_REASONS}:
@@ -257,6 +289,11 @@ def learning_tags_from_context(
         tags.add("provisional_policy")
     if diagnostics.get("strategy_memory_rule"):
         tags.add("strategy_memory")
+    component_values = _learning_score_component_values(diagnostics)
+    if any(abs(component_values[name]) > 1e-12 for name in ACTION_VALUE_SCORE_COMPONENTS):
+        tags.add("action_value_learning")
+    if any(abs(component_values[name]) > 1e-12 for name in PROFILE_SCORE_COMPONENTS):
+        tags.add("alpha_setup_profile_learning")
     return sorted(tags)
 
 
@@ -289,6 +326,12 @@ def learning_effects_from_context(
                 effects.add("alpha_release")
 
     diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    component_values = _learning_score_component_values(diagnostics)
+    component_total = sum(component_values.values())
+    if component_total > 1e-12:
+        effects.add("alpha_release")
+    elif component_total < -1e-12:
+        effects.add("risk_suppression")
 
     strategy_rule = diagnostics.get("strategy_memory_rule")
     if isinstance(strategy_rule, Mapping):

@@ -190,7 +190,15 @@ def evaluate_exit_policy(
     days = _days_held(getattr(current_position, "entry_date", None), trading_date)
     if days is not None:
         template_state = str((lifecycle.get("template_state") or lifecycle.get("memory_state") or "")).lower()
-        is_probe = template_state in {"probe_only", "recovering", "watchlist"} or "probe" in setup_type
+        opening_authority_type = str(
+            lifecycle.get("opening_authority_type") or ""
+        ).strip().lower()
+        is_probe = (
+            opening_authority_type == "exploration_probe"
+            if opening_authority_type
+            else template_state in {"probe_only", "recovering", "watchlist"}
+            or "probe" in setup_type
+        )
         max_days = int(policy.get("probe_time_stop_days" if is_probe else "trend_time_stop_days") or 0)
         same_direction_supported = (
             target_lots != 0

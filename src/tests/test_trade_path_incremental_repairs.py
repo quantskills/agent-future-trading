@@ -510,6 +510,40 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
             "stronger_confirmation_required",
         )
 
+    def test_strict_breakout_requires_two_follow_through_bars(self):
+        bars = [
+            {"datetime": "2025-03-26 10:00:00", "open": 101.0, "high": 102.5, "low": 100.8, "close": 102.0, "volume": 20},
+            {"datetime": "2025-03-26 10:15:00", "open": 102.0, "high": 102.8, "low": 101.5, "close": 102.2, "volume": 20},
+        ]
+        execution_bars = [
+            {"datetime": "2025-03-26 09:30:00", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 20},
+            {"datetime": "2025-03-26 10:16:00", "open": 102.3, "high": 102.5, "low": 102.0, "close": 102.2, "volume": 20},
+        ]
+
+        def select(adjustment):
+            return select_intraday_execution(
+                signal_bars=bars,
+                execution_bars=execution_bars,
+                action="open_long",
+                config={"opening_range_minutes": 1, "min_execution_volume": 1},
+                decision_context={
+                    "execution_contract": {
+                        **_entry_execution_boundary("long"),
+                        "execution_profile": "breakout",
+                        "trigger_source": "technical_breakout",
+                        "entry_trigger": canonical_entry_trigger("breakout", "long"),
+                        "requires_intraday_confirmation": True,
+                        "can_execute_without_intraday_trigger": False,
+                        "trigger_confirmation_adjustment": adjustment,
+                    }
+                },
+            )
+
+        self.assertTrue(select("stronger_confirmation_required").should_execute)
+        strict = select("strict_confirmation_required")
+        self.assertFalse(strict.should_execute)
+        self.assertEqual(strict.reason, "intraday_trigger_not_met")
+
     def test_stronger_breakout_rejects_low_participation_follow_through(self):
         result = select_intraday_execution(
             signal_bars=[
@@ -616,12 +650,14 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                 {"datetime": "2025-03-26 10:15:00", "open": 102.0, "high": 102.1, "low": 99.5, "close": 100.0, "volume": 10},
                 {"datetime": "2025-03-26 10:30:00", "open": 101.0, "high": 103.5, "low": 100.8, "close": 103.0, "volume": 10},
                 {"datetime": "2025-03-26 10:45:00", "open": 103.0, "high": 103.6, "low": 102.8, "close": 103.2, "volume": 10},
+                {"datetime": "2025-03-26 11:00:00", "open": 103.2, "high": 103.8, "low": 103.0, "close": 103.4, "volume": 10},
             ],
             execution_bars=[
                 {"datetime": "2025-03-26 09:30:00", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10},
                 {"datetime": "2025-03-26 10:01:00", "open": 102.0, "high": 102.2, "low": 101.8, "close": 102.0, "volume": 10},
                 {"datetime": "2025-03-26 10:31:00", "open": 103.0, "high": 103.2, "low": 102.8, "close": 103.0, "volume": 10},
                 {"datetime": "2025-03-26 10:46:00", "open": 103.3, "high": 103.5, "low": 103.1, "close": 103.3, "volume": 10},
+                {"datetime": "2025-03-26 11:01:00", "open": 103.4, "high": 103.6, "low": 103.2, "close": 103.4, "volume": 10},
             ],
             action="open_long",
             config={"opening_range_minutes": 1, "min_execution_volume": 1},
@@ -639,8 +675,8 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
         )
 
         self.assertTrue(result.should_execute)
-        self.assertEqual(result.signal_datetime, "2025-03-26 10:45:00")
-        self.assertEqual(result.base_datetime, "2025-03-26 10:46:00")
+        self.assertEqual(result.signal_datetime, "2025-03-26 11:00:00")
+        self.assertEqual(result.base_datetime, "2025-03-26 11:01:00")
 
     def test_entry_invalidation_before_trigger_permanently_cancels_fac(self):
         result = select_intraday_execution(

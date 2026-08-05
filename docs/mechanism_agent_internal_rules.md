@@ -643,7 +643,7 @@ PM 不能：
 |---|---|---|
 | `final_action=wait/hold` 且 `lots_delta=0` | 不下单 | no trade fact |
 | `requires_intraday_confirmation=true` | 只监控触发；触发后按合约执行，未触发不成交 | trigger checked / executed or not triggered |
-| `trigger_confirmation_adjustment=stronger/strict` | `breakout/pullback/vwap_confirmed`原触发后等待下一根完整15分钟线保持对应边界/VWAP；失败后可等待新的完整序列 | executed or continue waiting / final not triggered |
+| `trigger_confirmation_adjustment=stronger/strict` | `breakout/pullback/vwap_confirmed`原触发后，stronger 等待下一根完整15分钟线，strict 等待连续两根完整15分钟线；每根必须保持对应边界/VWAP且整段相对量能合格，失败后可等待新的完整序列 | executed or continue waiting / final not triggered |
 | `can_execute_without_intraday_trigger=true` | 不再复判15分钟触发，按合约使用合法1分钟线直接执行 | execution_result；`trigger_checked=false` |
 | 首次成交前先命中canonical `invalidation_level` | 当前FAC永久作废，不改`target_lots` | `fac_invalidated_before_entry`，当日不成交 |
 | 首次成交前超过`valid_until` | 当前FAC永久到期 | `fac_expired_before_entry`，当日不成交 |

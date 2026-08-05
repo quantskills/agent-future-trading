@@ -450,8 +450,8 @@ def _build_memory_trace(
         "max_chars": int(max_chars),
         "current_day_evidence_required": True,
         "candidate_boundary": (
-            "candidate_hypotheses_are_prompt_priors_only_no_sizing_add_position_matched_"
-            "losing_hold_or_auditor_bypass_without_current_evidence_and_validation"
+            "candidate_and_monitoring_hypotheses_are_research_only_and_not_prompt_inputs_"
+            "validated_hypotheses_are_rebuttable_analyst_priors_without_position_authority"
         ),
     }
 
@@ -710,9 +710,6 @@ def _episode_lifecycle_prompt_fact(item: Mapping[str, Any]) -> str:
             break
     if exit_reason:
         facts.append(f"final_exit_reason={_compact_inline_text(exit_reason, 72)}")
-    net_pnl = _finite_float(item.get("net_pnl") if item.get("net_pnl") is not None else pair.get("net_pnl"))
-    if net_pnl is not None:
-        facts.append(f"net_pnl={net_pnl:.0f}")
     return ", ".join(facts)
 
 
@@ -857,7 +854,7 @@ def build_learning_context(
 
     items: List[Dict[str, Any]] = []
     selected_scopes: List[str] = []
-    seen_ids = set()
+    seen_content_keys = set()
     for attempt in _learning_digest_lookup_attempts(
         ticker=str(ticker or "").upper(),
         sector=sector,
@@ -898,16 +895,17 @@ def build_learning_context(
                 and str(row.get("ticker") or "").upper() != str(ticker or "").upper()
             ):
                 continue
-            digest_id = str(row.get("id") or "")
-            key = digest_id or (
+            key = (
+                str(row.get("analyst") or analyst_key),
                 str(row.get("ticker")),
+                str(row.get("sector")),
                 str(row.get("horizon_class")),
                 str(row.get("market_regime")),
                 str(row.get("digest_text")),
             )
-            if key in seen_ids:
+            if key in seen_content_keys:
                 continue
-            seen_ids.add(key)
+            seen_content_keys.add(key)
             items.append(row)
             added += 1
         if added:
@@ -972,10 +970,17 @@ def build_learning_context(
         raw_episode_lines = []
         for item in episode_items:
             lifecycle_fact = _episode_lifecycle_prompt_fact(item)
+            return_on_notional = _finite_float(item.get("return_on_notional"))
+            return_text = (
+                f"{return_on_notional:.2%}"
+                if return_on_notional is not None
+                else "unavailable"
+            )
             episode_prefix = (
                 "- "
                 f"{item.get('ticker')}/{item.get('side')}/{item.get('horizon_class')}/"
-                f"{item.get('market_regime')}: pnl={float(item.get('net_pnl') or 0.0):.0f}, "
+                f"{item.get('market_regime')}: "
+                f"after_fee_return_on_notional={return_text}, "
                 f"hold={int(item.get('holding_days') or 0)}d, "
                 f"template={item.get('setup_type')}; "
             )
@@ -1069,6 +1074,7 @@ def build_learning_context(
                     config_id=config_id,
                     ticker=str(ticker or "").upper(),
                     sector=sector,
+                    side=context_side,
                     horizon_class=horizon,
                     market_regime=market_regime,
                     trading_date=trading_date,
@@ -1084,6 +1090,7 @@ def build_learning_context(
                         config_id=config_id,
                         ticker="*",
                         sector=sector,
+                        side=context_side,
                         horizon_class=horizon,
                         market_regime=market_regime,
                         trading_date=trading_date,
@@ -1092,6 +1099,14 @@ def build_learning_context(
         except Exception:
             logger.warning("analyst_exploratory_hypothesis_unavailable")
             hypothesis_items = []
+        # Candidate/monitoring hypotheses are shadow research records.  Keep a
+        # defensive boundary here even when a custom DB implementation returns
+        # broader statuses than the production repository method.
+        hypothesis_items = [
+            item
+            for item in hypothesis_items
+            if str(item.get("status") or "").lower() == "validated"
+        ]
         raw_hypothesis_lines = []
         for item in hypothesis_items:
             suggested_use = _compact_inline_text(
@@ -1099,7 +1114,7 @@ def build_learning_context(
                 80,
             )
             if suggested_use and "structured research hypothesis" not in suggested_use.lower():
-                suggested_use = f"{suggested_use}; structured research hypothesis only until validated"
+                suggested_use = f"{suggested_use}; validated structured research prior only"
             payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
             structured_hints = []
             max_hint_items = int(exploration_cfg.get("max_hypothesis_hint_items", 3) or 3)
@@ -1125,7 +1140,9 @@ def build_learning_context(
                 "- "
                 f"[{item.get('status')}; conf={float(item.get('confidence_score') or 0.0):.2f}; "
                 f"n={int(item.get('sample_count') or 0)}] "
-                f"{hypothesis_text}{hint_text} "
+                f"scope={item.get('ticker') or '*'}/{item.get('side') or '*'}/"
+                f"{payload.get('setup_type') or '*'}/{item.get('horizon_class') or '*'}/"
+                f"{item.get('market_regime') or '*'}; {hypothesis_text}{hint_text} "
                 f"Use: {suggested_use}. Boundary: structured hypothesis only; no sizing/add/position_matched/"
                 "losing-hold/bypass without current evidence and validation. "
                 "Before using it, state whether today's data confirms or contradicts it; "

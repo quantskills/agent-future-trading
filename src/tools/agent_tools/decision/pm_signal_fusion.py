@@ -1104,13 +1104,10 @@ def build_opportunity_scorecard(
         if positive_amplification_suspended:
             positive_learning_signal = 0.0
             trigger_quality_positive_signal = 0.0
-        action_value_signal_present = bool(
-            int(action_value_learning.get("positive_count", 0) or 0)
-            or int(action_value_learning.get("negative_count", 0) or 0)
-            or recent_tail_loss_signal > 1e-9
-            or entry_quality_loss_signal > 1e-9
-            or trigger_quality_loss_signal > 1e-9
-            or trigger_quality_positive_signal > 1e-9
+        positive_action_value_support_present = bool(
+            int(action_value_learning.get("positive_count", 0) or 0) > 0
+            and positive_learning_signal > 1e-9
+            and not positive_amplification_suspended
         )
         score_components = {
             "directional_support": min(
@@ -1135,11 +1132,6 @@ def build_opportunity_scorecard(
             "fusion_consensus": _score_weight(cfg, "fusion_consensus", 0.08) * fusion_consensus,
             "fusion_score_adjustment": fusion_adjustment,
         }
-        score = sum(
-            value
-            for component, value in score_components.items()
-            if component != "execution_profile_learning"
-        )
         side_profiles = alpha_profiles_by_side.get(side, [])
         deployable_profiles = [p for p in side_profiles if str(p.get("lifecycle_state") or "").lower() == "deployable"]
         protected_profiles = [p for p in side_profiles if str(p.get("lifecycle_state") or "").lower() == "protected"]
@@ -1155,17 +1147,10 @@ def build_opportunity_scorecard(
             default={},
         )
         alpha_profile_bonus = 0.0
-        if deployable_profiles:
+        if deployable_profiles and positive_action_value_support_present:
             alpha_profile_bonus = 0.09
-        elif protected_profiles:
+        elif protected_profiles and positive_action_value_support_present:
             alpha_profile_bonus = 0.06
-        elif watchlist_profiles:
-            alpha_profile_bonus = 0.025
-        if not action_value_signal_present:
-            alpha_profile_bonus = min(
-                alpha_profile_bonus,
-                _safe_float(cfg.get("profile_prior_only_bonus_cap_without_action_value"), 0.015),
-            )
         alpha_profile_penalty = 0.08 if capped_profiles else 0.0
         if positive_amplification_suspended:
             alpha_profile_bonus = 0.0
@@ -1183,6 +1168,44 @@ def build_opportunity_scorecard(
         score_components["fundamental_gap_penalty"] = -abs(
             _score_weight(cfg, "fundamental_gap_penalty", 0.06)
         ) if fundamental_setup_gap else 0.0
+        current_evidence_component_names = {
+            "directional_support",
+            "tradeable_state",
+            "business_quality",
+            "setup_quality",
+            "confidence",
+            "market_confirmation",
+            "fusion_consensus",
+            "fusion_score_adjustment",
+            "market_conflict_penalty",
+            "critical_data_gap_penalty",
+            "fundamental_gap_penalty",
+        }
+        validated_learning_component_names = {
+            "positive_learning",
+            "negative_learning",
+            "recent_tail_loss_penalty",
+            "entry_quality_loss_penalty",
+            "trigger_quality_positive_bonus",
+            "trigger_quality_loss_penalty",
+            "alpha_profile_adjustment",
+        }
+        current_evidence_score = max(
+            0.0,
+            min(
+                1.0,
+                sum(
+                    value
+                    for component, value in score_components.items()
+                    if component in current_evidence_component_names
+                ),
+            ),
+        )
+        validated_learning_delta = sum(
+            value
+            for component, value in score_components.items()
+            if component in validated_learning_component_names
+        )
         score = sum(
             value
             for component, value in score_components.items()
@@ -1216,7 +1239,6 @@ def build_opportunity_scorecard(
         if (
             pm_fusion_diagnostics.get("requires_pm_conflict_resolution")
             and pm_fusion_diagnostics.get("dominant_opposing_evidence_count", 0)
-            and score < tradeable_threshold
         ):
             gating_failures.append("dominant_opposing_evidence_requires_pm_resolution")
 
@@ -1230,6 +1252,7 @@ def build_opportunity_scorecard(
             "late_long_entry_price_location",
             "late_short_entry_price_location",
             "same_scope_alpha_setup_capped_or_rejected",
+            "dominant_opposing_evidence_requires_pm_resolution",
         }
         single_tradeable_candidate_setup_confirmed = bool(
             tradeable_states > 0
@@ -1259,18 +1282,44 @@ def build_opportunity_scorecard(
         elif single_tradeable_candidate_setup_confirmed:
             scorecard_promotion_reasons.append("single_tradeable_candidate_rank_lowered_by_recent_learning")
 
-        if score >= deployable_threshold and max_setup_quality >= min_deployable_setup_quality and not gating_failures:
+        current_entry_blocking_failures = {
+            "no_directional_support",
+            "no_tradeable_opportunity_state",
+            "missing_entry_setup",
+            "missing_invalidation_boundary",
+            "critical_data_gap",
+            "fundamental_data_not_enough_for_standalone_setup",
+            "dominant_opposing_evidence_requires_pm_resolution",
+        }
+        current_entry_eligible = not bool(
+            current_entry_blocking_failures.intersection(gating_failures)
+        )
+        current_entry_prerequisite_met = bool(
+            current_entry_eligible
+            and (
+                current_evidence_score >= tradeable_threshold
+                or single_tradeable_candidate_setup_confirmed
+            )
+        )
+        if (
+            current_entry_prerequisite_met
+            and score >= deployable_threshold
+            and max_setup_quality >= min_deployable_setup_quality
+            and not gating_failures
+        ):
             final_state = "tradeable_candidate"
         elif (
-            (
-                score >= tradeable_threshold
-                and max_setup_quality >= min_tradeable_candidate_setup_quality
-                and "critical_data_gap" not in gating_failures
-                and tradeable_states > 0
-                and setup_count > 0
+            current_entry_prerequisite_met
+            and (
+                (
+                    current_evidence_score >= tradeable_threshold
+                    and max_setup_quality >= min_tradeable_candidate_setup_quality
+                    and tradeable_states > 0
+                    and setup_count > 0
+                )
+                or single_tradeable_candidate_setup_promoted
+                or single_tradeable_candidate_setup_confirmed
             )
-            or single_tradeable_candidate_setup_promoted
-            or single_tradeable_candidate_setup_confirmed
         ):
             final_state = "probe_candidate"
         elif support_count > 0:
@@ -1306,6 +1355,10 @@ def build_opportunity_scorecard(
             "side": side,
             "score": opportunity_score,
             "opportunity_score": opportunity_score,
+            "current_evidence_quality": round(current_evidence_score, 4),
+            "validated_learning_delta": round(validated_learning_delta, 4),
+            "current_entry_eligible": current_entry_eligible,
+            "current_entry_prerequisite_met": current_entry_prerequisite_met,
             "candidate_quality": candidate_quality,
             "candidate_quality_components": candidate_quality_components,
             "direction_evidence_strength": candidate_quality,
@@ -1313,6 +1366,8 @@ def build_opportunity_scorecard(
             "trigger_quality_score": round(max_trigger_quality, 4),
             "direction_evidence_components": {
                 "opportunity_score": opportunity_score,
+                "current_evidence_quality": round(current_evidence_score, 4),
+                "validated_learning_delta": round(validated_learning_delta, 4),
                 "candidate_quality": candidate_quality,
                 "supporting_signal_count": support_count,
                 "supporting_analysts": sorted(set(name for name in analyst_names if name)),

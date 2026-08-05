@@ -195,6 +195,7 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
                 "atr_stop_distance": 40.0,
                 "setup_type": "trend_continuation",
                 "market_regime": "trend",
+                "opening_authority_type": "exploration_probe",
             },
         }
         lifecycle = extract_signal_lifecycle(snapshot)
@@ -209,6 +210,7 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
                 "atr_stop_distance": 40.0,
                 "setup_type": "trend_continuation",
                 "market_regime": "trend",
+                "opening_authority_type": "exploration_probe",
             },
         )
         self.assertNotIn("invalidation_level", lifecycle)

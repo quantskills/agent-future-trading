@@ -36,6 +36,7 @@ TRIGGER_CONFIRMATION_ADJUSTMENTS = frozenset(
 STRONGER_CONFIRMATION_ADJUSTMENTS = frozenset(
     {"stronger_confirmation_required", "strict_confirmation_required"}
 )
+STRICT_CONFIRMATION_ADJUSTMENTS = frozenset({"strict_confirmation_required"})
 STRONGER_CONFIRMATION_ENTRY_PROFILES = TECHNICAL_ENTRY_PROFILES
 
 
@@ -91,6 +92,10 @@ def normalize_trigger_confirmation_adjustment(value: Any) -> str:
 
 def requires_stronger_trigger_confirmation(value: Any) -> bool:
     return normalize_trigger_confirmation_adjustment(value) in STRONGER_CONFIRMATION_ADJUSTMENTS
+
+
+def requires_strict_trigger_confirmation(value: Any) -> bool:
+    return normalize_trigger_confirmation_adjustment(value) in STRICT_CONFIRMATION_ADJUSTMENTS
 
 
 def canonical_entry_trigger(profile: Any, side: Any) -> str:

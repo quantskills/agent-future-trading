@@ -14,6 +14,11 @@ from evaluation.analyze_strategy_attribution import (
     _rebalance_summary_from_snapshot,
     _release_block_summary_from_recommendations,
 )
+from util.learning_attribution import (
+    learning_effects_from_context,
+    learning_mechanisms_from_context,
+    learning_tags_from_context,
+)
 
 
 class StrategyAttributionReportRegressionTest(unittest.TestCase):
@@ -150,6 +155,26 @@ class StrategyAttributionReportRegressionTest(unittest.TestCase):
         self.assertIn(("positive_learning", "positive"), buckets)
         self.assertIn(("execution_profile_learning", "negative"), buckets)
         self.assertEqual(buckets[("positive_learning", "positive")]["total_trades"], 1)
+
+    def test_score_component_learning_is_attributed_even_without_policy_reason(self):
+        diagnostics = {
+            "opportunity_score_components": {
+                "positive_learning": 0.08,
+                "alpha_profile_adjustment": 0.0,
+                "negative_learning": 0.0,
+            },
+            "pm_lifecycle_learning_impact_delta": {
+                "open_add_rank_score_delta": 0.04,
+                "position_ratio_delta": 0.003,
+            },
+        }
+
+        self.assertIn("action_value_learning", learning_tags_from_context([], diagnostics))
+        self.assertIn("alpha_release", learning_effects_from_context([], diagnostics))
+        self.assertIn(
+            "action_value_learning",
+            learning_mechanisms_from_context([], diagnostics),
+        )
 
 
 if __name__ == "__main__":

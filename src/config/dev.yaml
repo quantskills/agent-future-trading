@@ -56,7 +56,7 @@ control_governance:
 # ---------------------------------------------------------------------------
 
 # 3.1 实验账户基础
-exp_name: "agentquant-futures-trading-2025"
+exp_name: "agentquant-futures-trading-2025-rag-retest-202507-08"
 cashflow: 5000000
 market_type: "china_futures"
 

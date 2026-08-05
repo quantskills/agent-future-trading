@@ -495,7 +495,21 @@ def calculate_optimization_acceptance_metrics(
             def _learning_attribution(row: Dict) -> Tuple[List[str], List[str], List[str]]:
                 snapshot = _snapshot(row)
                 contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-                auditor_diag = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
+                learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
+                evidence_used = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+                auditor_diag = {
+                    **learning_used,
+                    "opportunity_score_components": (
+                        evidence_used.get("opportunity_score_components")
+                        if isinstance(evidence_used.get("opportunity_score_components"), dict)
+                        else {}
+                    ),
+                    "pm_lifecycle_learning_impact_delta": (
+                        learning_used.get("pm_lifecycle_learning_impact_delta")
+                        if isinstance(learning_used.get("pm_lifecycle_learning_impact_delta"), dict)
+                        else {}
+                    ),
+                }
                 reasons = _collect_reasons(snapshot)
                 return (
                     learning_tags_from_context(reasons, auditor_diag),

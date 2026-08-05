@@ -3243,9 +3243,19 @@ class SQLiteDB(BaseDB):
                 params.extend([trading_day_value, trading_day_value])
             cursor.execute(
                 f'''
+                WITH ranked_digest AS (
+                    SELECT analyst_learning_digest.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY config_id, analyst, ticker, sector,
+                                            horizon_class, market_regime, digest_text
+                               ORDER BY created_at DESC, id DESC
+                           ) AS content_rank
+                    FROM analyst_learning_digest
+                    WHERE {' AND '.join(where)}
+                )
                 SELECT *
-                FROM analyst_learning_digest
-                WHERE {' AND '.join(where)}
+                FROM ranked_digest
+                WHERE content_rank = 1
                 ORDER BY
                     CASE WHEN ticker = ? THEN 0 WHEN ticker = '*' THEN 1 ELSE 2 END,
                     CASE WHEN sector = ? THEN 0 WHEN sector = '*' THEN 1 ELSE 2 END,
@@ -3300,7 +3310,7 @@ class SQLiteDB(BaseDB):
             ticker_value = str(ticker or "").upper()
             sector_value = str(sector or "*")
             params: List[Any] = [config_id]
-            where = ["config_id = ?"]
+            where = ["config_id = ?", "return_on_notional IS NOT NULL"]
             if ticker_value and ticker_value != "*":
                 where.append("ticker IN (?, '*')")
                 params.append(ticker_value)
@@ -3318,7 +3328,8 @@ class SQLiteDB(BaseDB):
                 params.append(str(market_regime))
             trading_day_value = self._normalize_trading_day_value(trading_date)
             if trading_day_value:
-                where.append("(close_date IS NULL OR close_date < ?)")
+                where.append("close_date IS NOT NULL")
+                where.append("close_date < ?")
                 params.append(trading_day_value)
             cursor.execute(
                 f'''
@@ -3328,7 +3339,7 @@ class SQLiteDB(BaseDB):
                 ORDER BY
                     CASE WHEN ticker = ? THEN 0 WHEN ticker = '*' THEN 1 ELSE 2 END,
                     CASE WHEN sector = ? THEN 0 WHEN sector = '*' THEN 1 ELSE 2 END,
-                    ABS(net_pnl) DESC,
+                    ABS(return_on_notional) DESC,
                     close_date DESC,
                     created_at DESC
                 LIMIT ?
@@ -3830,7 +3841,7 @@ class SQLiteDB(BaseDB):
         trading_date=None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Retrieve reviewer research hypotheses as non-authoritative priors."""
+        """Retrieve validated researcher hypotheses as non-authoritative priors."""
         conn = None
         try:
             conn = self._get_connection()
@@ -3839,7 +3850,7 @@ class SQLiteDB(BaseDB):
             ticker_value = str(ticker or "").upper()
             sector_value = str(sector or "*")
             params: List[Any] = [config_id]
-            where = ["config_id = ?", "status IN ('candidate', 'monitoring', 'validated')"]
+            where = ["config_id = ?", "status = 'validated'"]
             if ticker_value and ticker_value != "*":
                 where.append("ticker IN (?, '*')")
                 params.append(ticker_value)

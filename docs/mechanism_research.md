@@ -65,7 +65,7 @@ profile 与 action-value 的区别：profile 是“这个 setup 整体成绩如�
 | `research_position_feedback` | 记录 PM 是否实际声明消费学习，以及后续动作、成交和结算 | Researcher 闭环和开发验收，不直接控制交易 | 23 |
 | `signal_context_history` | 每日 SCC/FAC 等上下文事实快照 | Researcher 后续归因和聚合 | 345 |
 | `capital_deployment_state` | 每日资金利用和部署诊断 | Researcher、Reviewer 报告和开发评估；不是 PM 次日直接记忆 | 23 |
-| `exploratory_hypothesis` | Researcher LLM 生成的结构化探索假设 | 分析师可在提示词中作为“待验证假设”参考；不能授权交易 | 41，全部 candidate |
+| `exploratory_hypothesis` | Researcher LLM 基于完整持仓日轨迹和明确支持 episode ID 生成的结构化探索假设 | `candidate/monitoring` 只做影子验证；只有 `validated` 可进入分析师提示词作为可反驳先验，任何状态都不能直接授权交易 | 运行时按 `candidate/monitoring/validated/rejected` 统计 |
 | `causal_review_candidate` | Researcher LLM 形成的因果候选及确定性验证状态 | Researcher 和开发评估；未验证前无正式交易消费权 | 22 |
 | `researcher_llm_notes` | 保存 Researcher 因果/探索研究使用的 prompt、response 及外置 artifact，供审计和复现 | 无直接交易消费者；只有结构化、验证后的候选才能进入后续研究链 | 35 |
 | `config_learning_overlay` | 研究参数覆盖层；PM 代码通过 `apply_config_learning_overlay` 读取 | PM 配置层 | 当前 0 行，本轮没有实际参数覆盖 |
@@ -74,7 +74,7 @@ profile 与 action-value 的区别：profile 是“这个 setup 整体成绩如�
 
 ### 4. 消费边界的当前代码事实
 
-- 三类分析师会消费 `analyst_learning_digest`、相对化 episode、未交易摘要、探索假设、profile 摘要和显式授权的 action-value 安全投影；技术分析师还会消费技术参数校准 policy。学习同时进入 LLM 前提示词和 LLM 后确定性信号校对。
+- 三类分析师会消费 `analyst_learning_digest`、相对化 episode、未交易摘要、仅限 `validated` 的探索假设、profile 摘要和显式授权的 action-value 安全投影；`candidate/monitoring` 探索假设不进入提示词，技术分析师还会消费技术参数校准 policy。学习同时进入 LLM 前提示词和 LLM 后确定性信号校对。
 - PM 的统一正式入口 `retrieve_pm_memory` 当前可返回 action-value、profile、strategy memory、adaptive policy 和 provisional policy。action-value 还按 exact、同品种同方向同周期 fallback、同品种同方向 fallback 分层；fallback 是低质量学习，不能冒充 exact 或单独支持 real/scale。
 - Trader、Auditor、Accountant、Reviewer 和 Signal Collector 不直接读取研究表。Trader 只读取 PM 已写入 FAC 的执行字段；Auditor/Accountant 只审计 FAC、账户、风险和成交结算事实。
 - `learning_event_log`、`learning_context_budget`、`researcher_llm_notes`、`capital_deployment_state` 和多数因果/排名事件属于总账、诊断或研究输入，不能仅因“有记录”就声称已经影响分析、排名、资金或交易。
@@ -223,7 +223,7 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 
 技术面分析师额外保留一项专业机制：在 LLM 调用前，根据当前可见价格形成初始自适应参数和初始 `market_regime`，再读取过去有效、作用域匹配且经过验证的 `contextual_rule_calibration:technical_parameters`，有界调整 EMA、RSI 和 Bollinger 参数，并用校准后的参数重新计算最终技术指标和 `technical_context`。该机制不直接修改 `signal`、`opportunity_state`、触发、手数、rank、预算和交易权限。
 
-完整持仓 episode 进入分析师提示词时，只投影结构化的相对结构失效距离、原始 ATR 距离、预期/实际持有期、最终退出原因和已结算结果；其检索继续服从既有 ticker/sector/horizon 范围和 T+1 边界，历史开仓价、历史结构价等绝对价格不得复制到当日信号，旧 episode 自由文本不得作为回退来源。正式 action-value 只有在同品种、严格早于当日、有效期合法、canonical 语义完整，且其顶层 `consumer_scope=pm_learning`、内嵌 `signal_calibration.contract_version` 合法、内嵌 `consumer_scope=analyst_calibration` 并明确允许 `analysis_team` 使用时，才投影为不含原始学习 ID、人民币reward、rank、手数和保证金的提示词摘要；该摘要保留`mean_return_on_notional`与最新完整周期收益率。分析师校准强度只按手续费后名义收益率、样本数、置信度和胜率计算；同完整作用域最新完整周期亏损时，正式action-value的负向校准优先撤销旧正向Profile校准。similar、weak、incomplete、counterfactual prior 不进入该投影。
+完整持仓 episode 进入分析师提示词时，只投影结构化的相对结构失效距离、原始 ATR 距离、预期/实际持有期、最终退出原因和手续费后 `return_on_notional`；其检索继续服从既有 ticker/sector/horizon 范围和 T+1 边界，并按 `ABS(return_on_notional)` 选择代表周期，人民币 `net_pnl` 只保留数据库审计，不进入提示词、排序或周期好坏判断。历史开仓价、历史结构价等绝对价格不得复制到当日信号，旧 episode 自由文本不得作为回退来源。正式 action-value 只有在同品种、严格早于当日、有效期合法、canonical 语义完整，且其顶层 `consumer_scope=pm_learning`、内嵌 `signal_calibration.contract_version` 合法、内嵌 `consumer_scope=analyst_calibration` 并明确允许 `analysis_team` 使用时，才投影为不含原始学习 ID、人民币reward、rank、手数和保证金的提示词摘要；该摘要保留`mean_return_on_notional`与最新完整周期收益率。分析师校准强度只按手续费后名义收益率、样本数、置信度和胜率计算；同完整作用域最新完整周期亏损时，正式action-value的负向校准优先撤销旧正向Profile校准。similar、weak、incomplete、counterfactual prior 不进入该投影。
 
 分析校准先检索当前精确 `market_regime`。只有精确结果没有形成任何安全投影、且当前方向明确时，才允许读取同品种、同方向、同周期的跨 regime 正式摘要；该摘要以内部 `retrieval_match_level=cross_regime_same_ticker_side_horizon` 标识并按低权重进入分析校准，当前 regime 证据始终优先。技术参数 overlay 仍严格要求精确 regime，不使用该回退，也不放宽 PM 的正式学习检索。
 
@@ -290,7 +290,9 @@ PM 的决策学习生命周期与 Trader 的条件执行生命周期必须分开
 
 对最终 `hold/reduce/exit` 合约，生命周期匹配只是必要条件。只有某条正式 action-value 的精确 ID 被对应软生命周期控制选中、实际改变了最终动作或仓位比例，并且该影响没有被后续规则覆盖，才允许同时进入最终 `decision_learning_rows` 与 `learning_used.alpha_setup_action_values`。唯一窄桥接是：canonical、`pm_learning` 的负向 hold 记录确实使同方向持仓比例下降时，可保持原 hold family/lane 和精确 ID 进入最终 reduce FAC；它不得被重标为 reduce，也不得把其他 hold 记录全局放行。结构/ATR 止损、明确技术反转、基本面中期反向和其他独立确定性生命周期规则即使得到同 lane 历史记录，也不得把该记录写成实际消费学习。
 
-投资组合经理可以消费 execution action-value，但只能把它转成未来最终合约里的合约化执行字段。对入场学习，只有同品种、同方向、同 setup、同 canonical trigger 的正式 canonical open/add `entry_quality_outcome.trigger_confirmation_adjustment`，或当日结构化 weak-conflict 权限，才允许形成最终合约的 `trigger_confirmation_adjustment`；开仓episode的正负、`support_weight/penalty_weight`和确认等级只按手续费后`return_on_notional`生成，人民币盈亏只保留审计与生命周期统计。reason 文本、similar/weak/incomplete prior 不得产生该字段。交易员对 stronger/strict 只在现有 FAC 路径内追加下一根完整15分钟线的价格延续与相对量能确认，standard 保持原触发；交易员仍只读 `final_action_contract` 中的 `execution_profile/entry_trigger/trigger_confirmation_adjustment/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`，也不新增方向、手数或退出权限。
+投资组合经理可以消费 execution action-value，但只能把它转成未来最终合约里的合约化执行字段。对入场学习，只有同品种、同方向、同 setup、同 canonical trigger 的正式 canonical open/add `entry_quality_outcome.trigger_confirmation_adjustment`，或当日结构化 weak-conflict 权限，才允许形成最终合约的 `trigger_confirmation_adjustment`；开仓episode的正负、`support_weight/penalty_weight`和确认等级只按手续费后`return_on_notional`生成，人民币盈亏只保留审计与生命周期统计。reason 文本、similar/weak/incomplete prior 不得产生该字段。交易员对 stronger 在现有 FAC 路径内追加一根完整15分钟线，对 strict 追加连续两根完整15分钟线，并逐根验证价格延续及整段相对量能；standard 保持原触发。交易员仍只读 `final_action_contract` 中的 `execution_profile/entry_trigger/trigger_confirmation_adjustment/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`，也不新增方向、手数或退出权限。
+
+探索研究固定为单一路径：Researcher 将完整 episode 的每日 SCC/FAC、成交、结算、证据变化、累计峰值和利润回吐压缩进一次 LLM 输入，LLM 必须引用实际提供且与假设作用域匹配的 `support_episode_ids`。新假设先写为 `candidate`，只用生成日之后、同 ticker/sector/side/horizon/regime/setup 的完整真实 episode 按手续费后 `return_on_notional` 做影子验证；样本不足为 `monitoring`，达到既有样本下限且均值为正为 `validated`，均值非正、到期仍不足或最新完整周期亏损为 `rejected`。验证过程只更新 `exploratory_hypothesis`，不得写 Profile、action-value、policy、Rank、仓位或 Trader 权限；`validated` 只进入下一交易日分析师先验，再经原有 AEC→SCC→PM FAC→Auditor→Trader 链路产生作用。
 
 ## 七、交易员、会计师、复盘员与研究边界
 
@@ -316,6 +318,8 @@ PM 的决策学习生命周期与 Trader 的条件执行生命周期必须分开
 ## 八、相似 setup 检索和防未来函数
 
 当前系统唯一正式术语是 RAG（Retrieval-Augmented Generation/检索增强）；`REG` 不是项目术语，也不得作为兼容别名或第三套机制。系统使用结构化检索和轻量 SQL 相似 setup 检索，不使用长文本向量 RAG 作为交易授权。检索按 ticker、sector、side、setup_type、horizon、regime、action lane 等结构化键聚合 compact evidence，并强制历史样本 `trading_date < decision_date`。
+
+分析师摘要只在同作用域出现新的完整真实 episode 时刷新；`last_sample_date` 和 `valid_until` 从该 episode 的真实结束日计算，没有新完整周期时不重写、不续期。`analyst_learning_digest` 的生产端按完整作用域和 `digest_text` 复用单行，检索端再按同一内容键去重，历史不同 ID 的同内容副本不得重复占用提示词预算。Researcher 与分析师选择完整 episode 时统一按手续费后 `return_on_notional` 排序和判断；人民币 `net_pnl` 只服务持久化审计与财务复核。
 
 同品种同作用域真实样本优先；同板块样本、similar SQL/RAG、shadow 样本只能作弱先验。它们不能 seed 新开仓，不能覆盖同作用域负期望，不能绕过 `decision_memory_retrieval`、PM 生命周期路由、必要的 Step5 全市场资金部署、Step6 `final_action_contract`、审计员、交易员和保证金硬上限。
 

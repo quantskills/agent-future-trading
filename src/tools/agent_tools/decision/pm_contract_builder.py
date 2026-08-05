@@ -1030,6 +1030,14 @@ def build_final_action_contract(
         "target_position_ratio": float(position_ratio or 0.0),
         "target_margin_ratio_estimate": margin_ratio_estimate,
         "authority_type": authority.get("authority_type") or "not_applicable",
+        "opening_authority_type": (
+            final_scope.get("opening_authority_type")
+            or (
+                authority.get("authority_type")
+                if int(current_lots or 0) == 0 and int(target_lots or 0) != 0
+                else None
+            )
+        ),
         "authority_decision": authority.get("decision") or "not_applicable",
         "requires_authority": bool(authority.get("requires_authority")),
         "open_action_evidence": bool(authority.get("open_action_evidence")),

@@ -1,6 +1,7 @@
 import json
 import re
 import math
+import sqlite3
 from copy import deepcopy
 from datetime import datetime
 from enum import Enum
@@ -1023,6 +1024,12 @@ def _final_contract_scope_from_scc(
             "position_invalidation_level": execution_fields.get("position_invalidation_level"),
             "exit_hint": execution_fields.get("exit_hint"),
             "atr_stop_distance": execution_fields.get("atr_stop_distance"),
+            "opening_authority_type": (
+                (opening_fac_context or {}).get("opening_authority_type")
+                if int(current_lots or 0) != 0
+                and isinstance(opening_fac_context, dict)
+                else None
+            ),
         }
     opening_context = (
         opening_fac_context
@@ -1036,6 +1043,7 @@ def _final_contract_scope_from_scc(
             "horizon_class",
             "expected_horizon_days",
             "market_regime",
+            "opening_authority_type",
         )
     }
     side = "long" if target_lots > 0 else "short" if target_lots < 0 else ""
@@ -2908,6 +2916,23 @@ def _final_contract_authority(
     open_action_evidence = bool(trade_authority.get("open_action_evidence"))
     watch_for_trigger_without_setup = bool(trade_authority.get("watch_for_trigger_without_setup"))
     scorecard_state = str(trade_authority.get("scorecard_state") or "").lower()
+    scorecard_gating_failures = {
+        str(item or "").strip()
+        for item in (alpha_ev.get("scorecard_gating_failures") or [])
+        if str(item or "").strip()
+    }
+    strict_confirmation_markers = sorted(
+        scorecard_gating_failures
+        & {
+            "weak_entry_setup_quality",
+            "late_long_entry_price_location",
+            "late_short_entry_price_location",
+        }
+    )
+    unresolved_dominant_opposition = bool(
+        "dominant_opposing_evidence_requires_pm_resolution"
+        in scorecard_gating_failures
+    )
     market_conflict = "market_confirmation_conflict" in reason_set
     weak_conflict_probe = bool(
         market_conflict
@@ -2969,10 +2994,19 @@ def _final_contract_authority(
     }
     weak_only = bool(weak_markers or open_action_missing or watch_for_trigger_block)
     release_qualified = bool(release and (qualified_positive or strong_current_evidence))
-    requires_authority = bool(hard_zero or hard_blocks or weak_markers or negative_profile or watch_for_trigger_block or open_action_missing)
+    requires_authority = bool(
+        hard_zero
+        or hard_blocks
+        or weak_markers
+        or negative_profile
+        or watch_for_trigger_block
+        or open_action_missing
+        or unresolved_dominant_opposition
+    )
     can_real = bool(
         not hard_zero
         and not hard_blocks
+        and not unresolved_dominant_opposition
         and not negative_profile
         and not weak_conflict_probe
         and not open_action_missing
@@ -2988,6 +3022,7 @@ def _final_contract_authority(
     can_explore = bool(
         not hard_zero
         and not hard_blocks
+        and not unresolved_dominant_opposition
         and (not weak_conflict_probe or conditional_trigger_authority)
         and not watch_for_trigger_block
         and tradeable_state
@@ -3073,6 +3108,8 @@ def _final_contract_authority(
             + (["watch_for_trigger_cannot_open_position"] if watch_for_trigger_block else [])
             + (["watch_for_trigger_semantic_release_block"] if watch_for_trigger_semantic_block and release else [])
             + (["weak_conflict_probe_requires_stronger_confirmation"] if weak_conflict_probe else [])
+            + (["weak_or_late_setup_requires_strict_confirmation"] if strict_confirmation_markers else [])
+            + (["dominant_opposing_evidence_unresolved"] if unresolved_dominant_opposition else [])
             + (["negative_expectancy"] if negative_profile else [])
             + (["hard_zero"] if hard_zero else [])
             + (["analyst_tradeable_probe_candidate"] if analyst_tradeable_probe_candidate else [])
@@ -3119,6 +3156,9 @@ def _final_contract_authority(
         "probe_margin_ratio": budget_cfg.get("probe_margin_ratio"),
         "min_real_trade_margin_ratio": budget_cfg.get("min_real_trade_margin_ratio"),
         "weak_markers": weak_markers,
+        "strict_confirmation_required": bool(strict_confirmation_markers),
+        "strict_confirmation_markers": strict_confirmation_markers,
+        "unresolved_dominant_opposition": unresolved_dominant_opposition,
         "hard_blocks": hard_blocks,
         "hard_zero": hard_zero,
         "reason_effects": reason_effects,
@@ -4140,7 +4180,9 @@ def _entry_trigger_confirmation_adjustment(
         "strict_confirmation_required": 4,
     }
     selected = (
-        "stronger_confirmation_required"
+        "strict_confirmation_required"
+        if bool(final_entry_authority.get("strict_confirmation_required"))
+        else "stronger_confirmation_required"
         if bool(final_entry_authority.get("weak_conflict_probe"))
         else "not_applicable"
     )
@@ -6497,6 +6539,7 @@ def _load_opening_fac_context(
     ticker: str,
     trading_date,
     current_lots: int,
+    current_position=None,
 ) -> dict:
     """Resolve the still-open strategy lot lineage to its opening FAC."""
     current_side = "long" if int(current_lots or 0) > 0 else "short" if int(current_lots or 0) < 0 else ""
@@ -6509,8 +6552,18 @@ def _load_opening_fac_context(
     try:
         conn = db._get_connection()
         cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(futures_transactions)")
+        transaction_columns = {
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+            for row in cursor.fetchall()
+        }
+        contract_multiplier_expr = (
+            "ft.contract_multiplier"
+            if "contract_multiplier" in transaction_columns
+            else "1.0"
+        )
         cursor.execute(
-            '''
+            f'''
             SELECT ft.id,
                    ft.trading_date,
                    ft.action,
@@ -6518,6 +6571,7 @@ def _load_opening_fac_context(
                    ft.source_type,
                    ft.recommendation_id,
                    COALESCE(ft.execution_price, ft.price) AS execution_price,
+                   {contract_multiplier_expr} AS contract_multiplier,
                    fr.signal_snapshot,
                    fr.signal_snapshot_artifact_path,
                    fr.signal_snapshot_sha256
@@ -6638,8 +6692,46 @@ def _load_opening_fac_context(
             "market_regime": str(contract.get("market_regime") or "").strip(),
         }
         opening_day = _normalize_trading_day_value(opening_row.get("trading_date"))
+        opening_action = "open_long" if current_side == "long" else "open_short"
+        cursor.execute(
+            f'''
+            SELECT SUM(
+                COALESCE(ft.execution_price, ft.price, 0.0)
+                * ABS(ft.lots)
+                * {contract_multiplier_expr}
+            ) AS cycle_open_notional
+            FROM futures_transactions ft
+            WHERE ft.config_id = ?
+              AND upper(ft.ticker) = upper(?)
+              AND lower(COALESCE(ft.source_type, 'strategy')) = 'strategy'
+              AND lower(ft.action) = ?
+              AND substr(ft.trading_date, 1, 10) >= ?
+              AND substr(ft.trading_date, 1, 10) < ?
+            ''',
+            (
+                config_id,
+                ticker,
+                opening_action,
+                opening_day,
+                decision_day,
+            ),
+        )
+        notional_row = cursor.fetchone()
+        cycle_open_notional = _safe_float(
+            notional_row["cycle_open_notional"] if notional_row else 0.0,
+            0.0,
+        )
+        if cycle_open_notional <= 0.0:
+            cycle_open_notional = (
+                opening_execution_price
+                * abs(int(current_lots or 0))
+                * _safe_float(opening_row.get("contract_multiplier"), 0.0)
+            )
         held_trading_days = 0
         best_prior_settlement_price = 0.0
+        settled_cycle_net_pnl = 0.0
+        cycle_commission = 0.0
+        cycle_peak_net_pnl = 0.0
         if opening_day and opening_day < decision_day:
             cursor.execute(
                 '''
@@ -6654,28 +6746,92 @@ def _load_opening_fac_context(
             )
             day_row = cursor.fetchone()
             held_trading_days = 1 + int((day_row["day_count"] if day_row else 0) or 0)
+            cursor.execute("PRAGMA table_info(ticker_daily_pnl)")
+            ticker_pnl_columns = {
+                str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+                for row in cursor.fetchall()
+            }
+            daily_pnl_expr = (
+                "tdp.daily_pnl" if "daily_pnl" in ticker_pnl_columns else "0.0"
+            )
+            commission_expr = (
+                "tdp.commission" if "commission" in ticker_pnl_columns else "0.0"
+            )
             cursor.execute(
-                '''
-                SELECT MAX(tdp.settle_price) AS highest_settlement,
-                       MIN(tdp.settle_price) AS lowest_settlement
+                f'''
+                SELECT substr(tdp.trading_date, 1, 10) AS trading_day,
+                       tdp.settle_price AS settle_price,
+                       {daily_pnl_expr} AS daily_pnl,
+                       {commission_expr} AS commission
                 FROM ticker_daily_pnl tdp
                 JOIN portfolio p ON tdp.portfolio_id = p.id
                 WHERE p.config_id = ?
                   AND upper(tdp.ticker) = upper(?)
                   AND substr(tdp.trading_date, 1, 10) >= ?
                   AND substr(tdp.trading_date, 1, 10) < ?
-                  AND tdp.settle_price > 0
+                ORDER BY substr(tdp.trading_date, 1, 10)
                 ''',
                 (config_id, ticker, opening_day, decision_day),
             )
-            settlement_row = cursor.fetchone()
-            if settlement_row:
-                settlement_value = (
-                    settlement_row["highest_settlement"]
-                    if current_side == "long"
-                    else settlement_row["lowest_settlement"]
+            running_cycle_net_pnl = 0.0
+            favorable_settlements: list[float] = []
+            for settlement_row in cursor.fetchall():
+                settlement_price = _safe_float(
+                    settlement_row["settle_price"],
+                    0.0,
                 )
-                best_prior_settlement_price = _safe_float(settlement_value, 0.0)
+                if settlement_price > 0.0:
+                    favorable_settlements.append(settlement_price)
+                commission_value = _safe_float(
+                    settlement_row["commission"],
+                    0.0,
+                )
+                cycle_commission += commission_value
+                running_cycle_net_pnl += (
+                    _safe_float(settlement_row["daily_pnl"], 0.0)
+                    - commission_value
+                )
+                cycle_peak_net_pnl = max(
+                    cycle_peak_net_pnl,
+                    running_cycle_net_pnl,
+                )
+            settled_cycle_net_pnl = running_cycle_net_pnl
+            if favorable_settlements:
+                best_prior_settlement_price = (
+                    max(favorable_settlements)
+                    if current_side == "long"
+                    else min(favorable_settlements)
+                )
+        current_day_unrealized_pnl = _safe_float(
+            getattr(current_position, "unrealized_pnl", 0.0),
+            0.0,
+        )
+        cycle_net_pnl = settled_cycle_net_pnl + current_day_unrealized_pnl
+        cycle_peak_net_pnl = max(cycle_peak_net_pnl, cycle_net_pnl, 0.0)
+        cycle_profit_drawdown = max(0.0, cycle_peak_net_pnl - cycle_net_pnl)
+        cycle_return_on_notional = (
+            cycle_net_pnl / cycle_open_notional
+            if cycle_open_notional > 0.0
+            else 0.0
+        )
+        cycle_peak_return_on_notional = (
+            cycle_peak_net_pnl / cycle_open_notional
+            if cycle_open_notional > 0.0
+            else 0.0
+        )
+        cycle_profit_drawdown_on_notional = max(
+            0.0,
+            cycle_peak_return_on_notional - cycle_return_on_notional,
+        )
+        current_margin_used = _safe_float(
+            getattr(current_position, "margin_used", 0.0),
+            0.0,
+        )
+        cycle_margin_return_ratio = (
+            cycle_net_pnl / current_margin_used
+            if current_margin_used > 0.0
+            else 0.0
+        )
         return {
             "recommendation_id": str(opening_row.get("recommendation_id") or ""),
             "opening_trading_date": opening_day,
@@ -6690,6 +6846,27 @@ def _load_opening_fac_context(
             "opening_execution_price": opening_execution_price,
             "best_prior_settlement_price": best_prior_settlement_price,
             "final_action": str(contract.get("final_action") or ""),
+            "opening_authority_type": str(
+                contract.get("opening_authority_type")
+                or contract.get("authority_type")
+                or ""
+            ).strip().lower(),
+            "settled_cycle_net_pnl": float(settled_cycle_net_pnl),
+            "current_day_unrealized_pnl": float(current_day_unrealized_pnl),
+            "cycle_net_pnl": float(cycle_net_pnl),
+            "cycle_commission": float(cycle_commission),
+            "cycle_peak_net_pnl": float(cycle_peak_net_pnl),
+            "cycle_profit_drawdown": float(cycle_profit_drawdown),
+            "cycle_open_notional": float(cycle_open_notional),
+            "cycle_return_on_notional": float(cycle_return_on_notional),
+            "cycle_peak_return_on_notional": float(
+                cycle_peak_return_on_notional
+            ),
+            "cycle_profit_drawdown_on_notional": float(
+                cycle_profit_drawdown_on_notional
+            ),
+            "cycle_pnl_ratio": float(cycle_return_on_notional),
+            "cycle_margin_return_ratio": float(cycle_margin_return_ratio),
         }
     except RuntimeError:
         raise
@@ -7524,6 +7701,9 @@ def _apply_alpha_setup_ev_position_control(
             "side_priority_score": side_scorecard.get("side_priority_score"),
             "candidate_quality": side_scorecard.get("candidate_quality"),
             "candidate_layer_hint": side_scorecard.get("candidate_layer_hint"),
+            "scorecard_gating_failures": list(
+                side_scorecard.get("gating_failures") or []
+            ),
             "side_priority_semantics_version": side_scorecard.get("side_priority_semantics_version"),
             "side_priority_is_not_capital_rank": bool(side_scorecard.get("side_priority_is_not_capital_rank", True)),
             "current_confirmation_score": confirmation_score,
@@ -8002,6 +8182,7 @@ def _apply_winning_template_continuation_control(
     market_confirmation: dict,
     opportunity_scorecard: dict | None,
     full_config: dict,
+    opening_fac_context: dict | None = None,
 ) -> tuple[float, list[str], list[str], dict]:
     """Preserve profitable same-side alpha when current evidence still supports it."""
     reasons: list[str] = []
@@ -8018,7 +8199,7 @@ def _apply_winning_template_continuation_control(
     control = (_get_holding_rebalance_config(full_config).get("winning_template_continuation") or {})
     if not bool(control.get("enabled", True)):
         return position_ratio, reasons, notes, diagnostics
-    pnl_ratio = _position_pnl_ratio(current_position)
+    pnl_ratio = _position_pnl_ratio(current_position, opening_fac_context)
     min_profit_ratio = float(control.get("min_profit_ratio", 0.015) or 0.015)
     if pnl_ratio < min_profit_ratio:
         return position_ratio, reasons, notes, diagnostics
@@ -8586,9 +8767,24 @@ def _signed_abs(side: str, abs_ratio: float) -> float:
     return abs(abs_ratio) if side == "long" else -abs(abs_ratio)
 
 
-def _position_pnl_ratio(current_position) -> float:
+def _position_pnl_ratio(
+    current_position,
+    opening_fac_context: dict | None = None,
+) -> float:
     if not current_position:
         return 0.0
+    opening_context = (
+        opening_fac_context
+        if isinstance(opening_fac_context, dict)
+        else {}
+    )
+    if opening_context.get("cycle_return_on_notional") is not None:
+        return _safe_float(
+            opening_context.get("cycle_return_on_notional"),
+            0.0,
+        )
+    if opening_context.get("cycle_pnl_ratio") is not None:
+        return _safe_float(opening_context.get("cycle_pnl_ratio"), 0.0)
     margin_used = _safe_float(getattr(current_position, "margin_used", 0.0), 0.0)
     if margin_used <= 0:
         return 0.0
@@ -9435,7 +9631,8 @@ def _apply_holding_rebalance_control(
         if current_position and current_lots != 0
         else None
     )
-    position_pnl_ratio = _position_pnl_ratio(current_position)
+    daily_position_pnl_ratio = _position_pnl_ratio(current_position)
+    position_pnl_ratio = _position_pnl_ratio(current_position, opening_context)
 
     diagnostics = {
         "holding_rebalance_control": {
@@ -9448,6 +9645,28 @@ def _apply_holding_rebalance_control(
             "current_ratio": float(current_ratio),
             "raw_target_ratio": float(position_ratio),
             "position_pnl_ratio": float(position_pnl_ratio),
+            "daily_position_pnl_ratio": float(daily_position_pnl_ratio),
+            "cycle_net_pnl": _safe_float(opening_context.get("cycle_net_pnl"), 0.0),
+            "cycle_peak_net_pnl": _safe_float(
+                opening_context.get("cycle_peak_net_pnl"),
+                0.0,
+            ),
+            "cycle_profit_drawdown": _safe_float(
+                opening_context.get("cycle_profit_drawdown"),
+                0.0,
+            ),
+            "cycle_return_on_notional": _safe_float(
+                opening_context.get("cycle_return_on_notional"),
+                0.0,
+            ),
+            "cycle_peak_return_on_notional": _safe_float(
+                opening_context.get("cycle_peak_return_on_notional"),
+                0.0,
+            ),
+            "cycle_profit_drawdown_on_notional": _safe_float(
+                opening_context.get("cycle_profit_drawdown_on_notional"),
+                0.0,
+            ),
             "confirmation_score": float(confirmation_score),
             "min_rebalance_ratio": float(min_rebalance_ratio),
             "min_new_entry_ratio": float(min_new_entry_ratio),
@@ -9703,6 +9922,22 @@ def _apply_holding_rebalance_control(
         technical_supports_current=technical_supports_current,
         news_supports_current=news_supports_current,
         lifecycle_config=lifecycle_config,
+    )
+    cycle_peak_return_on_notional = _safe_float(
+        opening_context.get("cycle_peak_return_on_notional"),
+        0.0,
+    )
+    cycle_return_on_notional = _safe_float(
+        opening_context.get("cycle_return_on_notional"),
+        0.0,
+    )
+    profit_giveback_revalidation_due = bool(
+        lifecycle_enabled
+        and cycle_peak_return_on_notional > 0.0
+        and cycle_return_on_notional <= 0.0
+    )
+    profit_giveback_revalidation_failed = bool(
+        profit_giveback_revalidation_due and not loss_revalidated
     )
     trend_position = (
         lifecycle_enabled
@@ -9966,6 +10201,12 @@ def _apply_holding_rebalance_control(
         "probe_expired": bool(probe_expired),
         "strong_reversal": bool(strong_reversal),
         "strong_exit": bool(strong_exit),
+        "profit_giveback_revalidation_due": bool(
+            profit_giveback_revalidation_due
+        ),
+        "profit_giveback_revalidation_failed": bool(
+            profit_giveback_revalidation_failed
+        ),
     })
 
     if opening_position_invalidation_breached:
@@ -9996,6 +10237,39 @@ def _apply_holding_rebalance_control(
             f"ratio {current_ratio:.2%}->{reduced_ratio:.2%}."
         )
         detail["decision"] = "reduce_fundamental_medium_opposition"
+        detail["final_target_ratio"] = float(reduced_ratio)
+        return reduced_ratio, reasons, notes, diagnostics
+
+    if profit_giveback_revalidation_failed:
+        reduction_multiplier = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    lifecycle_config.get(
+                        "exploration_reconfirm_reduction_multiplier",
+                        0.50,
+                    )
+                    or 0.50
+                ),
+            ),
+        )
+        reduced_ratio = _signed_abs(
+            current_side,
+            abs(current_ratio) * reduction_multiplier,
+        )
+        if target_side == current_side:
+            reduced_ratio = _signed_abs(
+                current_side,
+                min(abs(position_ratio), abs(reduced_ratio)),
+            )
+        reasons.append("profit_giveback_revalidation_failed")
+        notes.append(
+            f"{ticker} {current_side} positive complete-cycle return was fully given back "
+            f"without sufficient current revalidation; ratio "
+            f"{current_ratio:.2%}->{reduced_ratio:.2%}."
+        )
+        detail["decision"] = "reduce_failed_profit_giveback_revalidation"
         detail["final_target_ratio"] = float(reduced_ratio)
         return reduced_ratio, reasons, notes, diagnostics
 
@@ -10885,6 +11159,7 @@ def _run_pm_six_step_decision(state: FundState):
         ticker=ticker,
         trading_date=trading_date,
         current_lots=current_lots_for_control,
+        current_position=current_position,
     )
     formal_learning_identity_by_side = {
         side: _formal_learning_identity_for_side(
@@ -11919,6 +12194,7 @@ def _run_pm_six_step_decision(state: FundState):
         market_confirmation=market_confirmation,
         opportunity_scorecard=opportunity_scorecard,
         full_config=full_config,
+        opening_fac_context=opening_fac_context,
     )
     control_reasons.extend(reasons)
     control_notes.extend(notes)
@@ -12761,6 +13037,19 @@ def _run_pm_six_step_decision(state: FundState):
             "lifecycle_classification": holding_diagnostics.get("lifecycle_classification"),
             "decision": holding_diagnostics.get("decision"),
             "position_pnl_ratio": holding_diagnostics.get("position_pnl_ratio"),
+            "daily_position_pnl_ratio": holding_diagnostics.get("daily_position_pnl_ratio"),
+            "cycle_net_pnl": holding_diagnostics.get("cycle_net_pnl"),
+            "cycle_peak_net_pnl": holding_diagnostics.get("cycle_peak_net_pnl"),
+            "cycle_profit_drawdown": holding_diagnostics.get("cycle_profit_drawdown"),
+            "cycle_return_on_notional": holding_diagnostics.get(
+                "cycle_return_on_notional"
+            ),
+            "cycle_peak_return_on_notional": holding_diagnostics.get(
+                "cycle_peak_return_on_notional"
+            ),
+            "cycle_profit_drawdown_on_notional": holding_diagnostics.get(
+                "cycle_profit_drawdown_on_notional"
+            ),
             "holding_days": holding_diagnostics.get("holding_days"),
             "current_side": holding_diagnostics.get("current_side"),
             "target_side": holding_diagnostics.get("target_side"),

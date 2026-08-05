@@ -277,7 +277,7 @@ class BaseDB(ABC):
         trading_date=None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Get strictly historical structured research hypotheses."""
+        """Get strictly historical validated research hypotheses as analyst priors."""
         raise NotImplementedError
 
     def get_provisional_policy_state(

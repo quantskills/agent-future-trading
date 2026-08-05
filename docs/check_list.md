@@ -2,7 +2,7 @@
 
 只记录代码已经实现、仍等待真实回测事实验收的功能与效果项目。代码测试及只读重放不代替真实回测验收；代码没有实现的功能不得写入本清单，策略效果项目必须明确作为回测验收目标，不视为代码预先保证。
 
-当前证据基线：回测记录已清空。下列全部项目均须使用从 2025-07-01 开始的空库新回测事实重新验收。
+当前证据基线：旧实验回测记录继续保留，仅用于修改前后对照，不得作为当前版本验收证据。下列全部项目均须使用 `exp_name=agentquant-futures-trading-2025-rag-retest-202507-08` 从 2025-07-01 开始生成的新回测事实重新验收。
 
 ## 系统与交易链
 
@@ -21,14 +21,15 @@
 - [ ] 【未验证：待空库新回测】原开仓 FAC 失效时必须优先直接退出。
 - [ ] 【未验证：待空库新回测】结构止损触发时必须优先直接退出。
 - [ ] 【未验证：待空库新回测】初始 ATR 止损触发时必须优先直接退出。
-- [ ] 【未验证：缺真实样本】原 FAC 未失效、普通持仓浮亏达到 2% 且同向证据再验证失败时，必须减仓 50%。
-- [ ] 【未验证：待空库新回测】原 FAC 未失效、普通持仓浮亏达到 4% 且同向证据再验证失败时，必须全部退出。
-- [ ] 【未验证：缺真实样本】普通持仓的同向证据再验证通过时，不得触发普通亏损减仓。
-- [ ] 【未验证：缺真实样本】普通持仓的同向证据再验证通过时，不得触发普通亏损退出。
+- [ ] 【未验证：缺真实样本】原 FAC 未失效、完整周期累计峰值未为正、普通持仓原开仓 FAC 完整周期手续费后 `cycle_return_on_notional<=-0.02`、同向证据再验证失败且未达到现有普通亏损退出条件时，必须减仓 50%。
+- [ ] 【未验证：待新实验回测】原 FAC 未失效、完整周期累计峰值未为正、普通持仓原开仓 FAC 完整周期手续费后 `cycle_return_on_notional<=-0.04`、同向证据再验证失败且达到现有退出确认阈值时，必须全部退出。
+- [ ] 【未验证：缺真实样本】普通持仓原开仓 FAC 完整周期手续费后 `cycle_return_on_notional<=-0.02` 但同向证据再验证通过时，不得触发普通亏损减仓。
+- [ ] 【未验证：缺真实样本】普通持仓原开仓 FAC 完整周期手续费后 `cycle_return_on_notional<=-0.04` 但同向证据再验证通过时，不得触发普通亏损退出。
 - [ ] 【未验证：缺增强确认真实样本】只有 `trigger_confirmation_adjustment=stronger_confirmation_required/strict_confirmation_required` 的入场 FAC 才能进入增强确认路径。
-- [ ] 【未验证：缺增强确认真实样本】增强确认路径必须使用初次触发后的下一根完整 15 分钟线验证价格延续。
-- [ ] 【未验证：缺增强确认真实样本】增强确认路径的初次触发线和延续确认线成交量必须都大于零。
-- [ ] 【未验证：缺增强确认真实样本】存在可比前序成交量时，增强确认路径两根确认线的平均成交量必须不低于最近最多 4 根前序完整 15 分钟线平均成交量。
+- [ ] 【未验证：缺 stronger 真实样本】`stronger_confirmation_required` 必须使用初次触发后的下一根完整 15 分钟线验证价格延续。
+- [ ] 【未验证：缺 strict 真实样本】`strict_confirmation_required` 必须使用初次触发后的连续两根完整 15 分钟线验证价格延续。
+- [ ] 【未验证：缺增强确认真实样本】增强确认路径的初次触发线和全部延续确认线成交量必须都大于零。
+- [ ] 【未验证：缺增强确认真实样本】存在可比前序成交量时，增强确认路径完整确认序列的平均成交量必须不低于最近最多 4 根前序完整 15 分钟线平均成交量。
 - [ ] 【未验证：缺增强确认低量样本】增强确认路径量能不足时不得执行该次入场。
 - [ ] 【未验证：缺标准确认对照样本】`standard_confirmation_supported` 入场不得被增强量能确认门限制。
 - [ ] 【未验证：缺增强确认真实样本】增强确认结果只能决定原入场 FAC 的执行、等待或跳过，不得生成新的交易动作。
@@ -36,6 +37,11 @@
 
 ## PM、排名与资金
 
+- [ ] 【未验证：缺学习抬分对照样本】当日证据未满足现有入场前提时，历史学习不得把候选升级为 `probe/real/scale`。
+- [ ] 【未验证：缺主导反对证据样本】存在未解决主导反对证据时不得签发开仓 FAC。
+- [ ] 【未验证：缺候选Profile后续样本】`candidate` Profile 不得产生正向 `alpha_profile_adjustment`。
+- [ ] 【未验证：缺观察Profile后续样本】`watchlist` Profile 不得产生正向 `alpha_profile_adjustment`。
+- [ ] 【未验证：缺成熟学习放大样本】当前证据满足入场前提后，仍有效的成熟正向学习必须能够参与唯一 Rank 和差异化仓位放大。
 - [ ] 【未验证：缺真实样本】严格匹配的成熟正向学习与合格当日证据必须能够把候选从 `probe` 升级至 `real/scale`。
 - [ ] 【未验证：缺真实样本】`real/scale` 候选必须按现有资金分层获得高于 `probe` 的资金比例。
 - [ ] 【未验证：待空库新回测】`probe` 的 `target_margin_ratio` 必须按 `0.8% + candidate_quality × (1.5% - 0.8%)` 计算。
@@ -61,13 +67,14 @@
 - [ ] 【未验证：缺人民币盈亏与收益率冲突样本】正的人民币 `reward_sum/reward_mean` 不得在 `mean_return_on_notional<=0` 时赋予正向仓位学习资格。
 - [ ] 【未验证：缺人民币盈亏与收益率冲突样本】负的人民币 `reward_sum/reward_mean` 不得在 `mean_return_on_notional>0` 时形成负向仓位学习方向。
 - [ ] 【未验证：缺成熟放大样本】`alpha_scale` 必须要求成熟 action-value 的 `mean_return_on_notional>0`。
-- [ ] 【未验证：缺策略失效真实样本】策略失效统计必须只使用同 ticker、side、setup、horizon 和 market_regime 的最近最多 5 个完整 episode。
-- [ ] 【未验证：缺策略失效样本下限对照】最近完整 episode 数少于现有 `cap_min_samples` 时，不得因近期收益率规则进入 `capped`。
-- [ ] 【未验证：缺策略失效真实样本】最近完整 episode 数达到现有 `cap_min_samples` 且平均 `return_on_notional<0` 时必须进入 `capped`。
-- [ ] 【未验证：缺策略失效真实样本】近期收益率规则触发 `capped` 时必须记录 `reason=same_scope_recent_return_on_notional_negative`。
-- [ ] 【未验证：缺跨作用域失效对照样本】一个完整作用域进入 `capped` 不得使其他 ticker、side、setup、horizon 或 market_regime 同步降级。
-- [ ] 【未验证：缺 capped 后强证据样本】同作用域进入 `capped` 后，当日强实时证据仍必须能够进入差异化 `probe` 重新验证。
-- [ ] 【未验证：缺策略恢复真实样本】最近完整 episode 平均 `return_on_notional` 不再为负时，不得继续使用 `same_scope_recent_return_on_notional_negative` 维持 `capped`。
+- [ ] 【未验证：缺策略失效真实样本】负期望策略失效统计必须只使用同 ticker、side、setup 和标准化 market_regime 的最近最多 5 个完整 episode。
+- [ ] 【未验证：缺策略失效样本下限对照】同 ticker、side、setup 和标准化 market_regime 的最近完整 episode 数少于现有 `cap_min_samples` 时，不得因聚合负期望规则进入 `capped`。
+- [ ] 【未验证：缺策略失效真实样本】同 ticker、side、setup 和标准化 market_regime 的最近完整 episode 数达到现有 `cap_min_samples`、平均 `return_on_notional<0` 且当前精确 Profile 尚未处于 `capped/rejected` 时，当前精确 Profile 必须进入 `capped`。
+- [ ] 【未验证：缺策略失效真实样本】当前精确 Profile 自身未触发负期望规则、但聚合策略失效作用域触发 `capped` 时，必须记录 `reason=strategy_failure_scope_recent_return_on_notional_negative`。
+- [ ] 【未验证：缺跨 horizon/data_combo 策略失效样本】同 ticker、side、setup 和标准化 market_regime 的不同 horizon 或 data_combo 完整 episode 必须共同参与聚合负期望判定。
+- [ ] 【未验证：缺跨作用域失效对照样本】一个聚合策略失效作用域进入 `capped` 不得使其他 ticker、side、setup 或标准化 market_regime 同步降级。
+- [ ] 【未验证：缺 capped 后强证据样本】聚合策略失效作用域进入 `capped` 后，当日强实时证据仍必须能够进入差异化 `probe` 重新验证。
+- [ ] 【未验证：缺策略恢复真实样本】聚合策略失效作用域最近完整 episode 平均 `return_on_notional` 不再为负且不存在其他 capped 原因时，不得继续使用 `strategy_failure_scope_recent_return_on_notional_negative` 维持 `capped`。
 - [ ] 【未验证：缺策略恢复真实样本】策略恢复后的 `real/scale` 资格必须继续使用现有样本数、置信度、Profile 生命周期和正收益门槛。
 - [ ] 【未验证：缺跨品种样本】在作用域匹配级别、样本数、置信度和时效相同的条件下，相同完整周期收益率不得因品种不同而产生不同学习分。
 - [ ] 【未验证：缺不同合约乘数样本】在作用域匹配级别、样本数、置信度和时效相同的条件下，相同完整周期收益率不得因合约乘数不同而产生不同学习分。
@@ -76,6 +83,13 @@
 
 ## Researcher 正式学习身份
 
+- [ ] 【未验证：缺跨日持仓样本】PM 单日硬风险必须继续读取单日持仓收益率。
+- [ ] 【未验证：缺跨日持仓样本】PM 盈利保持判断必须读取以原开仓 FAC 周期名义金额为分母的手续费后 `cycle_return_on_notional`。
+- [ ] 【未验证：缺利润回吐样本】PM 利润回吐事实必须记录 `cycle_peak_return_on_notional-cycle_return_on_notional`。
+- [ ] 【未验证：缺利润完全回吐且再验证失败样本】原开仓 FAC 完整周期收益峰值为正、当前 `cycle_return_on_notional<=0` 且当日同向证据再验证失败时，PM 必须通过现有生命周期路径减仓 50% 并记录 `reason=profit_giveback_revalidation_failed`。
+- [ ] 【未验证：缺利润完全回吐且再验证通过样本】原开仓 FAC 完整周期收益峰值为正、当前 `cycle_return_on_notional<=0` 但当日同向证据再验证通过时，不得触发 `profit_giveback_revalidation_failed` 减仓。
+- [ ] 【未验证：缺 probe 持仓样本】`exploration_probe` 开仓 FAC 的 `opening_authority_type` 必须沿后续持仓生命周期传递。
+- [ ] 【未验证：缺 real/scale 持仓样本】real/scale 开仓 FAC 不得被 Trader 按 probe 期限规则识别。
 - [ ] 【未验证：待空库新回测】成交型 hold 学习必须继承原开仓 FAC 的完整身份。
 - [ ] 【未验证：待空库新回测】成交型 reduce 学习必须继承原开仓 FAC 的完整身份。
 - [ ] 【未验证：待空库新回测】成交型 exit 学习必须继承原开仓 FAC 的完整身份。
@@ -90,6 +104,52 @@
 - [ ] 【未验证：待空库新回测】未交易学习必须继承对应当日 FAC 的完整身份。
 - [ ] 【未验证：待空库新回测】FAC 身份不完整时不得写入对应的正式学习记录。
 - [ ] 【未验证：待空库新回测】完整 episode 生成的正式 action-value 必须按同一完整 FAC 身份被 PM 精确命中。
+
+## Researcher 探索假设
+
+- [ ] 【未验证：缺跨日完整 episode 样本】探索研究输入必须包含完整 episode 逐日由 SCC 派生的证据状态轨迹。
+- [ ] 【未验证：缺跨日完整 episode 样本】探索研究输入必须包含完整 episode 的逐日 FAC 动作轨迹。
+- [ ] 【未验证：缺跨日完整 episode 样本】探索研究输入必须包含完整 episode 的逐日成交轨迹。
+- [ ] 【未验证：缺跨日完整 episode 样本】探索研究输入必须包含完整 episode 的逐日结算轨迹。
+- [ ] 【未验证：缺跨日完整 episode 样本】探索研究输入必须包含完整 episode 的逐日证据变化轨迹。
+- [ ] 【未验证：缺利润回吐 episode 样本】探索研究输入必须包含完整 episode 的累计峰值与利润回吐轨迹。
+- [ ] 【未验证：缺探索假设样本】新探索假设的 `support_episode_ids` 必须来自本次实际提供的 episode。
+- [ ] 【未验证：缺探索假设样本】新探索假设的 `support_episode_ids` 必须与假设作用域匹配。
+- [ ] 【未验证：缺非 validated 假设后续分析样本】`candidate/monitoring/rejected` 探索假设不得进入分析师提示词。
+- [ ] 【未验证：缺品种级探索假设未来样本】品种级探索假设验证必须只使用生成日之后同 ticker、side、setup 和标准化 market_regime 的完整真实 episode。
+- [ ] 【未验证：缺板块级探索假设未来样本】板块级探索假设验证必须只使用生成日之后同 sector、side、setup 和标准化 market_regime 的完整真实 episode。
+- [ ] 【未验证：缺跨 horizon 探索假设未来样本】仅 horizon 不同不得使其他验证作用域相同的未来完整真实 episode 被排除。
+- [ ] 【未验证：缺探索假设未来样本】探索假设验证收益必须使用手续费后 `return_on_notional`。
+- [ ] 【未验证：缺探索假设晋升样本】未来同作用域样本达到现有下限、平均 `return_on_notional>0` 且最新完整周期 `return_on_notional>=0` 时，探索假设必须进入 `validated`。
+- [ ] 【未验证：缺探索假设最新亏损样本】未来同作用域样本平均 `return_on_notional>0` 但最新完整周期 `return_on_notional<0` 时，旧 `validated` 结论必须立即进入 `monitoring`。
+- [ ] 【未验证：缺探索假设负期望样本】未来同作用域样本达到现有下限且平均 `return_on_notional<=0` 时，探索假设必须进入 `rejected`。
+- [ ] 【未验证：缺探索假设恢复样本】`monitoring/rejected` 探索假设的后续未来样本达到现有下限、平均 `return_on_notional>0` 且最新完整周期 `return_on_notional>=0` 时，必须能够恢复为 `validated`。
+- [ ] 【未验证：缺已验证假设后续分析样本】只有 `validated` 探索假设可以进入下一交易日分析师先验。
+- [ ] 【未验证：缺无新增完整 episode 对照日】没有新增完整 episode ID 时，不得生成新的 `exploratory_hypothesis_generation` 学习事件。
+- [ ] 【未验证：缺无新增完整 episode 对照日】没有新增完整 episode ID 时，不得新增探索假设记录。
+- [ ] 【未验证：缺重复探索假设样本】同一探索假设 `scope_key` 和 `hypothesis_text` 已存在时，不得重复写入探索假设记录。
+- [ ] 【未验证：缺探索假设验证样本】探索假设表层 `sample_count` 必须等于已匹配的未来完整验证 episode 数。
+- [ ] 【未验证：缺探索假设验证样本】探索假设 `support_episode_count` 必须保留生成时实际支持该假设的完整 episode 数。
+- [ ] 【未验证：缺方向匹配探索假设样本】分析师检索探索假设时必须使用当日确定的 side 进行匹配。
+- [ ] 【未验证：缺已验证假设后续分析样本】进入分析师提示词的探索假设必须明确记录 side、setup、horizon 和 market_regime 作用域。
+- [ ] 【未验证：缺探索假设验证样本】探索假设状态迁移不得直接生成 Profile。
+- [ ] 【未验证：缺探索假设验证样本】探索假设状态迁移不得直接生成 action-value。
+- [ ] 【未验证：缺探索假设验证样本】探索假设状态迁移不得直接生成 policy。
+- [ ] 【未验证：缺探索假设验证样本】探索假设状态迁移不得直接生成 Rank。
+- [ ] 【未验证：缺探索假设验证样本】探索假设状态迁移不得直接生成仓位。
+- [ ] 【未验证：缺探索假设验证样本】探索假设状态迁移不得直接生成 Trader 权限。
+
+## RAG 记忆质量
+
+- [ ] 【未验证：缺完整 episode 检索样本】Researcher 选择完整 episode 时必须按手续费后 `return_on_notional` 排序，不得按人民币盈亏绝对额排序。
+- [ ] 【未验证：缺完整 episode 检索样本】分析师检索完整 episode 时必须按手续费后 `return_on_notional` 排序，不得按人民币盈亏绝对额排序。
+- [ ] 【未验证：缺无新增完整 episode 对照日】完整 episode 样本数和最新结束日均未变化时，不得刷新 `analyst_performance`。
+- [ ] 【未验证：缺无新增完整 episode 对照日】完整 episode 样本数和最新结束日均未变化时，不得新增或刷新 `analyst_learning_digest`。
+- [ ] 【未验证：缺摘要有效期样本】`analyst_learning_digest.valid_until` 必须从其最新完整 episode 的真实结束日计算。
+- [ ] 【未验证：缺重复摘要样本】同作用域、同内容的分析师摘要必须复用同一条 `analyst_learning_digest` 记录。
+- [ ] 【未验证：缺摘要新版本样本】同一研究命题产生新摘要版本时，旧版本必须保留审计记录并更新为 `accepted=0`。
+- [ ] 【未验证：缺跨研究命题摘要对照样本】一个研究命题产生新摘要版本时，不得把其他 learning event scope_key 的摘要更新为 `accepted=0`。
+- [ ] 【未验证：缺重复摘要检索样本】内容相同的分析师摘要不得因记录 ID 不同而重复占用分析师提示词位置。
 
 ## 市场状态规范化
 

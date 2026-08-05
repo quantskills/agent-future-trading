@@ -62,8 +62,10 @@ from tools.agent_tools.research.research_learning import (
     ExploratoryHypothesisLLMOutput,
     _episode_alpha_setup_samples,
     _execution_learning_from_snapshot,
+    _recent_trade_episodes_for_research,
     _write_alpha_setup_policy_state,
     run_researcher_causal_review,
+    validate_exploratory_hypotheses,
     write_alpha_setup_profiles,
     write_exploratory_hypotheses,
 )
@@ -104,8 +106,10 @@ from tools.agent_tools.research.research_memory_writers import (
     _write_research_position_feedback,
     _write_signal_context_history,
     _write_tail_loss_sentinel_state,
+    _write_template_and_analyst_learning,
     _write_trade_episode_memory,
     _write_validated_causal_policy_rules,
+    _upsert_analyst_digest_by_scope_and_content,
 )
 from tools.agent_tools.decision.pm_capital_allocator import enriched_policy_evidence
 from tools.common.signal_evidence_collection import build_signal_collection_contract
@@ -143,7 +147,7 @@ class _FakeLearningDB:
                 "market_regime": "trend",
                 "sample_count": 3 + idx,
                 "confidence_score": 0.4,
-                "digest_text": "mature observation " + ("x" * 80),
+                "digest_text": f"mature observation {idx} " + ("x" * 80),
             }
             for idx in range(10)
         ]
@@ -169,6 +173,7 @@ class _ExploratoryLearningDB(_FakeLearningDB):
                 "setup_type": "long_breakout_short",
                 "holding_days": 2,
                 "net_pnl": 1250.0,
+                "return_on_notional": 0.0125,
                 "lesson_text": (
                     "breakout held while inventory and price trend agreed; "
                     "historical_open=3200.0, historical_invalidation=3100.0"
@@ -178,6 +183,7 @@ class _ExploratoryLearningDB(_FakeLearningDB):
                         "open_price": 3200.0,
                         "holding_days": 2,
                         "net_pnl": 1250.0,
+                        "return_on_notional": 0.0125,
                     },
                     "position_lifecycle_trace": {
                         "daily_facts": [
@@ -270,7 +276,7 @@ class _ExploratoryLearningDB(_FakeLearningDB):
                 },
                 "confidence_score": 0.55,
                 "sample_count": 3,
-                "status": "candidate",
+                "status": "validated",
             }
         ]
 
@@ -690,6 +696,48 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(db.digest_calls, 1)
         self.assertEqual(len(db.budgets), 1)
 
+    def test_learning_context_deduplicates_same_scope_content_across_ids(self):
+        class _DuplicateDigestDB(_FakeLearningDB):
+            def get_analyst_learning_digest(self, **kwargs):
+                self.digest_calls += 1
+                return [
+                    {
+                        "id": row_id,
+                        "analyst": "technical",
+                        "ticker": "BU",
+                        "sector": "energy",
+                        "horizon_class": "short",
+                        "market_regime": "trend",
+                        "sample_count": 4,
+                        "confidence_score": 0.6,
+                        "digest_text": "same mature digest",
+                    }
+                    for row_id in ("digest-copy-1", "digest-copy-2")
+                ]
+
+        db = _DuplicateDigestDB()
+        context = build_learning_context(
+            db=db,
+            full_config={
+                "learning": {"enabled": True},
+                "learning_context": {
+                    "enabled": True,
+                    "max_items_per_prompt": 3,
+                    "max_chars_per_prompt": 500,
+                    "exploratory_memory": {"enabled": False},
+                },
+            },
+            config_id="cfg",
+            trading_date="2025-02-10",
+            analyst="technical",
+            ticker="BU",
+            context={"sector": "energy", "market_regime": "trend"},
+            horizon_class="short",
+        )
+
+        self.assertEqual(len(context["selected_ids"]), 1)
+        self.assertEqual(context["text"].count("same mature digest"), 1)
+
     def test_learning_context_falls_back_when_requested_horizon_is_missing(self):
         db = _FallbackLearningDB()
         context = build_learning_context(
@@ -743,7 +791,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
             context["memory_trace"]["fallback_authority_boundary"]["contains_cross_ticker_fallback"]
         )
 
-    def test_learning_context_includes_exploratory_memory_as_prior_only(self):
+    def test_learning_context_includes_only_validated_exploratory_memory_as_prior(self):
         db = _ExploratoryLearningDB()
         context = build_learning_context(
             db=db,
@@ -790,13 +838,15 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertIn("expected_horizon=3d", context["text"])
         self.assertIn("actual_holding=2d", context["text"])
         self.assertIn("final_exit_reason=technical_position_invalidation_triggered", context["text"])
-        self.assertIn("net_pnl=1250", context["text"])
+        self.assertIn("after_fee_return_on_notional=1.25%", context["text"])
+        self.assertNotIn("1250", context["text"])
         self.assertNotIn("3200.0", context["text"])
         self.assertNotIn("3100.0", context["text"])
         self.assertEqual(len(context["trade_episode_items"]), 1)
         self.assertEqual(len(context["no_trade_opportunity_items"]), 1)
         self.assertEqual(len(context["hypothesis_items"]), 1)
-        self.assertEqual(context["candidate_hypothesis_count"], 1)
+        self.assertEqual(context["candidate_hypothesis_count"], 0)
+        self.assertEqual(context["validated_hypothesis_count"], 1)
         self.assertEqual(db.budgets[0]["trade_episode_count"], 1)
         self.assertEqual(db.budgets[0]["hypothesis_count"], 1)
         self.assertGreater(db.budgets[0]["total_context_chars"], db.budgets[0]["selected_chars"])
@@ -1273,10 +1323,9 @@ class ReviewerLearningContextTest(unittest.TestCase):
             horizon_class="short",
         )
 
-        self.assertIn(
-            "lifecycle=[actual_holding=2d, net_pnl=-500]",
-            context["text"],
-        )
+        self.assertIn("after_fee_return_on_notional=unavailable", context["text"])
+        self.assertIn("lifecycle=[actual_holding=2d]", context["text"])
+        self.assertNotIn("-500", context["text"])
         self.assertNotIn("9876.5", context["text"])
         self.assertNotIn("9999.0", context["text"])
 
@@ -2619,6 +2668,8 @@ class ReviewerLearningContextTest(unittest.TestCase):
                         side="long",
                         horizon_class="short",
                         market_regime="trend",
+                        setup_type="long_breakout_short",
+                        support_episode_ids=["e1"],
                         hypothesis_text="BU long breakouts require current confirmation and explicit invalidation.",
                         evidence_summary="two recent BU episodes",
                         suggested_use="probe_candidate",
@@ -2657,6 +2708,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
         cursor.execute("SELECT * FROM exploratory_hypothesis WHERE config_id='cfg'")
         item = dict(cursor.fetchone())
         self.assertEqual(item["status"], "candidate")
+        self.assertEqual(item["sample_count"], 1)
         self.assertIn("structured research hypothesis", item["suggested_use"])
         self.assertIn("explicit invalidation", item["hypothesis_text"])
         payload = load_externalized_json(item["payload_json"], item["payload_artifact_path"], item["payload_sha256"])
@@ -2669,6 +2721,8 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(contract["max_position_impact"], "no_direct_position_impact")
         self.assertIn("pm_action_conditions", contract)
         self.assertEqual(payload["entry_timing_hint"], "wait for price confirmation")
+        self.assertEqual(payload["support_episode_ids"], ["e1"])
+        self.assertEqual(payload["setup_type"], "long_breakout_short")
         self.assertEqual(payload["agent_name"], "researcher")
         cursor.execute(
             """
@@ -2682,6 +2736,187 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertIsNone(note["raw_prompt_artifact_path"])
         self.assertIsNone(note["raw_prompt_sha256"])
         self.assertEqual(payload["invalidation_condition"], "breakout fails before close")
+        with patch(
+            "llm.inference.agent_call",
+            side_effect=AssertionError("LLM must not be called without a new complete episode"),
+        ):
+            repeat = write_exploratory_hypotheses(
+                cursor,
+                cfg={
+                    "llm": {"model": "unit-test"},
+                    "learning": {
+                        "exploratory_research": {
+                            "enabled": True,
+                            "use_llm": True,
+                            "min_episode_samples": 2,
+                        }
+                    },
+                },
+                config_id="cfg",
+                trading_date="2025-03-13",
+            )
+        self.assertEqual(repeat["status"], "no_new_complete_episode")
+        self.assertEqual(
+            cursor.execute(
+                "SELECT COUNT(*) FROM exploratory_hypothesis WHERE config_id='cfg'"
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
+    def test_exploratory_hypothesis_uses_only_future_same_scope_episodes_for_research_validation(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+        cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+        _ensure_reviewer_learning_schema(cursor)
+        hypothesis_payload = {
+            "setup_type": "trend_breakout_setup",
+            "support_episode_ids": ["support-before"],
+            "hard_constraints": {
+                "structured_hypothesis_only": True,
+                "candidate_hypothesis_cannot_control_position": True,
+            },
+        }
+        cursor.execute(
+            """
+            INSERT INTO exploratory_hypothesis (
+                id, config_id, trading_date, scope_type, scope_key, ticker,
+                sector, side, horizon_class, market_regime, hypothesis_text,
+                evidence_summary, suggested_use, confidence_score, sample_count,
+                status, created_at, valid_until, payload_json
+            ) VALUES (
+                'hyp-1', 'cfg', '2025-03-12', 'research',
+                'BU:energy:long:short:trend:trend_breakout_setup', 'BU',
+                'energy', 'long', 'short', 'trend', 'test future edge',
+                'support-before', 'shadow only', 0.60, 1, 'candidate',
+                '2025-03-12', '2025-04-30', ?
+            )
+            """,
+            (json.dumps(hypothesis_payload),),
+        )
+
+        def insert_episode(episode_id, close_date, ron):
+            cursor.execute(
+                """
+                INSERT INTO trade_episode_memory (
+                    id, config_id, trading_date, ticker, side, sector,
+                    setup_type, signal_combo, horizon_class, market_regime,
+                    open_date, close_date, holding_days, net_pnl,
+                    return_on_notional, outcome_label, lesson_text,
+                    payload_json, created_at
+                ) VALUES (?, 'cfg', ?, 'BU', 'long', 'energy',
+                    'trend_breakout_setup', '[]', 'short', 'trend', ?, ?, 1,
+                    ?, ?, ?, '', '{}', ?)
+                """,
+                (
+                    episode_id,
+                    close_date,
+                    close_date,
+                    close_date,
+                    ron * 100000.0,
+                    ron,
+                    "winner" if ron > 0 else "loser",
+                    close_date,
+                ),
+            )
+
+        insert_episode("support-before", "2025-03-11", 0.20)
+        insert_episode("future-1", "2025-03-14", 0.01)
+        insert_episode("future-2", "2025-03-17", 0.02)
+        summary = validate_exploratory_hypotheses(
+            cursor,
+            cfg={
+                "learning": {
+                    "exploratory_research": {
+                        "enabled": True,
+                        "validation_min_samples": 2,
+                    }
+                }
+            },
+            config_id="cfg",
+            trading_date="2025-03-17",
+        )
+        row = dict(cursor.execute(
+            "SELECT status, sample_count, payload_json FROM exploratory_hypothesis WHERE id='hyp-1'"
+        ).fetchone())
+        payload = json.loads(row["payload_json"])
+        self.assertEqual(summary["validated"], 1)
+        self.assertEqual(row["status"], "validated")
+        self.assertEqual(row["sample_count"], 2)
+        self.assertEqual(payload["research_validation"]["sample_count"], 2)
+        self.assertEqual(
+            payload["research_validation"]["matched_episode_ids"],
+            ["future-1", "future-2"],
+        )
+        self.assertEqual(
+            cursor.execute("SELECT COUNT(*) FROM alpha_setup_sample").fetchone()[0],
+            0,
+        )
+
+        insert_episode("future-3", "2025-03-18", -0.001)
+        summary = validate_exploratory_hypotheses(
+            cursor,
+            cfg={
+                "learning": {
+                    "exploratory_research": {
+                        "enabled": True,
+                        "validation_min_samples": 2,
+                    }
+                }
+            },
+            config_id="cfg",
+            trading_date="2025-03-18",
+        )
+        self.assertEqual(summary["monitoring"], 1)
+        self.assertEqual(
+            cursor.execute("SELECT status FROM exploratory_hypothesis WHERE id='hyp-1'").fetchone()[0],
+            "monitoring",
+        )
+        insert_episode("future-4", "2025-03-19", -0.04)
+        summary = validate_exploratory_hypotheses(
+            cursor,
+            cfg={
+                "learning": {
+                    "exploratory_research": {
+                        "enabled": True,
+                        "validation_min_samples": 2,
+                    }
+                }
+            },
+            config_id="cfg",
+            trading_date="2025-03-19",
+        )
+        self.assertEqual(summary["rejected"], 1)
+        self.assertEqual(
+            cursor.execute(
+                "SELECT status FROM exploratory_hypothesis WHERE id='hyp-1'"
+            ).fetchone()[0],
+            "rejected",
+        )
+        insert_episode("future-5", "2025-03-20", 0.08)
+        summary = validate_exploratory_hypotheses(
+            cursor,
+            cfg={
+                "learning": {
+                    "exploratory_research": {
+                        "enabled": True,
+                        "validation_min_samples": 2,
+                    }
+                }
+            },
+            config_id="cfg",
+            trading_date="2025-03-20",
+        )
+        self.assertEqual(summary["validated"], 1)
+        recovered = dict(
+            cursor.execute(
+                "SELECT status, sample_count FROM exploratory_hypothesis WHERE id='hyp-1'"
+            ).fetchone()
+        )
+        self.assertEqual(recovered["status"], "validated")
+        self.assertEqual(recovered["sample_count"], 5)
         conn.close()
 
     def test_researcher_causal_review_prompt_requires_trade_contract(self):
@@ -4172,6 +4407,298 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         _ensure_reviewer_learning_schema(conn.cursor())
         return conn
+
+    def test_template_and_analyst_digest_refresh_only_on_new_complete_episode(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE futures_recommendation (
+                    id TEXT PRIMARY KEY,
+                    signal_snapshot TEXT
+                )
+                """
+            )
+            snapshot = {
+                "signal_collection_contract": {
+                    "source_contracts": [
+                        {
+                            "analyst": "technical",
+                            "action_evidence_contract": {
+                                "signal": "Bullish",
+                                "horizon_class": "short",
+                            },
+                        }
+                    ]
+                },
+                "final_action_contract": {
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "lots_delta": 1,
+                    "setup_type": "trend_breakout_setup",
+                    "horizon_class": "short",
+                    "expected_horizon_days": 3,
+                    "market_regime": "trend",
+                },
+            }
+            cursor.executemany(
+                "INSERT INTO futures_recommendation VALUES (?, ?)",
+                [
+                    ("rec-open-1", json.dumps(snapshot)),
+                    ("rec-open-2", json.dumps(snapshot)),
+                ],
+            )
+            cursor.executemany(
+                """
+                INSERT INTO trade_episode_memory (
+                    id, config_id, trading_date, ticker, side, sector, setup_type,
+                    signal_combo, horizon_class, market_regime, open_date, close_date,
+                    holding_days, net_pnl, return_on_notional, outcome_label,
+                    payload_json, created_at
+                ) VALUES (?, 'cfg', ?, 'BU', 'long', 'energy',
+                    'trend_breakout_setup', '*', 'short', 'trend', ?, ?, 1, ?, ?,
+                    'winner', ?, ?)
+                """,
+                [
+                    (
+                        "episode-1", "2025-03-02", "2025-03-01", "2025-03-02",
+                        98.0, 0.098,
+                        json.dumps({"open_recommendation_id": "rec-open-1"}),
+                        "2025-03-02T16:00:00",
+                    ),
+                    (
+                        "episode-2", "2025-03-04", "2025-03-03", "2025-03-04",
+                        198.0, 0.099,
+                        json.dumps({"open_recommendation_id": "rec-open-2"}),
+                        "2025-03-04T16:00:00",
+                    ),
+                ],
+            )
+            cfg = {
+                "learning": {
+                    "anti_overfit": {"min_samples_for_template": 2},
+                    "memory_expires_after_days": 10,
+                }
+            }
+
+            first = _write_template_and_analyst_learning(
+                cursor,
+                cfg=cfg,
+                config_id="cfg",
+                trading_date="2025-03-05",
+            )
+            first_digest = cursor.execute(
+                "SELECT * FROM analyst_learning_digest WHERE analyst='technical'"
+            ).fetchone()
+            first_performance = cursor.execute(
+                "SELECT * FROM analyst_performance WHERE analyst='technical'"
+            ).fetchone()
+            second = _write_template_and_analyst_learning(
+                cursor,
+                cfg=cfg,
+                config_id="cfg",
+                trading_date="2025-03-06",
+            )
+
+            self.assertEqual(first["digest_rows"], 1)
+            self.assertEqual(second["template_rows"], 0)
+            self.assertEqual(second["analyst_rows"], 0)
+            self.assertEqual(second["digest_rows"], 0)
+            self.assertEqual(
+                cursor.execute("SELECT COUNT(*) FROM analyst_learning_digest").fetchone()[0],
+                1,
+            )
+            self.assertEqual(first_performance["last_sample_date"], "2025-03-04")
+            self.assertEqual(first_performance["valid_until"], "2025-03-14")
+            self.assertEqual(first_digest["valid_until"], "2025-03-14")
+            self.assertIn("avg_return_on_notional", first_digest["digest_text"])
+            self.assertNotIn("avg_pnl", first_digest["digest_text"])
+        finally:
+            conn.close()
+
+    def test_sqlite_digest_retrieval_deduplicates_same_scope_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SQLiteDB()
+            db.db_path = str(Path(tmpdir) / "agentquant_test.db")
+            conn = db._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+            cursor.execute("INSERT INTO config VALUES ('cfg')")
+            db._ensure_reviewer_learning_schema(cursor)
+            cursor.execute(
+                """
+                INSERT INTO learning_event_log (
+                    id, config_id, trading_date, event_type, agent, scope_type,
+                    scope_key, evidence_json, action_json, verifier, created_at, status
+                ) VALUES (
+                    'event-past', 'cfg', '2025-03-01', 'analyst_learning_digest',
+                    'researcher', 'analyst', 'technical:BU', '{}', '{}',
+                    'test', '2025-03-01T16:00:00', 'applied'
+                )
+                """
+            )
+            cursor.executemany(
+                """
+                INSERT INTO analyst_learning_digest (
+                    id, config_id, analyst, ticker, sector, horizon_class,
+                    market_regime, digest_text, confidence_score, sample_count,
+                    source_event_id, created_at, valid_until, accepted, payload_json
+                ) VALUES (?, 'cfg', 'technical', 'BU', 'energy', 'short',
+                    'trend', 'same content', 0.6, 3, 'event-past', ?,
+                    '2025-04-01', 1, '{}')
+                """,
+                [
+                    ("digest-copy-1", "2025-03-01T16:00:00"),
+                    ("digest-copy-2", "2025-03-02T16:00:00"),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            rows = db.get_analyst_learning_digest(
+                config_id="cfg",
+                analyst="technical",
+                ticker="BU",
+                sector="energy",
+                horizon_class="short",
+                market_regime="trend",
+                trading_date="2025-03-10",
+                max_items=5,
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["digest_text"], "same content")
+
+    def test_digest_new_version_supersedes_only_same_learning_scope(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            for event_id, scope_key in (
+                ("event-long-old", "technical:BU:short:long"),
+                ("event-long-new", "technical:BU:short:long"),
+                ("event-short", "technical:BU:short:short"),
+            ):
+                cursor.execute(
+                    """
+                    INSERT INTO learning_event_log (
+                        id, config_id, trading_date, event_type, agent,
+                        scope_type, scope_key, evidence_json, action_json,
+                        verifier, created_at, status
+                    ) VALUES (?, 'cfg', '2025-03-10', 'analyst_learning_digest',
+                        'researcher', 'analyst_ticker_horizon', ?, '{}', '{}',
+                        'test', '2025-03-10T16:00:00', 'applied')
+                    """,
+                    (event_id, scope_key),
+                )
+            _upsert_analyst_digest_by_scope_and_content(
+                cursor,
+                config_id="cfg",
+                analyst="technical",
+                ticker="BU",
+                sector="energy",
+                horizon_class="short",
+                market_regime="*",
+                digest_text="old long thesis",
+                confidence_score=0.5,
+                sample_count=2,
+                source_event_id="event-long-old",
+                created_at="2025-03-10T16:01:00",
+                valid_until="2025-04-10",
+                payload_json="{}",
+            )
+            _upsert_analyst_digest_by_scope_and_content(
+                cursor,
+                config_id="cfg",
+                analyst="technical",
+                ticker="BU",
+                sector="energy",
+                horizon_class="short",
+                market_regime="*",
+                digest_text="independent short thesis",
+                confidence_score=0.5,
+                sample_count=2,
+                source_event_id="event-short",
+                created_at="2025-03-10T16:02:00",
+                valid_until="2025-04-10",
+                payload_json="{}",
+            )
+            _upsert_analyst_digest_by_scope_and_content(
+                cursor,
+                config_id="cfg",
+                analyst="technical",
+                ticker="BU",
+                sector="energy",
+                horizon_class="short",
+                market_regime="*",
+                digest_text="new long thesis",
+                confidence_score=0.6,
+                sample_count=3,
+                source_event_id="event-long-new",
+                created_at="2025-03-10T16:03:00",
+                valid_until="2025-04-10",
+                payload_json="{}",
+            )
+            accepted = {
+                row["digest_text"]: row["accepted"]
+                for row in cursor.execute(
+                    "SELECT digest_text, accepted FROM analyst_learning_digest"
+                ).fetchall()
+            }
+            self.assertEqual(accepted["old long thesis"], 0)
+            self.assertEqual(accepted["new long thesis"], 1)
+            self.assertEqual(accepted["independent short thesis"], 1)
+        finally:
+            conn.close()
+
+    def test_complete_episode_retrieval_orders_by_after_fee_return_on_notional(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SQLiteDB()
+            db.db_path = str(Path(tmpdir) / "agentquant_test.db")
+            conn = db._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+            cursor.execute("INSERT INTO config VALUES ('cfg')")
+            db._ensure_reviewer_learning_schema(cursor)
+            cursor.executemany(
+                """
+                INSERT INTO trade_episode_memory (
+                    id, config_id, trading_date, ticker, side, sector, setup_type,
+                    signal_combo, horizon_class, market_regime, open_date, close_date,
+                    holding_days, net_pnl, return_on_notional, outcome_label,
+                    payload_json, created_at
+                ) VALUES (?, 'cfg', '2025-03-05', 'BU', 'long', 'energy',
+                    'trend_breakout_setup', '*', 'short', 'trend', '2025-03-01',
+                    ?, 2, ?, ?, 'winner', '{}', ?)
+                """,
+                [
+                    ("large-rmb-small-return", "2025-03-03", 10000.0, 0.001, "2025-03-03T16:00:00"),
+                    ("small-rmb-large-return", "2025-03-04", 1000.0, 0.05, "2025-03-04T16:00:00"),
+                ],
+            )
+            conn.commit()
+            researcher_rows = _recent_trade_episodes_for_research(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-10",
+                limit=2,
+            )
+            conn.close()
+
+            analyst_rows = db.get_trade_episode_memory(
+                config_id="cfg",
+                ticker="BU",
+                sector="energy",
+                side="long",
+                horizon_class="short",
+                market_regime="trend",
+                trading_date="2025-03-10",
+                limit=2,
+            )
+
+        self.assertEqual(researcher_rows[0]["id"], "small-rmb-large-return")
+        self.assertEqual(analyst_rows[0]["id"], "small-rmb-large-return")
 
     def test_fast_loss_sentinel_inherits_opening_fac_setup_type(self):
         conn = self._connection()
@@ -8627,6 +9154,96 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         self.assertTrue(capped["recent_negative_expectancy"])
         self.assertEqual(recovered["lifecycle_state"], "deployable")
         self.assertFalse(recovered["recent_negative_expectancy"])
+
+    def test_negative_expectancy_aggregates_across_horizon_and_data_combo(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cfg = {
+                "learning": {
+                    "alpha_setup_profile": {
+                        "enabled": True,
+                        "cap_min_samples": 2,
+                        "negative_expectancy_window_complete_episodes": 5,
+                    }
+                }
+            }
+
+            def write_loss(day, recommendation_id, horizon, data_combo, ron):
+                return upsert_alpha_setup_sample_and_profile(
+                    cursor,
+                    cfg=cfg,
+                    config_id="cfg",
+                    trading_date=day,
+                    sample={
+                        "ticker": "RB",
+                        "side": "long",
+                        "sector": "black",
+                        "horizon_class": horizon,
+                        "market_regime": "trend",
+                        "setup_type": "trend_breakout_setup",
+                        "data_combo": data_combo,
+                        "recommendation_id": recommendation_id,
+                        "source_type": "trade_episode",
+                        "action_taken": "open_long",
+                        "current_lots": 0,
+                        "target_lots": 1,
+                        "executed_lots": 1,
+                        "net_pnl": ron * 100000.0,
+                        "commission": 0.0,
+                        "outcome_label": "loss",
+                        "evidence": {
+                            "final_action_contract": {
+                                "final_action": "open_probe",
+                                "current_lots": 0,
+                                "target_lots": 1,
+                                "lots_delta": 1,
+                            }
+                        },
+                        "result": {
+                            "episode_net_pnl": ron * 100000.0,
+                            "return_on_notional": ron,
+                        },
+                    },
+                )
+
+            first = write_loss(
+                "2025-03-10",
+                "rec-rb-short-technical",
+                "short",
+                "technical",
+                -0.004,
+            )
+            second = write_loss(
+                "2025-03-12",
+                "rec-rb-medium-mixed",
+                "medium",
+                "technical|fundamental",
+                -0.006,
+            )
+
+            self.assertEqual(first["lifecycle_state"], "candidate")
+            self.assertEqual(second["lifecycle_state"], "capped")
+            profile = dict(
+                cursor.execute(
+                    "SELECT payload_json FROM alpha_setup_profile "
+                    "ORDER BY last_sample_date DESC LIMIT 1"
+                ).fetchone()
+            )
+            payload = load_externalized_json(profile["payload_json"])
+            failure_scope = payload["strategy_failure_scope"]
+            self.assertEqual(
+                failure_scope["scope_key"],
+                "RB|long|trend_breakout_setup|trend",
+            )
+            self.assertEqual(
+                failure_scope["stats"]["recent_complete_episode_count"],
+                2,
+            )
+            self.assertTrue(failure_scope["negative_expectancy_applied"])
+            self.assertEqual(payload["classification"]["lifecycle_state"], "capped")
+        finally:
+            conn.close()
 
     def test_entry_confirmation_adjustment_is_notional_return_invariant(self):
         def write_episode(

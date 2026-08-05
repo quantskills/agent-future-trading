@@ -536,7 +536,7 @@ def technical_agent(state: FundState):
             "horizon_class": learning_context.get("horizon_class", "short"),
             "memory_trace": learning_context.get("memory_trace", {}),
             "current_day_evidence_required": True,
-            "candidate_hypothesis_authority": "prior_only_no_position_authority",
+            "candidate_hypothesis_authority": "research_only_not_consumed_validated_prior_only",
         },
         "analysis_strategy_trace": {
             "analyst": "technical",

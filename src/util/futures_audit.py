@@ -403,6 +403,7 @@ def extract_signal_lifecycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "atr_stop_distance": _optional_float(contract.get("atr_stop_distance")),
         "setup_type": contract.get("setup_type"),
         "market_regime": contract.get("market_regime"),
+        "opening_authority_type": contract.get("opening_authority_type"),
     }
     return {key: value for key, value in lifecycle.items() if value is not None}
 

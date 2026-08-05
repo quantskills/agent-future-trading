@@ -33,6 +33,10 @@ OPPORTUNITY_LEARNING_COMPONENTS = (
     "negative_learning",
     "execution_profile_learning",
     "recent_tail_loss_penalty",
+    "entry_quality_loss_penalty",
+    "trigger_quality_positive_bonus",
+    "trigger_quality_loss_penalty",
+    "alpha_profile_adjustment",
 )
 
 
@@ -251,6 +255,10 @@ def _opportunity_ranking_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     components = evidence.get("opportunity_score_components")
     if not isinstance(components, dict):
         components = {}
+    learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
+    lifecycle_impact = learning_used.get("pm_lifecycle_learning_impact_delta")
+    if not isinstance(lifecycle_impact, dict):
+        lifecycle_impact = {}
     return {
         "opportunity_score": score_value if score_value >= 0 else None,
         "opportunity_score_bucket": bucket,
@@ -258,9 +266,18 @@ def _opportunity_ranking_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "opportunity_rank": deployment.get("opportunity_rank"),
         "capital_allocation_reason": deployment.get("capital_allocation_reason") or "unknown",
         "learning_adjustment_summary": (
-            (contract.get("learning_used") or {}).get("learning_adjustment_summary")
-            if isinstance(contract.get("learning_used"), dict)
-            else {}
+            learning_used.get("learning_adjustment_summary") or {}
+        ),
+        "learning_rank_score_delta": _safe_float(
+            lifecycle_impact.get("open_add_rank_score_delta"),
+            0.0,
+        ),
+        "learning_position_ratio_delta": _safe_float(
+            lifecycle_impact.get("position_ratio_delta"),
+            0.0,
+        ),
+        "learning_execution_profile_changed": bool(
+            lifecycle_impact.get("execution_profile_changed")
         ),
     }
 

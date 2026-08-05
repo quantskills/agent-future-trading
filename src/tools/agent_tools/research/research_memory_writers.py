@@ -494,6 +494,40 @@ def _insert_exploratory_hypothesis(
     )
 
 
+def _update_exploratory_hypothesis_validation(
+    cursor: sqlite3.Cursor,
+    *,
+    hypothesis_id: str,
+    config_id: str,
+    status: str,
+    sample_count: int,
+    payload_json: str,
+    payload_artifact_path: Optional[str],
+    payload_sha256: Optional[str],
+    payload_size: Optional[int],
+    payload_summary_json: Optional[str],
+) -> None:
+    cursor.execute(
+        """
+        UPDATE exploratory_hypothesis
+        SET status = ?, sample_count = ?, payload_json = ?, payload_artifact_path = ?,
+            payload_sha256 = ?, payload_size = ?, payload_summary_json = ?
+        WHERE id = ? AND config_id = ?
+        """,
+        (
+            status,
+            int(sample_count),
+            payload_json,
+            payload_artifact_path,
+            payload_sha256,
+            payload_size,
+            payload_summary_json,
+            hypothesis_id,
+            config_id,
+        ),
+    )
+
+
 def _upsert_alpha_setup_sample(cursor: sqlite3.Cursor, *, record: Mapping[str, Any]) -> None:
     cursor.execute(
         """
@@ -1329,6 +1363,229 @@ def _write_signal_context_history(
     )
     return inserted
 
+
+def _completed_episode_rows_up_to(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+) -> List[Dict[str, Any]]:
+    """Return formal complete position episodes with their opening FAC lineage."""
+    try:
+        cursor.execute(
+            '''
+            SELECT *
+            FROM trade_episode_memory
+            WHERE config_id = ?
+              AND return_on_notional IS NOT NULL
+              AND substr(COALESCE(close_date, trading_date), 1, 10) <= ?
+            ORDER BY substr(COALESCE(close_date, trading_date), 1, 10), created_at, id
+            ''',
+            (config_id, str(trading_date)[:10]),
+        )
+    except sqlite3.Error:
+        return []
+    episodes: List[Dict[str, Any]] = []
+    for raw_row in cursor.fetchall():
+        row = dict(raw_row)
+        payload = load_externalized_json(
+            row.get("payload_json"),
+            row.get("payload_artifact_path"),
+            row.get("payload_sha256"),
+        )
+        payload = payload if isinstance(payload, Mapping) else {}
+        pair = payload.get("pair") if isinstance(payload.get("pair"), Mapping) else {}
+        row["open_recommendation_id"] = (
+            payload.get("open_recommendation_id")
+            or pair.get("open_recommendation_id")
+        )
+        row["close_date"] = str(
+            row.get("close_date") or pair.get("close_date") or row.get("trading_date") or ""
+        )[:10]
+        row["net_pnl"] = _safe_float(row.get("net_pnl"))
+        row["return_on_notional"] = _safe_float(row.get("return_on_notional"))
+        episodes.append(row)
+    return episodes
+
+
+def _completed_pair_rows_for_memory_bootstrap(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+) -> List[Dict[str, Any]]:
+    """Provide complete-pair history only before the formal episode table is populated."""
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM trade_episode_memory WHERE config_id = ?",
+            (config_id,),
+        )
+        if _safe_int(cursor.fetchone()[0], 0) > 0:
+            return []
+    except sqlite3.Error:
+        return []
+    return _completed_pairs_up_to(
+        cursor,
+        config_id=config_id,
+        trading_date=trading_date,
+    )
+
+
+def _performance_summary_requires_refresh(
+    cursor: sqlite3.Cursor,
+    *,
+    table_name: str,
+    where_sql: str,
+    params: Tuple[Any, ...],
+    sample_count: int,
+    latest_sample_date: str,
+    mean_return_on_notional: float,
+) -> bool:
+    cursor.execute(
+        f"SELECT sample_count, last_sample_date, payload_json FROM {table_name} WHERE {where_sql}",
+        params,
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return True
+    existing = dict(row)
+    try:
+        payload = _review_helpers._json_loads(existing.get("payload_json")) or {}
+    except Exception:
+        payload = {}
+    if not isinstance(payload, Mapping):
+        payload = {}
+    stored_mean = payload.get("mean_return_on_notional")
+    return bool(
+        _safe_int(existing.get("sample_count"), -1) != int(sample_count)
+        or str(existing.get("last_sample_date") or "")[:10] != latest_sample_date
+        or payload.get("learning_economics_basis") != "after_fee_return_on_notional"
+        or stored_mean is None
+        or abs(_safe_float(stored_mean) - float(mean_return_on_notional)) > 1e-12
+    )
+
+
+def _digest_confidence_from_returns(
+    *,
+    sample_count: int,
+    hit_rate: float,
+    mean_return_on_notional: float,
+) -> float:
+    return min(
+        1.0,
+        min(0.45, max(0, sample_count) / 10.0)
+        + min(0.30, abs(float(hit_rate) - 0.50))
+        + min(0.25, abs(float(mean_return_on_notional)) / 0.02 * 0.25),
+    )
+
+
+def _upsert_analyst_digest_by_scope_and_content(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    analyst: str,
+    ticker: str,
+    sector: str,
+    horizon_class: str,
+    market_regime: str,
+    digest_text: str,
+    confidence_score: float,
+    sample_count: int,
+    source_event_id: str,
+    created_at: str,
+    valid_until: str,
+    payload_json: str,
+) -> str:
+    scope_params = (
+        config_id,
+        analyst,
+        ticker,
+        sector,
+        horizon_class,
+        market_regime,
+        digest_text,
+    )
+    cursor.execute(
+        '''
+        SELECT id
+        FROM analyst_learning_digest
+        WHERE config_id = ? AND analyst = ? AND ticker = ? AND sector = ?
+          AND horizon_class = ? AND market_regime = ? AND digest_text = ?
+        ORDER BY accepted DESC, created_at DESC, id DESC
+        LIMIT 1
+        ''',
+        scope_params,
+    )
+    existing = cursor.fetchone()
+    digest_id = str(existing["id"]) if existing is not None else str(uuid.uuid4())
+    if existing is None:
+        cursor.execute(
+            '''
+            INSERT INTO analyst_learning_digest (
+                id, config_id, analyst, ticker, sector, horizon_class, market_regime,
+                digest_text, confidence_score, sample_count, source_event_id,
+                created_at, valid_until, accepted, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            ''',
+            (
+                digest_id,
+                *scope_params[:-1],
+                digest_text,
+                confidence_score,
+                sample_count,
+                source_event_id,
+                created_at,
+                valid_until,
+                payload_json,
+            ),
+        )
+    else:
+        cursor.execute(
+            '''
+            UPDATE analyst_learning_digest
+            SET confidence_score = ?, sample_count = ?, source_event_id = ?,
+                valid_until = ?, accepted = 1, payload_json = ?
+            WHERE id = ?
+            ''',
+            (
+                confidence_score,
+                sample_count,
+                source_event_id,
+                valid_until,
+                payload_json,
+                digest_id,
+            ),
+        )
+    cursor.execute(
+        '''
+        UPDATE analyst_learning_digest
+        SET accepted = 0
+        WHERE config_id = ? AND analyst = ? AND ticker = ? AND sector = ?
+          AND horizon_class = ? AND market_regime = ?
+          AND id <> ?
+          AND source_event_id IN (
+              SELECT previous_event.id
+              FROM learning_event_log previous_event
+              WHERE previous_event.config_id = ?
+                AND previous_event.scope_key = (
+                    SELECT current_event.scope_key
+                    FROM learning_event_log current_event
+                    WHERE current_event.id = ?
+                      AND current_event.config_id = ?
+                    LIMIT 1
+                )
+          )
+        ''',
+        (
+            *scope_params[:-1],
+            digest_id,
+            config_id,
+            source_event_id,
+            config_id,
+        ),
+    )
+    return digest_id
+
 def _write_template_and_analyst_learning(
     cursor: sqlite3.Cursor,
     *,
@@ -1339,7 +1596,18 @@ def _write_template_and_analyst_learning(
     learning_cfg = cfg.get("learning", {}) or {}
     min_samples = int((learning_cfg.get("anti_overfit") or {}).get("min_samples_for_template", 2))
     expires_after_days = int(learning_cfg.get("memory_expires_after_days", 30))
-    pairs = _completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
+    pairs = _completed_episode_rows_up_to(
+        cursor,
+        config_id=config_id,
+        trading_date=trading_date,
+    )
+    pairs.extend(
+        _completed_pair_rows_for_memory_bootstrap(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
+        )
+    )
     try:
         recommendation_lookup = _recommendations_by_id(
             cursor,
@@ -1349,7 +1617,10 @@ def _write_template_and_analyst_learning(
         recommendation_lookup = {}
 
     template_groups: Dict[Tuple[str, str, str, str, int, str], List[Dict[str, Any]]] = defaultdict(list)
-    analyst_groups: Dict[Tuple[str, str, str, str, str], List[float]] = defaultdict(list)
+    analyst_groups: Dict[
+        Tuple[str, str, str, str, str],
+        List[Dict[str, Any]],
+    ] = defaultdict(list)
 
     for pair in pairs:
         recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
@@ -1376,17 +1647,40 @@ def _write_template_and_analyst_learning(
                 continue
             analyst_horizon = _analyst_horizon_class(snapshot, analyst, expected_days)
             pnl = _safe_float(pair.get("net_pnl"))
-            attributed = pnl if signal_side == side else -pnl
-            analyst_groups[(analyst, ticker, sector, analyst_horizon, signal_side)].append(attributed)
+            return_on_notional = _safe_float(pair.get("return_on_notional"))
+            analyst_groups[(analyst, ticker, sector, analyst_horizon, signal_side)].append(
+                {
+                    "attributed_pnl": pnl if signal_side == side else -pnl,
+                    "attributed_return_on_notional": (
+                        return_on_notional if signal_side == side else -return_on_notional
+                    ),
+                    "sample_date": str(pair.get("close_date") or "")[:10],
+                }
+            )
 
     now = _utc_now()
-    valid_until = _valid_until(trading_date, expires_after_days)
     template_rows = 0
     for (ticker, side, template, horizon, expected_days, regime), rows in template_groups.items():
         if len(rows) < min_samples:
             continue
         summary = summarize_trade_pairs(rows)
         confidence = _confidence_from_summary(summary)
+        latest_sample_date = max(str(row.get("close_date") or "")[:10] for row in rows)
+        mean_return_on_notional = _safe_float(summary.get("avg_return"))
+        if not _performance_summary_requires_refresh(
+            cursor,
+            table_name="setup_type_performance",
+            where_sql=(
+                "config_id = ? AND ticker = ? AND side = ? AND setup_type = ? "
+                "AND horizon_class = ? AND market_regime = ?"
+            ),
+            params=(config_id, ticker, side, template, horizon, regime),
+            sample_count=len(rows),
+            latest_sample_date=latest_sample_date,
+            mean_return_on_notional=mean_return_on_notional,
+        ):
+            continue
+        valid_until = _valid_until(latest_sample_date, expires_after_days)
         cursor.execute(
             '''
             INSERT INTO setup_type_performance (
@@ -1421,12 +1715,15 @@ def _write_template_and_analyst_learning(
                 _safe_float(summary.get("avg_pnl")),
                 _profit_factor(rows),
                 confidence,
-                trading_date,
+                latest_sample_date,
                 now,
                 valid_until,
                 _json_dumps({
                     "summary": summary,
-                    "cutoff_trading_date": trading_date,
+                    "cutoff_trading_date": latest_sample_date,
+                    "learning_economics_basis": "after_fee_return_on_notional",
+                    "mean_return_on_notional": mean_return_on_notional,
+                    "latest_complete_episode_date": latest_sample_date,
                     "fac_learning_identity": {
                         "setup_type": template,
                         "horizon_class": horizon,
@@ -1440,21 +1737,56 @@ def _write_template_and_analyst_learning(
 
     analyst_rows = 0
     digest_rows = 0
-    for (analyst, ticker, sector, horizon, signal_side), attributed_pnls in analyst_groups.items():
-        if len(attributed_pnls) < min_samples:
+    for (analyst, ticker, sector, horizon, signal_side), attributed_rows in analyst_groups.items():
+        if len(attributed_rows) < min_samples:
             continue
-        wins = sum(1 for pnl in attributed_pnls if pnl > 0)
-        sample_count = len(attributed_pnls)
+        attributed_pnls = [
+            _safe_float(row.get("attributed_pnl")) for row in attributed_rows
+        ]
+        attributed_returns = [
+            _safe_float(row.get("attributed_return_on_notional"))
+            for row in attributed_rows
+        ]
+        wins = sum(1 for value in attributed_returns if value > 0)
+        sample_count = len(attributed_returns)
         net_pnl = sum(attributed_pnls)
         hit_rate = wins / sample_count if sample_count else 0.0
         avg_pnl = net_pnl / sample_count if sample_count else 0.0
+        mean_return_on_notional = (
+            sum(attributed_returns) / sample_count if sample_count else 0.0
+        )
+        latest_sample_date = max(
+            str(row.get("sample_date") or "")[:10] for row in attributed_rows
+        )
         summary = {
             "sample_count": sample_count,
             "hit_rate": hit_rate,
             "net_pnl": net_pnl,
             "avg_pnl": avg_pnl,
+            "learning_economics_basis": "after_fee_return_on_notional",
+            "mean_return_on_notional": mean_return_on_notional,
+            "latest_complete_episode_date": latest_sample_date,
         }
-        confidence = _confidence_from_summary(summary)
+        performance_confidence = _confidence_from_summary(summary)
+        digest_confidence = _digest_confidence_from_returns(
+            sample_count=sample_count,
+            hit_rate=hit_rate,
+            mean_return_on_notional=mean_return_on_notional,
+        )
+        if not _performance_summary_requires_refresh(
+            cursor,
+            table_name="analyst_performance",
+            where_sql=(
+                "config_id = ? AND analyst = ? AND ticker = ? AND sector = ? "
+                "AND horizon_class = ? AND signal_side = ?"
+            ),
+            params=(config_id, analyst, ticker, sector, horizon, signal_side),
+            sample_count=sample_count,
+            latest_sample_date=latest_sample_date,
+            mean_return_on_notional=mean_return_on_notional,
+        ):
+            continue
+        valid_until = _valid_until(latest_sample_date, expires_after_days)
         cursor.execute(
             '''
             INSERT INTO analyst_performance (
@@ -1486,25 +1818,27 @@ def _write_template_and_analyst_learning(
                 hit_rate,
                 avg_pnl,
                 net_pnl,
-                confidence,
-                trading_date,
+                performance_confidence,
+                latest_sample_date,
                 now,
                 valid_until,
                 _json_dumps(summary),
             ),
         )
         analyst_rows += 1
-        if confidence >= 0.25:
-            if net_pnl >= 0:
+        if digest_confidence >= 0.25:
+            if mean_return_on_notional >= 0:
                 digest = (
                     f"{ticker} {horizon} {signal_side}: recent mature samples support this analyst "
-                    f"(hit_rate={hit_rate:.0%}, avg_pnl={avg_pnl:.0f}). Prefer matching this horizon and "
+                    f"(hit_rate={hit_rate:.0%}, avg_return_on_notional={mean_return_on_notional:.2%}). "
+                    "Prefer matching this horizon and "
                     "state price stage and invalidation clearly."
                 )
             else:
                 digest = (
                     f"{ticker} {horizon} {signal_side}: recent mature samples are weak "
-                    f"(hit_rate={hit_rate:.0%}, avg_pnl={avg_pnl:.0f}). Treat as a lower-confidence prior "
+                    f"(hit_rate={hit_rate:.0%}, avg_return_on_notional={mean_return_on_notional:.2%}). "
+                    "Treat as a lower-confidence prior "
                     "unless today's evidence is stronger and market confirmation agrees."
                 )
             digest_contract = build_next_round_memory_contract(
@@ -1528,10 +1862,10 @@ def _write_template_and_analyst_learning(
                     "Weak mature digests should lower confidence unless today's evidence has stronger same-scope support.",
                 ],
                 validation_plan=[
-                    "Continue updating hit rate, net PnL, and same-scope sample count before changing confidence strongly.",
+                    "Continue updating hit rate, after-fee return on notional, and same-scope sample count before changing confidence strongly.",
                 ],
                 sample_count=sample_count,
-                confidence_score=confidence,
+                confidence_score=digest_confidence,
             )
             event_id = _insert_learning_event(
                 cursor,
@@ -1543,31 +1877,21 @@ def _write_template_and_analyst_learning(
                 evidence=summary,
                 action={"digest": digest, CONTRACT_KEY: digest_contract},
             )
-            cursor.execute(
-                '''
-                INSERT INTO analyst_learning_digest (
-                    id, config_id, analyst, ticker, sector, horizon_class, market_regime,
-                    digest_text, confidence_score, sample_count, source_event_id,
-                    created_at, valid_until, accepted, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    str(uuid.uuid4()),
-                    config_id,
-                    analyst,
-                    ticker,
-                    sector,
-                    horizon,
-                    "*",
-                    digest,
-                    confidence,
-                    sample_count,
-                    event_id,
-                    now,
-                    valid_until,
-                    1,
-                    _json_dumps({**summary, CONTRACT_KEY: digest_contract}),
-                ),
+            _upsert_analyst_digest_by_scope_and_content(
+                cursor,
+                config_id=config_id,
+                analyst=analyst,
+                ticker=ticker,
+                sector=sector,
+                horizon_class=horizon,
+                market_regime="*",
+                digest_text=digest,
+                confidence_score=digest_confidence,
+                sample_count=sample_count,
+                source_event_id=event_id,
+                created_at=now,
+                valid_until=valid_until,
+                payload_json=_json_dumps({**summary, CONTRACT_KEY: digest_contract}),
             )
             digest_rows += 1
 
@@ -2992,33 +3316,26 @@ def _write_research_position_feedback(
                 action={"digest": digest, CONTRACT_KEY: digest_contract},
                 status="observed",
             )
-            cursor.execute(
-                '''
-                INSERT INTO analyst_learning_digest (
-                    id, config_id, analyst, ticker, sector, horizon_class, market_regime,
-                    digest_text, confidence_score, sample_count, source_event_id,
-                    created_at, valid_until, accepted, payload_json
-                ) VALUES (?, ?, 'portfolio_manager', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?)
-                ''',
-                (
-                    str(uuid.uuid4()),
-                    config_id,
-                    ticker,
-                    _sector_for_ticker(cfg, ticker),
-                    horizon,
-                    regime,
-                    digest,
-                    confidence,
-                    digest_event_id,
-                    now,
-                    valid_until,
-                    _json_dumps({
-                        "feedback_id": feedback_id,
-                        "feedback_label": label,
-                        "transaction_pnl": tx_pnl,
-                        CONTRACT_KEY: digest_contract,
-                    }),
-                ),
+            _upsert_analyst_digest_by_scope_and_content(
+                cursor,
+                config_id=config_id,
+                analyst="portfolio_manager",
+                ticker=ticker,
+                sector=_sector_for_ticker(cfg, ticker),
+                horizon_class=horizon,
+                market_regime=regime,
+                digest_text=digest,
+                confidence_score=confidence,
+                sample_count=1,
+                source_event_id=digest_event_id,
+                created_at=now,
+                valid_until=valid_until,
+                payload_json=_json_dumps({
+                    "feedback_id": feedback_id,
+                    "feedback_label": label,
+                    "transaction_pnl": tx_pnl,
+                    CONTRACT_KEY: digest_contract,
+                }),
             )
             digest_rows += 1
     _backfill_research_position_feedback_from_completed_episodes(
@@ -6203,31 +6520,21 @@ def _write_neutral_accountability_digests(
             action={"digest": digest, "dominant_category": dominant_category, CONTRACT_KEY: digest_contract},
             status="applied",
         )
-        cursor.execute(
-            '''
-            INSERT INTO analyst_learning_digest (
-                id, config_id, analyst, ticker, sector, horizon_class, market_regime,
-                digest_text, confidence_score, sample_count, source_event_id,
-                created_at, valid_until, accepted, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''',
-            (
-                str(uuid.uuid4()),
-                config_id,
-                str(analyst),
-                "*",
-                "*",
-                "neutral_accountability",
-                dominant_category,
-                digest,
-                min(1.0, neutral_count / signal_count),
-                neutral_count,
-                event_id,
-                now,
-                valid_until,
-                1,
-                _json_dumps({**evidence, CONTRACT_KEY: digest_contract}),
-            ),
+        _upsert_analyst_digest_by_scope_and_content(
+            cursor,
+            config_id=config_id,
+            analyst=str(analyst),
+            ticker="*",
+            sector="*",
+            horizon_class="neutral_accountability",
+            market_regime=dominant_category,
+            digest_text=digest,
+            confidence_score=min(1.0, neutral_count / signal_count),
+            sample_count=neutral_count,
+            source_event_id=event_id,
+            created_at=now,
+            valid_until=valid_until,
+            payload_json=_json_dumps({**evidence, CONTRACT_KEY: digest_contract}),
         )
         rows += 1
     return rows
@@ -6670,6 +6977,7 @@ insert_learning_event = _insert_learning_event
 insert_researcher_learning_completion_event = _insert_researcher_learning_completion_event
 insert_causal_review_candidate = _insert_causal_review_candidate
 insert_exploratory_hypothesis = _insert_exploratory_hypothesis
+update_exploratory_hypothesis_validation = _update_exploratory_hypothesis_validation
 upsert_alpha_setup_sample = _upsert_alpha_setup_sample
 upsert_alpha_setup_profile = _upsert_alpha_setup_profile
 upsert_alpha_setup_action_value = _upsert_alpha_setup_action_value

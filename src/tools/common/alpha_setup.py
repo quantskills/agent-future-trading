@@ -1184,6 +1184,51 @@ def upsert_alpha_setup_sample_and_profile(
     rows = [dict(row) for row in cursor.fetchall()]
     stats = _stats_from_rows(rows, cfg)
     lifecycle = classify_lifecycle(stats, cfg)
+    failure_scope_key = "|".join((ticker, side, setup_type, regime))
+    cursor.execute(
+        """
+        SELECT *
+        FROM alpha_setup_sample
+        WHERE config_id = ?
+          AND upper(ticker) = upper(?)
+          AND lower(side) = lower(?)
+          AND lower(setup_type) = lower(?)
+          AND lower(market_regime) = lower(?)
+          AND trading_date >= ?
+          AND trading_date <= ?
+        ORDER BY trading_date, created_at
+        """,
+        (
+            config_id,
+            ticker,
+            side,
+            setup_type,
+            regime,
+            lookback_start,
+            str(trading_date)[:10],
+        ),
+    )
+    failure_scope_rows = [dict(row) for row in cursor.fetchall()]
+    failure_scope_stats = _stats_from_rows(failure_scope_rows, cfg)
+    failure_scope_lifecycle = classify_lifecycle(failure_scope_stats, cfg)
+    failure_scope_negative = bool(
+        failure_scope_lifecycle.get("lifecycle_state") == "capped"
+        and failure_scope_lifecycle.get("reason")
+        == "same_scope_recent_return_on_notional_negative"
+    )
+    if failure_scope_negative and lifecycle.get("lifecycle_state") not in {
+        "capped",
+        "rejected",
+    }:
+        lifecycle = {
+            **lifecycle,
+            "lifecycle_state": "capped",
+            "reason": "strategy_failure_scope_recent_return_on_notional_negative",
+            "profile_state_hint": "profile_capped",
+            "max_position_impact": _profile_thresholds(cfg)[
+                "candidate_max_position_impact"
+            ],
+        }
     valid_until = _valid_until(str(trading_date)[:10], _profile_thresholds(cfg)["valid_days"])
     contract = build_next_round_memory_contract(
         memory_type="alpha_setup_profile",
@@ -1241,6 +1286,19 @@ def upsert_alpha_setup_sample_and_profile(
         "product_learning_performance_key": product_learning_performance_key,
         "lookback_days": lookback_days,
         "not_product_blacklist": True,
+        "strategy_failure_scope": {
+            "scope_key": failure_scope_key,
+            "identity": {
+                "ticker": ticker,
+                "side": side,
+                "setup_type": setup_type,
+                "market_regime": regime,
+            },
+            "stats": failure_scope_stats,
+            "classification": failure_scope_lifecycle,
+            "negative_expectancy_applied": failure_scope_negative,
+            "effect_boundary": "capped_only_no_product_blacklist_strong_current_evidence_may_probe",
+        },
         CONTRACT_KEY: contract,
     }
     research_memory_writers.upsert_alpha_setup_profile(

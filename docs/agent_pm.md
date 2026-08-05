@@ -186,7 +186,9 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 最终动作和持仓变化：只由 `final_action`、`current_lots`、`target_lots`、`lots_delta` 表达；生命周期由共享 `final_action_semantics` 和 `pm_lifecycle_learning_trace` 解释，不新增顶层生命周期字段。
 
-执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`trigger_confirmation_adjustment`、`entry_trigger`、`invalidation`、`invalidation_level`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。profile、source、trigger 和入场作废边界必须来自同一被选 technical/event AEC；`trigger_confirmation_adjustment`只可来自结构化 weak-conflict 权限或同品种、同方向、同 setup、同 canonical trigger 的正式 canonical open/add 学习，不得解析 reason 文本。`invalidation`和`invalidation_level`只在首次成交前作废当前FAC。合法 watch 获选后固定为条件执行；当前触发已确认且入场作废边界完整的候选可形成直执行权限，该字段不改变rank、预算或sizing。
+执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`trigger_confirmation_adjustment`、`entry_trigger`、`invalidation`、`invalidation_level`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`conditional_trigger_authority` 和原开仓生命周期身份 `opening_authority_type`。profile、source、trigger 和入场作废边界必须来自同一被选 technical/event AEC；`trigger_confirmation_adjustment`只可来自结构化 weak-conflict 权限或同品种、同方向、同 setup、同 canonical trigger 的正式 canonical open/add 学习，不得解析 reason 文本。`stronger`只追加一根完整15分钟延续确认，`strict`追加连续两根；`opening_authority_type`只让既有持仓期限规则识别原开仓是probe还是real/scale，不新增交易权限。`invalidation`和`invalidation_level`只在首次成交前作废当前FAC。合法 watch 获选后固定为条件执行；当前触发已确认且入场作废边界完整的候选可形成直执行权限，该字段不改变rank、预算或sizing。
+
+PM 对新增风险必须先用 `current_evidence_quality/current_entry_prerequisite_met` 证明当日方向、可交易状态、setup、失效边界和冲突处理已通过现有前提，再允许 `validated_learning_delta` 进入综合分、唯一 Rank 与既有资金层。`candidate/watchlist` Profile 不产生正加分，未解决主导反对证据不得签开仓 FAC；成熟正向学习仍可在当前证据合格后支持 real/scale 和差异化放大。
 
 新增风险的执行事实只允许来自 SCC 重建的三份已校验 AEC。PM Step6 必须先按执行职责过滤，再比较同类合法证据的置信度：普通15分钟条件或直执行只选最终 `target_side` 下的 technical `entry_timing`；`event_immediate` 只选当前事件已满足即时边界的 commodity_news `event_catalyst`；fundamental 固定为 `direction_context`，只能支持方向和评分，不能成为 Trader 执行来源。反方向、`no_opportunity` 和 `risk_reduction_candidate` 不得入选。
 

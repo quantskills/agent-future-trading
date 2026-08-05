@@ -11,6 +11,7 @@ from tools.common.execution_trigger_semantics import (
     execution_trigger_contract_error,
     normalize_execution_profile,
     normalize_trigger_confirmation_adjustment,
+    requires_strict_trigger_confirmation,
     requires_stronger_trigger_confirmation,
 )
 
@@ -483,8 +484,15 @@ def select_intraday_execution(
             "passed": None,
         }
         if requires_stronger_trigger_confirmation(trigger_confirmation_adjustment):
+            required_follow_through_bars = (
+                2
+                if requires_strict_trigger_confirmation(
+                    trigger_confirmation_adjustment
+                )
+                else 1
+            )
             next_index = signal_index + 1
-            if next_index >= len(signal_bars_for_trigger):
+            if next_index + required_follow_through_bars > len(signal_bars_for_trigger):
                 return IntradayExecutionSelection(
                     decision="skip" if finalize_untriggered else "wait",
                     reason=(
@@ -498,70 +506,96 @@ def select_intraday_execution(
                         "trigger_confirmation_adjustment": trigger_confirmation_adjustment,
                         "initial_trigger_datetime": signal_bar["dt"].strftime("%Y-%m-%d %H:%M:%S"),
                         "waiting_for_follow_through": True,
+                        "required_follow_through_bars": required_follow_through_bars,
                     },
                 )
-            follow_bar = signal_bars_for_trigger[next_index]
-            if follow_bar["dt"] > valid_until:
-                return _entry_non_execution_selection(
-                    reason="fac_expired_before_entry",
-                    execution_profile=execution_profile,
-                    execution_contract=execution_contract,
-                    observed_bar=follow_bar,
-                )
-            if (
-                first_invalidation_bar is not None
-                and first_invalidation_bar["dt"] <= follow_bar["dt"]
-            ):
-                return _entry_non_execution_selection(
-                    reason="fac_invalidated_before_entry",
-                    execution_profile=execution_profile,
-                    execution_contract=execution_contract,
-                    observed_bar=first_invalidation_bar,
-                )
-            follow_exec_bars = [
-                bar for bar in normalized_execution_bars if bar["dt"] <= follow_bar["dt"]
+            follow_bars = signal_bars_for_trigger[
+                next_index : next_index + required_follow_through_bars
             ]
-            follow_vwap = _vwap(follow_exec_bars) if follow_exec_bars else None
-            follow_close = _float(follow_bar.get("close"))
-            follow_through = False
-            if follow_close is not None and follow_vwap is not None:
-                if execution_profile == "breakout":
-                    follow_through = bool(
-                        (long_trigger and follow_close > opening_range["high"] and follow_close > follow_vwap)
-                        or (short_trigger and follow_close < opening_range["low"] and follow_close < follow_vwap)
+            confirmation_failed = False
+            for follow_bar in follow_bars:
+                if follow_bar["dt"] > valid_until:
+                    return _entry_non_execution_selection(
+                        reason="fac_expired_before_entry",
+                        execution_profile=execution_profile,
+                        execution_contract=execution_contract,
+                        observed_bar=follow_bar,
                     )
-                elif execution_profile == "vwap_confirmed":
-                    follow_through = bool(
-                        (long_trigger and follow_close > follow_vwap)
-                        or (short_trigger and follow_close < follow_vwap)
+                if (
+                    first_invalidation_bar is not None
+                    and first_invalidation_bar["dt"] <= follow_bar["dt"]
+                ):
+                    return _entry_non_execution_selection(
+                        reason="fac_invalidated_before_entry",
+                        execution_profile=execution_profile,
+                        execution_contract=execution_contract,
+                        observed_bar=first_invalidation_bar,
                     )
-                elif long_trigger:
-                    required_checks = []
-                    if long_reclaimed_opening:
-                        required_checks.append(follow_close > opening_range["high"])
-                    if long_reclaimed_vwap:
-                        required_checks.append(follow_close > follow_vwap)
-                    follow_through = bool(required_checks and all(required_checks))
-                elif short_trigger:
-                    required_checks = []
-                    if short_reclaimed_opening:
-                        required_checks.append(follow_close < opening_range["low"])
-                    if short_reclaimed_vwap:
-                        required_checks.append(follow_close < follow_vwap)
-                    follow_through = bool(required_checks and all(required_checks))
-            if not follow_through:
+                follow_exec_bars = [
+                    bar
+                    for bar in normalized_execution_bars
+                    if bar["dt"] <= follow_bar["dt"]
+                ]
+                follow_vwap = _vwap(follow_exec_bars) if follow_exec_bars else None
+                follow_close = _float(follow_bar.get("close"))
+                follow_through = False
+                if follow_close is not None and follow_vwap is not None:
+                    if execution_profile == "breakout":
+                        follow_through = bool(
+                            (
+                                long_trigger
+                                and follow_close > opening_range["high"]
+                                and follow_close > follow_vwap
+                            )
+                            or (
+                                short_trigger
+                                and follow_close < opening_range["low"]
+                                and follow_close < follow_vwap
+                            )
+                        )
+                    elif execution_profile == "vwap_confirmed":
+                        follow_through = bool(
+                            (long_trigger and follow_close > follow_vwap)
+                            or (short_trigger and follow_close < follow_vwap)
+                        )
+                    elif long_trigger:
+                        required_checks = []
+                        if long_reclaimed_opening:
+                            required_checks.append(
+                                follow_close > opening_range["high"]
+                            )
+                        if long_reclaimed_vwap:
+                            required_checks.append(follow_close > follow_vwap)
+                        follow_through = bool(
+                            required_checks and all(required_checks)
+                        )
+                    elif short_trigger:
+                        required_checks = []
+                        if short_reclaimed_opening:
+                            required_checks.append(
+                                follow_close < opening_range["low"]
+                            )
+                        if short_reclaimed_vwap:
+                            required_checks.append(follow_close < follow_vwap)
+                        follow_through = bool(
+                            required_checks and all(required_checks)
+                        )
+                if not follow_through:
+                    confirmation_failed = True
+                    break
+                confirmed_signal_bar = follow_bar
+                signal_close = follow_close
+                vwap_value = follow_vwap
+            if confirmation_failed:
                 continue
             volume_confirmation = _stronger_confirmation_volume_check(
                 signal_bars=normalized_signal_bars,
                 initial_trigger_bar=initial_trigger_bar,
-                follow_bar=follow_bar,
+                follow_bars=follow_bars,
                 config=config,
             )
             if not bool(volume_confirmation.get("passed")):
                 continue
-            confirmed_signal_bar = follow_bar
-            signal_close = follow_close
-            vwap_value = follow_vwap
 
         execution_bar = _next_execution_bar(
             normalized_execution_bars,
@@ -982,7 +1016,7 @@ def _stronger_confirmation_volume_check(
     *,
     signal_bars: List[Dict[str, Any]],
     initial_trigger_bar: Dict[str, Any],
-    follow_bar: Dict[str, Any],
+    follow_bars: List[Dict[str, Any]],
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Require participated follow-through only on PM-strengthened entries."""
@@ -1004,22 +1038,32 @@ def _stronger_confirmation_volume_check(
         0.0,
         _float(initial_trigger_bar.get("volume"), 0.0) or 0.0,
     )
-    follow_volume = max(0.0, _float(follow_bar.get("volume"), 0.0) or 0.0)
+    confirmation_volumes = [
+        max(0.0, _float(bar.get("volume"), 0.0) or 0.0)
+        for bar in follow_bars
+    ]
+    follow_volume = confirmation_volumes[-1] if confirmation_volumes else 0.0
     reference_volume = (
         sum(prior_volumes) / len(prior_volumes)
         if prior_volumes
         else None
     )
-    two_bar_average_volume = (initial_volume + follow_volume) / 2.0
+    confirmation_average_volume = (
+        (initial_volume + sum(confirmation_volumes))
+        / (1 + len(confirmation_volumes))
+        if confirmation_volumes
+        else 0.0
+    )
     comparable_baseline_available = bool(
         reference_volume is not None and reference_volume > 0.0
     )
     passed = bool(
         initial_volume > 0.0
-        and follow_volume > 0.0
+        and bool(confirmation_volumes)
+        and all(value > 0.0 for value in confirmation_volumes)
         and (
             not comparable_baseline_available
-            or two_bar_average_volume >= float(reference_volume) * min_ratio
+            or confirmation_average_volume >= float(reference_volume) * min_ratio
         )
     )
     return {
@@ -1029,11 +1073,14 @@ def _stronger_confirmation_volume_check(
         "reference_volume": reference_volume,
         "initial_trigger_volume": initial_volume,
         "follow_through_volume": follow_volume,
-        "two_bar_average_volume": two_bar_average_volume,
+        "follow_through_volumes": confirmation_volumes,
+        "confirmation_bar_count": len(confirmation_volumes),
+        "two_bar_average_volume": confirmation_average_volume,
+        "confirmation_average_volume": confirmation_average_volume,
         "min_volume_ratio": min_ratio,
         "comparable_baseline_available": comparable_baseline_available,
         "method": (
-            "initial_and_follow_average_vs_prior_completed_signal_average"
+            "initial_and_confirmation_average_vs_prior_completed_signal_average"
             if comparable_baseline_available
             else "nonzero_initial_and_follow_without_comparable_prior_signal_bar"
         ),
