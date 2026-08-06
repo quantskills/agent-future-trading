@@ -11909,6 +11909,49 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(detail["open_action_evidence"])
         self.assertIn("conditional_trigger_authority", detail["reason_codes"])
 
+    def test_final_new_entry_gate_blocks_conditional_authority_when_dominant_opposition_unresolved(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=[
+                "alpha_setup_ev_fusion",
+                "scorecard_current_tradeable_probe_seed",
+                "pm_watch_for_trigger_probe_cap",
+                "market_confirmation_conflict",
+            ],
+            control_diagnostics={
+                "alpha_setup_ev_fusion": {
+                    "scorecard_state": "watch_for_trigger",
+                    "scorecard_gating_failures": [
+                        "dominant_opposing_evidence_requires_pm_resolution",
+                    ],
+                    "has_tradeable_support": False,
+                    "has_monitorable_setup": True,
+                    "setup_quality_ok": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
+                    "strong_realtime_evidence": False,
+                    "strong_market_confirmation": False,
+                    "technical_supports_side": True,
+                    "technical_entry_timing_supports_side": False,
+                    "technical_opposes_side": False,
+                    "qualified_positive_expectancy": False,
+                    "positive_action_value": False,
+                    "negative_action_value": False,
+                    "repeat_loss_without_new_evidence": False,
+                    "current_confirmation_score": 0.50,
+                    "independent_support_count": 1,
+                }
+            },
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(detail["authority_type"], "watchlist_only")
+        self.assertTrue(detail["unresolved_dominant_opposition"])
+        self.assertFalse(detail["conditional_trigger_authority"])
+        self.assertFalse(detail["requires_intraday_confirmation"])
+        self.assertIsNone(detail["can_execute_without_intraday_trigger"])
+        self.assertNotIn("conditional_trigger_authority", detail["reason_codes"])
+        self.assertIn("dominant_opposing_evidence_unresolved", detail["reason_codes"])
+
     def test_pm_watch_for_trigger_candidate_becomes_conditional_final_contract(self):
         reasons = [
             "alpha_setup_ev_fusion",

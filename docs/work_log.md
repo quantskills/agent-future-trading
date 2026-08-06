@@ -46,3 +46,5 @@
 （5）[Research/RAG上下文质量补齐] `research_learning.py`只在出现新完整episode ID时生成新研究、同步假设验证样本数并允许被否定假设由未来样本恢复；`analyst_learning_context.py`按方向检索并明确展示方向、setup、周期和市场状态；`research_memory_writers.py`让同一研究命题的新摘要版本停用旧版本，同时保留其他方向或命题。原因：避免相同历史反复生成、样本数失真及跨方向先验混入提示词，同时继续保持Researcher只提供可反驳分析先验。
 
 （7）[七八月独立复测实验] `dev.yaml`将`exp_name`改为`agentquant-futures-trading-2025-rag-retest-202507-08`，其余运行、策略、账户、品种和学习配置保持不变。原因：用新的`config_id`隔离RAG修复后2025年7—8月复测，完整保留旧实验结果用于同窗口对比。
+
+（8）[主导反对证据条件权限一致性修复] `portfolio_manager.py`让未解决主导反对证据同时阻断real、probe与`conditional_trigger_authority`，`test_phase_flow_regression.py`覆盖冲突候选不得保留条件开仓权且正常`watch_for_trigger`条件试探不受影响。原因：修复最终目标手数恢复为当前持仓后仍残留条件触发权限并导致PM Step6自检失败的问题，不增加兜底、自检修复或第二条交易路径。

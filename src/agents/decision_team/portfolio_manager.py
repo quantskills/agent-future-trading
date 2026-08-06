@@ -2952,6 +2952,7 @@ def _final_contract_authority(
         and not hard_zero
         and not hard_blocks
         and not negative_profile
+        and not unresolved_dominant_opposition
     )
     tradeable_state = scorecard_state in {"probe_candidate", "tradeable_candidate"} or conditional_trigger_authority
     watch_for_trigger_semantic_block = bool(
