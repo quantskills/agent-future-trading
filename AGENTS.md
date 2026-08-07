@@ -16,7 +16,7 @@
 
 ## 2. 项目目标
 
-AgentQuant 的目标是让多智能体期货交易系统在回测、模拟盘和实盘链路中一比一复刻同一套交易逻辑，并在系统链路干净后继续提升净收益、稳定性、资金利用率、回撤控制和学习闭环质量。
+AgentQuant 的目标是让多智能体期货交易系统在回测、模拟盘和实盘链路中一比一复刻同一套交易逻辑，在系统链路干净后持续发现并扩大手续费后 alpha，形成稳定正净收益，同时提升资金利用率、回撤控制和学习闭环质量。限制交易、机械降仓和压低成交频率本身不构成收益优化；任何策略修改都必须说明它如何提高机会识别、正期望部署或失效 alpha 退出质量。
 
 LLM 只能用于三个分析师形成结构化预测证据，以及研究员形成结构化研究结果。复盘员是确定性事实复盘者，不调用 LLM。LLM 不能直接决定仓位、手数、资金部署、审计结论和最终交易合约。
 
@@ -43,6 +43,8 @@ LLM 只能用于三个分析师形成结构化预测证据，以及研究员形�
 涉及系统运行、代码修改、回测排错、字段语义、artifact、审计、学习链路时，先读相关文档和代码。
 
 - `docs/work_log.md`：只记录 `.py/.yaml/.yml` 行为修改。
+- `docs/check_list.md`：只记录代码已实现且仍能由自然真实回测产生证据的部分验收和未验收项目；内部公式、严格控制变量反事实和未落盘中间态由确定性测试验收，不混入该清单。
+- `docs/backtest_outcome.md`：保存指定历史回测的逐日逐笔结果与修改前后证据，只作对应实验评价，不覆盖当前代码契约。
 - `docs/matrix_chain_contract.md`：全链路生产、落盘、消费、审计、hard fail、diagnostics 契约矩阵，是理解系统问题和修改 bug 的第一锚点。
 - `docs/mechanism_multiagents.md`：多智能体固定工作流和边界。
 - `docs/workflow.md`：workflow 编排边界。
@@ -144,6 +146,13 @@ PM 禁止重建、补造、改写 SCC。SCC 必须来自 workflow state 中 sign
 
 `final_action_contract.learning_used.alpha_setup_action_values` 只保存可作为 PM 正式学习证据的 canonical action-value。弱先验、相似 SQL 检索、诊断材料不得进入正式 action-value 主列表，只能进入 `learning_used.memory_retrieval.rejected_or_downgraded` 诊断位置。
 
+PM 当前持仓生命周期口径固定如下：
+
+- `position_pnl_ratio` 优先读取原开仓 FAC 完整周期手续费后 `cycle_return_on_notional`。普通持仓达到 -2% 且同向证据再验证失败时减仓 50%，达到 -4% 时退出；再验证通过时不得触发对应普通亏损减仓或退出。
+- 新仓前两个交易日复核保持独立口径：达到 -0.5% 且复核失败时减仓 50%，达到 -2% 时退出。
+- 原开仓 FAC 完整周期收益峰值为正、当前 `cycle_return_on_notional<=0` 且同向证据再验证失败时，`opening_authority_type=exploration_probe` 必须由 PM 在唯一 FAC 中签署全部退出；real/scale 保持既有减仓复核路径。
+- 反向目标在当前原子决策中必须强制 `target_lots=0` 并先退出旧方向。仓位归零后的后续反向机会使用新的当日 FAC、重新进入 Rank 与资金部署并建立新学习周期；不得在同一 recommendation 中同时平旧和开反向新仓。
+
 ### 6.4 auditor
 
 只读审计 PM 唯一最终合约的必需字段、基本动作逻辑、账户硬风险、保证金硬上限、合约/失效边界和数据质量；不改方向、不改手数、不新建合约、不直接消费研究记录，也不复审 PM 的学习、融合、rank、预算和 sizing 过程。
@@ -153,6 +162,8 @@ PM 禁止重建、补造、改写 SCC。SCC 必须来自 workflow state 中 sign
 只执行审计通过的 `final_action_contract` 和合约化触发规则。
 
 禁止读取研究库、action-value、`learning_used`、`opportunity_rank` 并据此下单。
+
+Trader 保留通用订单翻译中的两步反转防御能力，但当前生产策略 PM 不向 Trader 下发同一原子反向目标；该能力不得被文档描述为当前策略反手路径，也不得绕过 PM 的 exit-first、新 FAC 和重新 Rank 约束。
 
 ### 6.6 accountant
 
@@ -272,6 +283,7 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.p
 
 - `system_invariant_audit` hard fail 时，停止收益讨论，按系统 bug 处理。
 - `system_invariant_audit` clean 后，收益差才进入策略层分析。
+- `docs/check_list.md` 只保留自然真实回测能够产生证据的项目。严格控制变量比较、内部固定公式、未持久化中间态和代码不变量必须由回归、属性或生产链路测试验收；已经完整验收的项目从清单删除，语义与生产代码不一致的项目先改清单再回测。
 - daily gate 只检查真实 DB、artifact 和 payload 中的物理运行结果，不读取或复查 PM 自检、rank、学习作用过程及任何智能体内部机制，也不承载静态代码扫描职责。
 - pre-backtest gate 是回测前 readiness 检查，不代表策略一定盈利。
 

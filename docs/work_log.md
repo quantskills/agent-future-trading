@@ -45,6 +45,12 @@
 
 （5）[Research/RAG上下文质量补齐] `research_learning.py`只在出现新完整episode ID时生成新研究、同步假设验证样本数并允许被否定假设由未来样本恢复；`analyst_learning_context.py`按方向检索并明确展示方向、setup、周期和市场状态；`research_memory_writers.py`让同一研究命题的新摘要版本停用旧版本，同时保留其他方向或命题。原因：避免相同历史反复生成、样本数失真及跨方向先验混入提示词，同时继续保持Researcher只提供可反驳分析先验。
 
-（7）[七八月独立复测实验] `dev.yaml`将`exp_name`改为`agentquant-futures-trading-2025-rag-retest-202507-08`，其余运行、策略、账户、品种和学习配置保持不变。原因：用新的`config_id`隔离RAG修复后2025年7—8月复测，完整保留旧实验结果用于同窗口对比。
+（7）[七八月独立复测实验] 七八月复测运行使用独立`exp_name=agentquant-futures-trading-2025-rag-retest-202507-08`，其余运行、策略、账户、品种和学习配置保持不变；复测完成后当前`dev.yaml`已恢复默认`exp_name=agentquant-futures-trading`，复测事实继续按独立`config_id`保留。原因：隔离RAG修复后2025年7—8月复测，完整保留旧实验结果用于同窗口对比，同时避免临时实验名长期成为默认运行口径。
 
 （8）[主导反对证据条件权限一致性修复] `portfolio_manager.py`让未解决主导反对证据同时阻断real、probe与`conditional_trigger_authority`，`test_phase_flow_regression.py`覆盖冲突候选不得保留条件开仓权且正常`watch_for_trigger`条件试探不受影响。原因：修复最终目标手数恢复为当前持仓后仍残留条件触发权限并导致PM Step6自检失败的问题，不增加兜底、自检修复或第二条交易路径。
+
+==========2026年08月07日==========
+
+（1）[探索仓完整周期盈利回吐退出] `portfolio_manager.py`保留既有“原开仓FAC完整周期收益峰值为正、当前手续费后`cycle_return_on_notional<=0`且当日同向证据再验证失败”的触发条件，仅按已沿生命周期传递的`opening_authority_type`区分处理：`exploration_probe`首次触发即由PM唯一FAC全部退出，real/scale继续走既有减仓复核路径；`test_phase_flow_regression.py`覆盖探索仓退出、real仓保持减仓及当日证据复核通过不退出。原因：七八月独立复测中SR探索空单连续三次触发并由11手逐级减至5手、2手、0手，证明探索仓减半路径延长了已失效Alpha的亏损暴露；本次不改变开仓、Rank、正向学习作用域、成熟Alpha放大、Trader权限或新仓亏损复核路径。
+
+（2）[主LLM切换至DeepSeek V4 Pro思考模式] `dev.yaml`将唯一启用的主`llm`配置切换为`DeepSeek / deepseek-v4-pro`，开启thinking并请求`reasoning_effort=medium`，完整保留停用的`CodexOpenAI / gpt-5.6-sol`配置；`test_protocol_preflight_cli.py`同步验证DeepSeek provider kwargs与非敏感路由元数据。原因：让技术面、基本面、期货新闻面分析师和Researcher通过现有统一LLM入口共同切换模型，不改变其他智能体权限、AEC→SCC→PM FAC交易链或失败即抛错边界。

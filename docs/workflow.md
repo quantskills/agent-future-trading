@@ -750,7 +750,7 @@ Trader执行链必须把Phase2运行状态写入：
 FuturesRecommendation.signal_snapshot.phase2_execution
 ```
 
-该结构必须保留执行模式、状态、产品、recommendation引用、参考动作与手数、检查时间、截止时间、循环状态、执行合约、翻译后决策、盘中选择、执行学习、PM计划校验、合约执行观察、入场权限门、退出策略、入场时机、执行模拟和两步反转事实。Trader不得用该结构改写 `final_action_contract`。
+该结构必须保留执行模式、状态、产品、recommendation引用、参考动作与手数、检查时间、截止时间、循环状态、执行合约、翻译后决策、盘中选择、执行学习、PM计划校验、合约执行观察、入场权限门、退出策略、入场时机、执行模拟和防御性的两步反转翻译事实。当前生产策略 PM 已将异号目标原子收敛为 `exit/target_lots=0`；该翻译事实不得被当成同一 recommendation 的反向开仓权限，Trader也不得用它改写 `final_action_contract`。
 
 ##### 3.2.7 Trader追加：execution_translation完整结构
 

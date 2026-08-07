@@ -1,6 +1,6 @@
 # AgentQuant
 
-AgentQuant 是一个面向中国期货主力合约的多智能体交易策略系统。当前代码重点服务两个核心功能：
+AgentQuant 是一个面向中国期货主力合约的多智能体交易策略系统。系统核心目标是在回测、模拟盘和后续实盘迁移中发现并扩大手续费后 alpha，形成可持续的正净收益；风险、审计和学习机制用于保证这条收益链路真实、可追溯，而不是通过少交易或机械保守伪造稳定性。当前代码重点服务两个核心功能：
 
 1. **期货策略回测**：按历史交易日复刻“盘前策略、盘中执行、日终结算、复盘研究”的完整运行链路。
 2. **模拟盘/模拟交易**：与回测共用同一套推荐、执行、结算、日志和学习机制，使回测生成的策略尽量可以一比一迁移到模拟盘。
@@ -48,7 +48,7 @@ src/agents/
 | 信号收集员 | 不调用 LLM，收集三类分析师结构化预测证据，输出 `signal_collection_contract` |
 | 投资组合经理 | 不调用 LLM；Step1–5 只更新同一个内存状态，Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract` |
 | 审计员 | 不调用 LLM；只读审计唯一最终合约的必需字段、基本动作逻辑、账户硬风险、保证金硬上限、合约/失效边界和数据质量，输出 approve、approve_with_warning 或 block，不复算 PM 方向、rank、预算和手数 |
-| 交易员 | 只执行审计后的 `final_action_contract`，处理盘中触发、开平仓、反手、换约、滑点、涨跌停和未成交原因 |
+| 交易员 | 只执行审计后的 `final_action_contract`，处理盘中触发、开平仓、换约、滑点、涨跌停和未成交原因；策略反向目标只执行 PM 已签的退出腿，不在同一原子决策中建立反向新仓 |
 | 会计师 | 做 Phase3 日终结算、手续费、保证金、持仓、账户权益和 PnL |
 | 复盘员 | 不调用 LLM；复盘决策、审计、执行、成交和结算事实，核对物理事实一致性并输出事实归因和完整交易日志，不二次审计合约合法性 |
 | 研究员 | 在复盘员验证通过后输出结构化研究信息，可受限调用 LLM 做研究 |
@@ -61,13 +61,16 @@ src/agents/
 
 ## 三、数据与模型
 
-当前系统只使用两类数据源：
+当前系统使用三类正式数据输入：
 
 1. **PandaAI**  
    用于期货日频行情、分钟线、主力合约、结算相关行情、涨跌停、合约详情和期货衍生数据。
 
-2. **Finoview 本地数据**  
-   基本面数据保存在 `data/Fundamental_data/Finoview_data/` 的 feather 文件中；期货新闻由人工放入 `data/News_data/Future_news/` 的 txt 文件中。
+2. **Finoview 本地基本面数据**
+   基本面数据保存在 `data/Fundamental_data/Finoview_data/` 的 feather 文件中。
+
+3. **本地期货新闻**
+   期货新闻由人工放入 `data/News_data/Future_news/` 的 txt 文件中。
 
 数据调用原则：
 
@@ -82,7 +85,7 @@ LLM 调用原则：
 - 只有技术面分析师、基本面分析师、期货新闻面分析师和研究员可以调用 LLM。
 - 信号收集员、投资组合经理、审计员、交易员、会计师、复盘员和协议管理员不调用 LLM。
 - 规划员是封存开发组件，不属于当前启用工作流。
-- 当前主 LLM 路由在 `src/config/dev.yaml` 的 `llm` 段配置，API Key 放在 `.env`，不要写入配置文件。
+- 当前主 LLM 路由为 `DeepSeek / deepseek-v4-pro`，在 `src/config/dev.yaml` 的唯一启用 `llm` 段中开启思考并请求 `reasoning_effort=medium`；DeepSeek 官方会把思考模式的 `medium` 映射为实际 `high`。`CodexOpenAI / gpt-5.6-sol` 完整配置块继续保留为停用路由。API Key 放在 `.env`，不要写入配置文件。
 - 分析师和研究员的 LLM 输出必须落到结构化字段；自由文本不能成为交易权限、手数依据、审计依据、结算依据或下游直接消费的研究结论。
 
 更多细节见：
@@ -94,8 +97,8 @@ LLM 调用原则：
 当前业务机制不是简单按收盘价买卖，而是尽量接近真实期货交易：
 
 - 使用具体合约代码，不只记录品种代码。
-- 支持多头、空头、开仓、平仓、减仓、清仓和反手。
-- 反手交易按“先平原方向，再开新方向”处理。
+- 支持多头、空头、开仓、平仓、减仓和清仓。
+- PM 遇到反向目标时只在当前原子决策中签发旧方向退出，强制 `target_lots=0`；仓位归零后的后续反向机会必须使用新的当日 FAC、重新进入 Rank 和资金部署，再建立新的学习周期。
 - 支持主力换约，换约按平旧合约、开新合约两条真实腿记录。
 - 支持手续费、滑点、合约乘数、保证金率和保证金释放。
 - 支持 PandaAI 动态保证金回退到本地静态合约缓存。
@@ -131,11 +134,13 @@ AgentQuant 的学习目标不是写死更多交易规则，而是让智能体从
 
 研究结论必须带使用边界：
 
-- 候选假设只能作为分析先验，不能直接放仓、加仓、`position_matched` 或支撑亏损仓继续持有。
+- `candidate/monitoring` 探索假设只做未来影子验证；只有 `validated` 假设可以作为下一交易日分析先验，任何状态都不能直接放仓、加仓、`position_matched` 或支撑亏损仓继续持有。
 - 成熟经验也必须经过当日证据、市场确认、失效边界、投资组合经理、审计员、交易员和 20% 保证金硬门槛。
 - 研究员输出的 action-value 只形成结构化动作偏好；投资组合经理只能经 `decision_memory_retrieval` 消费交易决策类研究。
 - execution 学习必须先由投资组合经理写入未来 `final_action_contract.execution_profile/entry_trigger`，交易员不直接读取研究 action-value。
 - 分析师只消费本专业校准类研究，不获得交易授权。
+- PM 的新增风险资金层固定由当日证据先行：probe 为 0.8%～1.5%，real 为 3%～6%，scale 为 6%～12%；成熟学习只能在当日入场前提成立后参与 Rank 和放大。
+- 普通持仓亏损复核读取 `position_pnl_ratio`：达到 -2% 且同向证据复核失败时减仓 50%，达到 -4% 时退出；完整周期收益峰值为正、当前手续费后 `cycle_return_on_notional<=0` 且复核失败时，探索仓直接退出，real/scale 保持既有减仓复核路径。
 
 更多细节见：
 
@@ -180,15 +185,16 @@ python database\build_check_db.py
 
 ## 七、运行方式
 
-以下命令默认从 `D:\research\AgentQuant\src` 目录执行。
+以下命令默认已激活 `deepfund` 环境，并从 `D:\research\AgentQuant\src` 目录执行；自动化开发与验收固定使用 `C:\ProgramData\miniconda3\envs\deepfund\python.exe`。
 
 ### 1. 跑完整回测窗口
 
 ```powershell
+python run\pre_backtest_test.py --config config\dev.yaml --local-db --start-date 2025-01-02 --end-date 2025-01-31 --json
 python run\backtest.py --config config\dev.yaml --local-db --start-date 2025-01-02 --end-date 2025-01-31 --reset-config
 ```
 
-`run\backtest.py` 会自动执行控制侧验收：窗口开始前运行一次 `run\pre_backtest_test.py`，通过现有只读数据入口检查指定窗口和配置品种的真实行情、主力合约、结算价、合约信息、分钟行情能力及 Finoview/新闻读取边界，但不调用 LLM、不运行真实回测、不写正式业务库。每个交易日完成 Phase1–4 与 Researcher 后，对该单日运行一次 `run\backtest_daily_test.py`，只读检查真实物理结果中的非策略问题。PG 的输入、判定和报告字段只能来自 `docs/matrix_field_semantics.md`，动作解释只能来自 `docs/matrix_action_canonical.md`，不得通过通用 JSON 容器自创字段或语义。契约覆盖缺口、交易必需数据断裂或系统不变量 hard error 会阻止回测继续评价策略收益。
+正式回测前必须由操作者先独立运行 `run\pre_backtest_test.py`，通过现有只读数据入口检查指定窗口和配置品种的真实行情、主力合约、结算价、合约信息、分钟行情能力及 Finoview/新闻读取边界；该入口不调用 LLM、不运行真实回测、不写正式业务库。`run\backtest.py` 不调用、读取或保存这份回测前检测结果，只在每个交易日完成 Phase1–4 与 Researcher 后自动对该日运行一次 `run\backtest_daily_test.py`，只读检查真实物理结果中的非策略问题。PG 的输入、判定和报告字段只能来自 `docs/matrix_field_semantics.md`，动作解释只能来自 `docs/matrix_action_canonical.md`，不得通过通用 JSON 容器自创字段或语义。契约覆盖缺口、交易必需数据断裂或系统不变量 hard error 会阻止回测继续评价策略收益。
 
 常用参数：
 
@@ -232,7 +238,7 @@ python run\order.py --config config\dev.yaml --local-db --trading-date 2025-01-0
 python run\evaluate_config.py --config config\dev.yaml --local-db --update
 ```
 
-如果没有通过 `run\backtest.py` 自动链路，而是单独运行评估，必须先确认 `run\pre_backtest_test.py` 通过，且对应交易日的 `run\backtest_daily_test.py` 没有 hard error。
+运行评估前必须确认独立执行的 `run\pre_backtest_test.py` 已通过，且对应交易日的 `run\backtest_daily_test.py` 没有 hard error。
 
 评估指定区间：
 
@@ -277,7 +283,7 @@ python run\plot_config.py --config config\dev.yaml
 | 配置与组合 | `config`、`portfolio`、`trading_day_phase` |
 | 分析与推荐 | `signal`、`futures_recommendation`、`signal_context_history` |
 | 执行与结算 | `futures_transactions`、`futures_intraday_decision`、`daily_settlement`、`ticker_daily_pnl` |
-| 学习与研究 | `trade_episode_memory`、`no_trade_opportunity_memory`、`exploratory_hypothesis`、`adaptive_policy_state`、`learning_event_log` |
+| 学习与研究 | `trade_episode_memory`、`no_trade_opportunity_memory`、`alpha_setup_sample`、`alpha_setup_profile`、`alpha_setup_action_value`、`exploratory_hypothesis`、`adaptive_policy_state`、`learning_event_log` |
 | 评估 | `config_outcome` |
 
 ## 十一、测试与检查
@@ -306,7 +312,8 @@ python -m compileall src
 最新已经代码落地、但仍需要通过干净回测观察的项目，见：
 
 - `docs/work_log.md`
-- `docs/parameter.md`
+- `docs/check_list.md`
+- `docs/backtest_outcome.md`
 
 当前尤其要关注：
 
@@ -318,7 +325,9 @@ python -m compileall src
 - 信号收集员是否只输出 `signal_collection_contract`，没有混入研究结论、score/rank、手数或交易动作。
 - `decision_memory_retrieval` 是否没有让空历史挡住真实有效历史。
 - `final_action_contract` 是否仍是策略交易唯一事实来源，交易员、审计员、复盘员和研究员是否没有回退到投资组合经理草稿或研究库。
-- learned vs unlearned、资金利用率、收益曲线和回撤是否改善。
+- 反向日是否只退出旧方向，后续反向开仓是否使用新 FAC、重新 Rank 并建立新学习周期。
+- 普通持仓 -2%/-4% 亏损复核、探索仓盈利完全回吐退出和 real/scale 既有减仓复核是否按各自口径命中。
+- learned vs unlearned、各 Rank 的手续费后 `return_on_notional`、资金利用率、收益曲线、连续亏损和峰值回撤是否改善。
 
 ## 十三、设计边界
 

@@ -36,7 +36,7 @@ action_name -> canonical_action_family -> action_value_lane / learning_lane -> a
 | `open_probe` / `open_real` | `open_add_new_risk` | `open` | `positive_candidate_open` | `negative_revalidate` / `tail_loss_protect` | 探针或真实预算开仓都属于新增风险 family。 |
 | `add_or_open` / `new_or_adjust` | `open_add_new_risk` | 默认 `open`；有 `current_lots -> target_lots` 时可归 `add` | `positive_candidate_open` | `negative_revalidate` / `tail_loss_protect` | 当前报错场景属于该类：业务含义是 open/add family，不能被 PG 当成非 open family。 |
 | `add` / `scale` / `increase` / `increase_position` | `open_add_new_risk` | `add` | `positive_candidate_open` | `negative_revalidate` / `tail_loss_protect` | 同方向扩大风险暴露，学习上仍归 open/add 新增风险 family。 |
-| `reverse` | `open_add_new_risk` | `open` | `positive_candidate_open` | `negative_revalidate` / `tail_loss_protect` | 反手必须由 PM 合约明确先退出旧方向再授权新风险；action-value 只表达新风险 family 学习，不自动生成反手执行。 |
+| `reverse` | `open_add_new_risk` | `open` | `positive_candidate_open` | `negative_revalidate` / `tail_loss_protect` | `reverse`只保留为新风险学习family。当前原子决策必须先由PM签`exit/target_lots=0`结束旧方向；仓位归零后的后续反向机会使用新FAC并重新rank，不得在同一recommendation中自动生成反向开仓。 |
 | `reduce` / `trim` / `decrease` / `reduce_position` / `scale_down` / `reduce_only` | `reduce_exit` | `reduce` | `positive_candidate_exit` | `negative_revalidate` / `tail_loss_protect` | 评价降低已有风险暴露是否有效，不支持 open/add。 |
 | `reduce_or_exit` / `close_or_reduce` / `decrease_position` | `reduce_exit` | `reduce` 或 `exit` | `positive_candidate_exit` | `negative_revalidate` / `tail_loss_protect` | 具体是减仓还是退出由当日 `current_lots -> target_lots` 与 PM 合约决定。 |
 | `exit` / `close` / `close_long` / `close_short` / `close_position` | `reduce_exit` | `exit` | `positive_candidate_exit` | `negative_revalidate` / `tail_loss_protect` | 标准退出或平仓学习。 |

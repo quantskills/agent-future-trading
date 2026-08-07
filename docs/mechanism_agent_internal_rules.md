@@ -1,6 +1,6 @@
 # AgentQuant 智能体内部转换机制
 
-更新时间：2026-06-27
+更新时间：2026-08-07
 
 本文定义 AgentQuant 各智能体内部如何把输入转换成正式输出。`mechanism_multiagents.md` 规定“谁负责什么、上下游怎么走”；本文规定“智能体内部怎样转，哪些状态必须落到什么输出”。本文不新增交易字段，不替代 `matrix_field_semantics.md`，不改变固定工作流。
 
@@ -206,6 +206,8 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 商品差异化分析协议固定为：三类分析师通过 `src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 读取 `src/config/product_price_behavior_profiles.yaml`。静态 profile 提供冷启动品种分析框架并进入提示词，LLM 返回后再由确定性工具核对 profile 的支持、冲突、缺失和确认要求。三类分析师共同使用动态学习完善 LLM 提示词并在 LLM 返回后校对信号；技术面分析师额外使用经过验证的 contextual rule calibration，对当前产品、短周期和初始 market_regime 对应的技术指标参数执行有界校准。该校准只改变技术分析内部参数，不直接生成方向、机会状态或交易权限。学习记录必须早于当前交易日，不在回测中改写 YAML，也不能单独创造交易机会。
 
 三类分析师与 Researcher 的 LLM provider、model、reasoning effort 只服从主配置 `llm`，base URL 和 API key 环境变量名只服从 `src/llm/provider.py` 的 Provider 注册；智能体不得维护私有模型路由、硬编码模型名或第二套 API 配置。切换主配置后，四个 LLM 使用方必须共同切换；实际 provider/model 只写入既有 config 运行元数据和非敏感路由审计，不得进入 AEC、SCC、分析师报告或 Researcher 学习 payload。
+
+当前唯一启用路由为 `DeepSeek / deepseek-v4-pro`，开启思考并请求 `reasoning_effort=medium`；DeepSeek 官方在思考模式下将 `medium` 映射为实际 `high`。`CodexOpenAI / gpt-5.6-sol` 的完整主配置块仅作为停用接口保留，不被任何当前智能体私自选用。
 
 基本面和新闻数据不要求每个产品每日都有新增记录。存在可用历史记录时，Finoview只按唯一factor catalog登记的频率、freshness和正式交易日发布滞后选择最近可见事实，新闻只使用与当前产品产业链相关的截止点内记录，并显式标注时效和真实相关度；确无可用记录时，生成合法、无交易权限、可追溯的 `no_opportunity` 证据，禁止伪造方向、催化或缺失数据。
 
@@ -511,7 +513,7 @@ weak-conflict候选和同品种、同方向、同setup、同canonical trigger的
 | 持仓盈利但回吐风险升高 | `reduce` 或保护性 `exit` |
 | 持仓亏损且失效条件成立 | `exit` |
 | 持仓亏损但同向证据仍强、失效边界未触发 | `hold` 或部分 `reduce`，必须写明再验证理由 |
-| 反向证据成立且风险允许 | 先 `exit`，再按新开仓规则判断是否反手 |
+| 反向证据成立且风险允许 | 当前原子决策只签 `exit/target_lots=0`；仓位归零后的后续反向机会使用新 FAC 并重新 Rank |
 | 换月、强平、临近交割 | 运营或风险事件，不写成 alpha 开仓学习 |
 
 持仓处理不能被新开仓规则误杀。开仓、持仓、加仓、减仓、退出必须分不同处理通道判断。
@@ -527,7 +529,7 @@ weak-conflict候选和同品种、同方向、同setup、同canonical trigger的
 | 同方向且 `abs(target_lots) > abs(current_lots)` | `add` 或 `scale` |
 | 同方向且 `abs(target_lots) < abs(current_lots)` | `reduce` |
 | `target_lots == 0` 且当前有仓 | `exit` |
-| 目标方向反转 | 先 `exit`，再按新开仓规则决定是否反手 |
+| 目标方向反转 | 当前 recommendation 只允许 `exit`；不得同时开反向新仓 |
 
 `final_action_contract` 必须同时写清 `current_lots`、`target_lots`、`lots_delta`、`target_position_ratio`、`final_action`、`reason_codes`、执行触发字段和审计所需资金理由。`lots_delta` 必须等于 `target_lots - current_lots`。
 
@@ -643,7 +645,7 @@ PM 不能：
 |---|---|---|
 | `final_action=wait/hold` 且 `lots_delta=0` | 不下单 | no trade fact |
 | `requires_intraday_confirmation=true` | 只监控触发；触发后按合约执行，未触发不成交 | trigger checked / executed or not triggered |
-| `trigger_confirmation_adjustment=stronger/strict` | `breakout/pullback/vwap_confirmed`原触发后，stronger 等待下一根完整15分钟线，strict 等待连续两根完整15分钟线；每根必须保持对应边界/VWAP且整段相对量能合格，失败后可等待新的完整序列 | executed or continue waiting / final not triggered |
+| `trigger_confirmation_adjustment=stronger_confirmation_required/strict_confirmation_required` | `breakout/pullback/vwap_confirmed`原触发后，stronger等待下一根完整15分钟线，strict等待连续两根完整15分钟线；每根必须保持对应边界/VWAP且整段相对量能合格，失败后可等待新的完整序列 | executed or continue waiting / final not triggered |
 | `can_execute_without_intraday_trigger=true` | 不再复判15分钟触发，按合约使用合法1分钟线直接执行 | execution_result；`trigger_checked=false` |
 | 首次成交前先命中canonical `invalidation_level` | 当前FAC永久作废，不改`target_lots` | `fac_invalidated_before_entry`，当日不成交 |
 | 首次成交前超过`valid_until` | 当前FAC永久到期 | `fac_expired_before_entry`，当日不成交 |
@@ -654,7 +656,7 @@ PM 不能：
 
 策略Trader不读取`position_invalidation_level/ATR/exit_hint`生成退出，不运行第二套策略退出判断。成交后的持仓失效、技术反转和基本面中期反向由下一交易日PM结合原开仓FAC形成唯一`hold/reduce/exit`；forced-risk等运营路径保持独立。
 
-成交后退场链固定为：technical确定性原始ATR14与LLM结构失效价随AEC进入唯一SCC，PM只从已验证SCC重建内部证据，分别取得同方向结构位、方向无关ATR和同方向fundamental期限/中期方向。次日PM追溯原开仓FAC，以合法结构位或`真实开仓价±ATR×当前真实命中的default/sector倍数`任一触发签exit；明确技术反转签exit，基本面中期反向签reduce，期限到达只触发复评。`exit_hint`只解释，期限不冒充止损；现有template/setup覆盖只在setup键精确匹配时生效。
+成交后退场链固定为：technical确定性原始ATR14与LLM结构失效价随AEC进入唯一SCC，PM只从已验证SCC重建内部证据，分别取得同方向结构位、方向无关ATR和同方向fundamental期限/中期方向。次日PM追溯原开仓FAC，以合法结构位或`真实开仓价±ATR×当前真实命中的default/sector倍数`任一触发签exit。`position_pnl_ratio`优先使用完整周期手续费后`cycle_return_on_notional`：普通持仓达到-2%且复核失败时减仓50%，达到-4%时退出；新仓前两个交易日保持独立的-0.5%减仓、-2%退出复核。完整周期收益峰值为正、当前`cycle_return_on_notional<=0`且复核失败时，探索仓直接exit，real/scale保持既有减仓复核路径。明确技术反转签exit，基本面中期反向签reduce，期限到达只触发复评。`exit_hint`只解释，期限不冒充止损；现有template/setup覆盖只在setup键精确匹配时生效。
 
 策略reduce/exit虽然是即时优先动作，仍必须取得合法1分钟成交基准。真实非异常分钟空结果只形成未成交事实和零transaction，禁止回退盘前参考价伪造成交；分钟接口异常继续hard fail。Trader仍不读取持仓失效字段、不重新决定退场，也不生成同日第二个策略动作。
 
@@ -817,7 +819,7 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 | 未交易/错过机会研究 | 分析师校准；PM 经工具消费 | 判断未入选、未触发、错过机会是否应提高未来 rank 或触发敏感度 | 只能影响未来，不把影子收益写成真实收益 |
 | neutral 观察研究 | 分析师 | 区分合理中性、证据缺口、错过机会风险、观察触发条件 | 不能把 neutral 直接变成交易动作 |
 | 执行学习 | PM 写入未来执行字段后由 Trader 执行 | 改善触发、成交方式、追价、未成交处理和执行 profile | Trader 不能直接读研究库 |
-| 持仓/退出学习 | PM 经 `decision_memory_retrieval` | 改善 hold、reduce、exit、保护盈利、止损和反手判断 | 历史 hold/exit 不能直接证明新开仓可行 |
+| 持仓/退出学习 | PM 经 `decision_memory_retrieval` | 改善 hold、reduce、exit、保护盈利和止损判断 | 历史 hold/exit 不能直接证明反向新开仓可行；反向新风险仍需新 FAC 与 Rank |
 | 排序偏好研究 `opportunity_ranking_preference` | 目前仅供 Researcher 与开发评估诊断；没有正式 PM 消费端 | 观察高低 rank、资金优先级与后续结果 | 不能声称已改变 PM rank；本次不新增消费链 |
 | 资金部署 / `research_position_feedback` | Researcher 与开发评估诊断 | 只在正式学习被 PM 实际消费后，记录其合约、执行和结算后果 | 未消费学习不强制反馈；反馈不能成为 rank、手数或交易输入 |
 | 融合归因研究 `evidence_fusion_attribution` | 目前仅供 Researcher 与开发评估诊断；没有正式分析师或 PM 消费端 | 记录融合处理的事后归因 | 不能把当日 AEC→SCC→PM 融合链写成该研究记录的消费闭环；本次不新增消费链 |

@@ -1,6 +1,6 @@
 # AgentQuant 多智能体运行机制
 
-更新时间：2026-07-10
+更新时间：2026-08-07
 
 本文是 AgentQuant 多智能体链路总纲，只定义启用智能体、阶段顺序、权限边界、事实入口总原则和文档分工。字段级生产/落盘/消费/审计矩阵不写在本文，避免和 `docs/matrix_chain_contract.md` 重复。
 全链路契约的可执行依据固定为 `docs/matrix_chain_contract.md`；contract coverage、pre-backtest failure fixture 和 daily PG audit 均按该矩阵执行。
@@ -37,10 +37,12 @@
 | action-value 动作 canonical 矩阵 | `docs/matrix_action_canonical.md` |
 | 期货交易业务机制 | `docs/mechanism_future_trade.md` |
 | 研究、复盘、记忆、学习边界 | `docs/mechanism_research.md` |
+| 指定实验回测事实与修改前后评价 | `docs/backtest_outcome.md` |
+| 仍待自然真实回测验收的已实现机制 | `docs/check_list.md` |
 
 ## 2. 系统目标与底线
 
-AgentQuant 是多智能体期货交易系统。LLM 只用于分析师和研究员形成结构化预测证据与结构化研究成果；LLM 不直接决定方向、手数、资金部署、审计结论、成交、结算和最终交易合约。
+AgentQuant 是以发现并扩大手续费后alpha、形成稳定正净收益为核心目标的多智能体期货交易系统。LLM 只用于分析师和研究员形成结构化预测证据与结构化研究成果；LLM 不直接决定方向、手数、资金部署、审计结论、成交、结算和最终交易合约。限制交易或机械保守不是独立优化目标。
 
 系统底线：
 
@@ -97,9 +99,9 @@ protocol_governor
 | `fundamental` | 截止当前交易日可见的库存、仓单、基差、供需、产业数据，基本面校准研究、商品差异化 profile、主 `llm` 配置 | 唯一正式 `action_evidence_contract`；无当日新增数据时使用最近有效数据并标注时效，确无数据时输出合法 `no_opportunity` 证据 | 是 | 私有模型路由；伪造缺失数据；输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
 | `commodity_news` | 截止当前交易日可见的新闻、事件、政策、舆情，新闻校准研究、商品差异化 profile、主 `llm` 配置 | 唯一正式 `action_evidence_contract`；无当日新事件时如实表达无当前催化，确无可用数据时输出合法 `no_opportunity` 证据 | 是 | 私有模型路由；伪造新闻催化；输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
 | `signal_collector` | Workflow已保存、带真实 `signal_record_id` 且共享校验通过的三份AEC | 唯一 `signal_collection_contract` | 否 | 生成AnalystSignal或ID、读取研究库、输出 score/rank、手数、交易动作、`final_action_contract` | PM |
-| `portfolio_manager` | SCC、账户、持仓、合约信息、配置、PM 工具输出、有效学习 | 第 6 步原子返回唯一 `FuturesRecommendation`；最终合约与两个最终检查位于 `signal_snapshot` | 否 | 调 LLM、重建 SCC、Step1–5 输出中间对象、输出第二套交易计划 | Auditor；审计通过后由 workflow 编排层交给 Trader |
+| `portfolio_manager` | SCC、账户、持仓、合约信息、配置、PM 工具输出、有效学习 | 第 6 步原子返回唯一 `FuturesRecommendation`；最终合约与两个最终检查位于 `signal_snapshot`；反向目标当前原子决策只签exit | 否 | 调 LLM、重建 SCC、Step1–5 输出中间对象、输出第二套交易计划、同一recommendation同时平旧并开反向新仓 | Auditor；审计通过后由 workflow 编排层交给 Trader |
 | `auditor` | 完整FAC；权益、保证金、保证金比例、`risk_status`；持仓；SCC数据质量摘要；具体合约及失效边界；主配置硬上限 | `approve` / `approve_with_warning` / `block`、完整审计 payload、hard/soft risk reasons | 否 | 改方向、改手数、改FAC、新建合约；消费研究记忆；复审 PM 学习、融合、rank、预算和 sizing | Trader |
-| `trader` | 审计通过的 PM 合约、盘中行情、执行配置 | 成交/未成交、触发事实、执行结果 | 否 | 读研究库或 action-value 下单、改 PM 方向、改目标手数、放宽触发 | Accountant、Reviewer |
+| `trader` | 审计通过的 PM 合约、盘中行情、执行配置 | 成交/未成交、触发事实、执行结果 | 否 | 读研究库或 action-value 下单、改 PM 方向、改目标手数、放宽触发、把防御性两步反转翻译变成当前策略反向开仓路径 | Accountant、Reviewer |
 | `accountant` | 成交、持仓、结算价、费用、保证金率、合约乘数 | settlement、PnL、保证金、权益、持仓状态 | 否 | 用 LLM、学习、复盘改账；写交易动作 | Reviewer |
 | `reviewer` | recommendation、审计、执行结果、成交、结算、账户/持仓和阶段状态 | Phase4 事实复盘、交易日志、事实归因、研究输入材料 | 否 | 下单、调仓、写最终 action-value、重新裁决合约合法性或账户硬风险、触发 Researcher LLM | Researcher |
 | `researcher` | Phase4与结算完成后，通过正式ID链验证的AEC、SCC、FAC、审计、执行、成交和结算事实 | 可为空的验证后结构化研究、action-value、profile、state、分析师校准信息 | 受限可调 | 保存原始模型内容；改当天合约、成交、结算、PnL、交易员权限；强制每笔交易学习 | 分析师正式校准检索、PM `decision_memory_retrieval` |

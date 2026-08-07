@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
+
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = SRC_ROOT.parent
@@ -122,7 +124,7 @@ class ProtocolPreflightCliTest(unittest.TestCase):
                 {
                     "deepseek": {
                         "thinking": {"enabled": True},
-                        "reasoning_effort": "high",
+                        "reasoning_effort": "medium",
                     }
                 },
             ),
@@ -147,7 +149,7 @@ class ProtocolPreflightCliTest(unittest.TestCase):
             self.assertTrue(result.passed, result.to_dict())
             get_model.assert_not_called()
 
-    def test_deepseek_v4_pro_high_thinking_route_is_canonical(self):
+    def test_deepseek_v4_pro_medium_thinking_route_is_canonical(self):
         raw_config = {
             "provider": "DeepSeek",
             "model": "deepseek-v4-pro",
@@ -155,7 +157,7 @@ class ProtocolPreflightCliTest(unittest.TestCase):
             "structured_output_method": "json_mode",
             "deepseek": {
                 "thinking": {"enabled": True},
-                "reasoning_effort": "high",
+                "reasoning_effort": "medium",
             },
         }
         config = LLMConfig(**raw_config)
@@ -164,7 +166,7 @@ class ProtocolPreflightCliTest(unittest.TestCase):
             _build_provider_kwargs(Provider.DEEPSEEK, config),
             {
                 "extra_body": {"thinking": {"type": "enabled"}},
-                "reasoning_effort": "high",
+                "reasoning_effort": "medium",
             },
         )
         self.assertEqual(
@@ -174,9 +176,20 @@ class ProtocolPreflightCliTest(unittest.TestCase):
                 "model": "deepseek-v4-pro",
                 "base_url": "https://api.deepseek.com",
                 "api_key_env": "DEEPSEEK_API_KEY",
-                "reasoning_effort": "high",
+                "reasoning_effort": "medium",
             },
         )
+
+    def test_dev_config_activates_deepseek_v4_pro_medium_thinking(self):
+        with (SRC_ROOT / "config" / "dev.yaml").open("r", encoding="utf-8") as fh:
+            llm_config = yaml.safe_load(fh)["llm"]
+
+        self.assertEqual(llm_config["provider"], "DeepSeek")
+        self.assertEqual(llm_config["model"], "deepseek-v4-pro")
+        self.assertIsNone(llm_config["temperature"])
+        self.assertEqual(llm_config["structured_output_method"], "json_mode")
+        self.assertTrue(llm_config["deepseek"]["thinking"]["enabled"])
+        self.assertEqual(llm_config["deepseek"]["reasoning_effort"], "medium")
 
     def test_pre_backtest_runner_has_no_llm_auth_option(self):
         argv = ["pre_backtest_test.py", "--config", "config/dev.yaml", "--local-db"]

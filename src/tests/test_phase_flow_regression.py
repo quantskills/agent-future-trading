@@ -14432,7 +14432,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         )
         self.assertFalse(_is_lifecycle_exit_required_reason(["cooling_period"]))
 
-    def test_complete_cycle_profit_giveback_requires_current_revalidation(self):
+    def test_exploration_probe_complete_cycle_profit_giveback_exits(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -14462,6 +14462,55 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                 "expected_horizon_days": 5,
                 "cycle_return_on_notional": -0.001,
                 "cycle_peak_return_on_notional": 0.025,
+                "opening_authority_type": "exploration_probe",
+                "position_invalidation_level": 90.0,
+                "opening_execution_price": 100.0,
+            },
+            current_price=99.0,
+        )
+
+        self.assertEqual(ratio, 0.0)
+        self.assertIn("profit_giveback_revalidation_failed", reasons)
+        detail = diagnostics["holding_rebalance_control"]
+        self.assertTrue(detail["profit_giveback_revalidation_due"])
+        self.assertTrue(detail["profit_giveback_revalidation_failed"])
+        self.assertEqual(detail["opening_authority_type"], "exploration_probe")
+        self.assertEqual(
+            detail["decision"],
+            "exit_probe_failed_profit_giveback_revalidation",
+        )
+
+    def test_real_position_complete_cycle_profit_giveback_keeps_existing_reduction(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=-500.0,
+        )
+        ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-06",
+            position_ratio=0.10,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.40),
+                AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.20, "confidence": 0.40},
+            short_scores={"score": 0.10, "confidence": 0.30},
+            market_confirmation={"confirmation_score": 0.35},
+            full_config={},
+            fusion_context={},
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={
+                "recommendation_id": "open-real-profit-giveback",
+                "held_trading_days": 3,
+                "expected_horizon_days": 5,
+                "cycle_return_on_notional": -0.001,
+                "cycle_peak_return_on_notional": 0.025,
+                "opening_authority_type": "real_budget_entry",
                 "position_invalidation_level": 90.0,
                 "opening_execution_price": 100.0,
             },
@@ -14471,12 +14520,58 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(ratio, 0.05)
         self.assertIn("profit_giveback_revalidation_failed", reasons)
         detail = diagnostics["holding_rebalance_control"]
-        self.assertTrue(detail["profit_giveback_revalidation_due"])
-        self.assertTrue(detail["profit_giveback_revalidation_failed"])
+        self.assertEqual(detail["opening_authority_type"], "real_budget_entry")
         self.assertEqual(
             detail["decision"],
             "reduce_failed_profit_giveback_revalidation",
         )
+
+    def test_probe_profit_giveback_with_current_revalidation_does_not_exit(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=-500.0,
+        )
+        ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-06",
+            position_ratio=0.10,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.BULLISH, confidence=0.80),
+                AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.80, "confidence": 0.80},
+            short_scores={"score": 0.10, "confidence": 0.30},
+            market_confirmation={"confirmation_score": 0.80},
+            full_config={},
+            fusion_context={},
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={
+                "recommendation_id": "open-probe-revalidated",
+                "held_trading_days": 3,
+                "expected_horizon_days": 5,
+                "cycle_return_on_notional": -0.001,
+                "cycle_peak_return_on_notional": 0.025,
+                "opening_authority_type": "exploration_probe",
+                "position_invalidation_level": 90.0,
+                "opening_execution_price": 100.0,
+            },
+            current_price=99.0,
+        )
+
+        self.assertNotIn("profit_giveback_revalidation_failed", reasons)
+        detail = diagnostics["holding_rebalance_control"]
+        self.assertTrue(detail["profit_giveback_revalidation_due"])
+        self.assertFalse(detail["profit_giveback_revalidation_failed"])
+        self.assertNotEqual(
+            detail.get("decision"),
+            "exit_probe_failed_profit_giveback_revalidation",
+        )
+        self.assertAlmostEqual(ratio, 0.10)
 
     def test_new_losing_position_without_same_day_revalidation_exits_at_two_percent(self):
         position = SimpleNamespace(
