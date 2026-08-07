@@ -85,7 +85,7 @@ LLM 调用原则：
 - 只有技术面分析师、基本面分析师、期货新闻面分析师和研究员可以调用 LLM。
 - 信号收集员、投资组合经理、审计员、交易员、会计师、复盘员和协议管理员不调用 LLM。
 - 规划员是封存开发组件，不属于当前启用工作流。
-- 当前主 LLM 路由为 `DeepSeek / deepseek-v4-pro`，在 `src/config/dev.yaml` 的唯一启用 `llm` 段中开启思考并请求 `reasoning_effort=medium`；DeepSeek 官方会把思考模式的 `medium` 映射为实际 `high`。`CodexOpenAI / gpt-5.6-sol` 完整配置块继续保留为停用路由。API Key 放在 `.env`，不要写入配置文件。
+- 当前主 LLM 路由为 `CodexOpenAI / gpt-5.6-sol`，在 `src/config/dev.yaml` 的唯一启用 `llm` 段中明确使用 `reasoning_effort=medium`。`DeepSeek / deepseek-v4-pro` 思考模式完整配置块继续保留为停用路由。API Key 放在 `.env`，不要写入配置文件。
 - 分析师和研究员的 LLM 输出必须落到结构化字段；自由文本不能成为交易权限、手数依据、审计依据、结算依据或下游直接消费的研究结论。
 
 更多细节见：
@@ -140,7 +140,7 @@ AgentQuant 的学习目标不是写死更多交易规则，而是让智能体从
 - execution 学习必须先由投资组合经理写入未来 `final_action_contract.execution_profile/entry_trigger`，交易员不直接读取研究 action-value。
 - 分析师只消费本专业校准类研究，不获得交易授权。
 - PM 的新增风险资金层固定由当日证据先行：probe 为 0.8%～1.5%，real 为 3%～6%，scale 为 6%～12%；成熟学习只能在当日入场前提成立后参与 Rank 和放大。
-- 普通持仓亏损复核读取 `position_pnl_ratio`：达到 -2% 且同向证据复核失败时减仓 50%，达到 -4% 时退出；完整周期收益峰值为正、当前手续费后 `cycle_return_on_notional<=0` 且复核失败时，探索仓直接退出，real/scale 保持既有减仓复核路径。
+- 普通持仓亏损复核读取 `position_pnl_ratio`：达到 -2% 且同向证据复核失败时减仓 50%，达到 -4% 时退出；完整周期收益峰值为正、当前手续费后 `cycle_return_on_notional<=0` 且复核失败时，所有仓位类型均保持既有减仓复核路径。
 
 更多细节见：
 

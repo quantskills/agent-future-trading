@@ -52,7 +52,7 @@
 
 ## Researcher 正式学习身份
 
-- [ ] 【未验收：待新实验回测】原开仓 FAC 完整周期收益峰值为正、当前 `cycle_return_on_notional<=0` 且当日同向证据再验证失败时，`opening_authority_type=exploration_probe` 的持仓必须通过现有 PM 生命周期路径全部退出并记录 `reason=profit_giveback_revalidation_failed`；real/scale 持仓保持既有减仓复核路径。
+- [ ] 【未验收：待新实验回测】原开仓 FAC 完整周期收益峰值为正、当前 `cycle_return_on_notional<=0` 且当日同向证据再验证失败时，所有仓位类型必须通过现有 PM 生命周期路径减仓并记录 `reason=profit_giveback_revalidation_failed`。
 - [ ] 【未验收：待新实验回测】原开仓 FAC 完整周期收益峰值为正、当前 `cycle_return_on_notional<=0` 但当日同向证据再验证通过时，不得触发 `profit_giveback_revalidation_failed` 退出或减仓。
 - [ ] 【未验收：缺 real/scale 持仓样本】real/scale 开仓 FAC 不得被 Trader 按 probe 期限规则识别。
 - [ ] 【部分验收：已有完整 episode 与后续学习检索，缺同作用域精确命中和 fallback 对照】完整 episode 生成的正式 action-value 必须按同一完整 FAC 身份被 PM 精确命中。

@@ -180,16 +180,15 @@ class ProtocolPreflightCliTest(unittest.TestCase):
             },
         )
 
-    def test_dev_config_activates_deepseek_v4_pro_medium_thinking(self):
+    def test_dev_config_activates_gpt_5_6_sol_medium_reasoning(self):
         with (SRC_ROOT / "config" / "dev.yaml").open("r", encoding="utf-8") as fh:
             llm_config = yaml.safe_load(fh)["llm"]
 
-        self.assertEqual(llm_config["provider"], "DeepSeek")
-        self.assertEqual(llm_config["model"], "deepseek-v4-pro")
+        self.assertEqual(llm_config["provider"], "CodexOpenAI")
+        self.assertEqual(llm_config["model"], "gpt-5.6-sol")
         self.assertIsNone(llm_config["temperature"])
         self.assertEqual(llm_config["structured_output_method"], "json_mode")
-        self.assertTrue(llm_config["deepseek"]["thinking"]["enabled"])
-        self.assertEqual(llm_config["deepseek"]["reasoning_effort"], "medium")
+        self.assertEqual(llm_config["codex_openai"]["reasoning_effort"], "medium")
 
     def test_pre_backtest_runner_has_no_llm_auth_option(self):
         argv = ["pre_backtest_test.py", "--config", "config/dev.yaml", "--local-db"]

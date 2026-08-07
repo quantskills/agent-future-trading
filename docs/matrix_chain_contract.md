@@ -58,7 +58,7 @@ Researcher 单次运行中的学习 SQL、`researcher_learning_completed`、外�
 
 Phase1 数据解释固定为一套事实：PandaAI `basis_ratio` 按百分数、`ls_ratio` 按 50 中性、合约日指标 `ratio` 按 0 中性归一化；技术分析师只登记并接收实际进入提示词的指标，布林带使用当次已校准 `bollinger_std`；Finoview 的频率、freshness、正式交易日发布滞后和可见行只来自同一 factor catalog，`tradeDate` 不是发布时间；本地基差只在同一事实日匹配现货与期货并按 `(spot-futures)/spot` 计算；新闻必须先通过品种产业链相关性筛选。Phase2 分钟接口异常是数据链 hard fail，不能写成合法 `intraday_no_valid_bar`；只有真实非异常空结果才允许形成该未成交事实。
 
-新增风险的顺序固定为：当日 SCC/AEC 当前证据先独立通过既有入场前提，正式学习才可继续影响唯一 Rank 和既有 0.8%～1.5% 差异化 probe；未解决的主导反对证据不得签开仓 FAC。Trader 仍只执行该 FAC：`stronger_confirmation_required` 追加一根完整15分钟确认，`strict_confirmation_required` 追加连续两根完整15分钟确认。持仓端必须同时保留单日硬风险收益和原开仓 FAC 完整周期手续费后累计收益，原开仓 `opening_authority_type` 沿 hold/reduce/exit 生命周期传递。原开仓完整周期收益峰值为正、当前手续费后 `cycle_return_on_notional<=0` 且当日同向证据再验证失败时，`exploration_probe` 必须由 PM 在唯一 FAC 中签署全部退出；real/scale 保持既有减仓复核路径，Trader 不取得盘中自主退出权。Researcher 的 candidate/monitoring 假设只做未来同作用域影子验证，只有 validated 才可作为下一交易日分析师先验，不得形成第二条 PM、Trader 或退出路径。
+新增风险的顺序固定为：当日 SCC/AEC 当前证据先独立通过既有入场前提，正式学习才可继续影响唯一 Rank 和既有 0.8%～1.5% 差异化 probe；未解决的主导反对证据不得签开仓 FAC。Trader 仍只执行该 FAC：`stronger_confirmation_required` 追加一根完整15分钟确认，`strict_confirmation_required` 追加连续两根完整15分钟确认。持仓端必须同时保留单日硬风险收益和原开仓 FAC 完整周期手续费后累计收益，原开仓 `opening_authority_type` 沿 hold/reduce/exit 生命周期传递。原开仓完整周期收益峰值为正、当前手续费后 `cycle_return_on_notional<=0` 且当日同向证据再验证失败时，所有仓位类型均保持既有减仓复核路径，Trader 不取得盘中自主退出权。Researcher 的 candidate/monitoring 假设只做未来同作用域影子验证，只有 validated 才可作为下一交易日分析师先验，不得形成第二条 PM、Trader 或退出路径。
 
 | 契约 / 字段群 | 生产者 / 阶段 | 输入 | 输出 | artifact / DB 落点 | 下游消费者 | 审计点 | hard fail 条件 | diagnostics 条件 |
 |---|---|---|---|---|---|---|---|---|

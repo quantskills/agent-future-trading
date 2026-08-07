@@ -150,7 +150,7 @@ PM 当前持仓生命周期口径固定如下：
 
 - `position_pnl_ratio` 优先读取原开仓 FAC 完整周期手续费后 `cycle_return_on_notional`。普通持仓达到 -2% 且同向证据再验证失败时减仓 50%，达到 -4% 时退出；再验证通过时不得触发对应普通亏损减仓或退出。
 - 新仓前两个交易日复核保持独立口径：达到 -0.5% 且复核失败时减仓 50%，达到 -2% 时退出。
-- 原开仓 FAC 完整周期收益峰值为正、当前 `cycle_return_on_notional<=0` 且同向证据再验证失败时，`opening_authority_type=exploration_probe` 必须由 PM 在唯一 FAC 中签署全部退出；real/scale 保持既有减仓复核路径。
+- 原开仓 FAC 完整周期收益峰值为正、当前 `cycle_return_on_notional<=0` 且同向证据再验证失败时，所有仓位类型均保持既有减仓复核路径。
 - 反向目标在当前原子决策中必须强制 `target_lots=0` 并先退出旧方向。仓位归零后的后续反向机会使用新的当日 FAC、重新进入 Rank 与资金部署并建立新学习周期；不得在同一 recommendation 中同时平旧和开反向新仓。
 
 ### 6.4 auditor

@@ -9940,9 +9940,6 @@ def _apply_holding_rebalance_control(
     profit_giveback_revalidation_failed = bool(
         profit_giveback_revalidation_due and not loss_revalidated
     )
-    opening_authority_type = str(
-        opening_context.get("opening_authority_type") or ""
-    ).strip().lower()
     trend_position = (
         lifecycle_enabled
         and position_pnl_ratio >= float(lifecycle_config.get("trend_min_profit_ratio", 0.03))
@@ -10211,7 +10208,6 @@ def _apply_holding_rebalance_control(
         "profit_giveback_revalidation_failed": bool(
             profit_giveback_revalidation_failed
         ),
-        "opening_authority_type": opening_authority_type or None,
     })
 
     if opening_position_invalidation_breached:
@@ -10246,16 +10242,6 @@ def _apply_holding_rebalance_control(
         return reduced_ratio, reasons, notes, diagnostics
 
     if profit_giveback_revalidation_failed:
-        if opening_authority_type == "exploration_probe":
-            reasons.append("profit_giveback_revalidation_failed")
-            notes.append(
-                f"{ticker} {current_side} exploration probe positive complete-cycle return "
-                "was fully given back without sufficient current revalidation; "
-                f"exiting ratio {current_ratio:.2%}->0.00%."
-            )
-            detail["decision"] = "exit_probe_failed_profit_giveback_revalidation"
-            detail["final_target_ratio"] = 0.0
-            return 0.0, reasons, notes, diagnostics
         reduction_multiplier = max(
             0.0,
             min(

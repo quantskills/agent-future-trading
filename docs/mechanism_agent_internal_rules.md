@@ -207,7 +207,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 三类分析师与 Researcher 的 LLM provider、model、reasoning effort 只服从主配置 `llm`，base URL 和 API key 环境变量名只服从 `src/llm/provider.py` 的 Provider 注册；智能体不得维护私有模型路由、硬编码模型名或第二套 API 配置。切换主配置后，四个 LLM 使用方必须共同切换；实际 provider/model 只写入既有 config 运行元数据和非敏感路由审计，不得进入 AEC、SCC、分析师报告或 Researcher 学习 payload。
 
-当前唯一启用路由为 `DeepSeek / deepseek-v4-pro`，开启思考并请求 `reasoning_effort=medium`；DeepSeek 官方在思考模式下将 `medium` 映射为实际 `high`。`CodexOpenAI / gpt-5.6-sol` 的完整主配置块仅作为停用接口保留，不被任何当前智能体私自选用。
+当前唯一启用路由为 `CodexOpenAI / gpt-5.6-sol`，明确使用 `reasoning_effort=medium`。`DeepSeek / deepseek-v4-pro` 思考模式的完整主配置块仅作为停用接口保留，不被任何当前智能体私自选用。
 
 基本面和新闻数据不要求每个产品每日都有新增记录。存在可用历史记录时，Finoview只按唯一factor catalog登记的频率、freshness和正式交易日发布滞后选择最近可见事实，新闻只使用与当前产品产业链相关的截止点内记录，并显式标注时效和真实相关度；确无可用记录时，生成合法、无交易权限、可追溯的 `no_opportunity` 证据，禁止伪造方向、催化或缺失数据。
 
@@ -656,7 +656,7 @@ PM 不能：
 
 策略Trader不读取`position_invalidation_level/ATR/exit_hint`生成退出，不运行第二套策略退出判断。成交后的持仓失效、技术反转和基本面中期反向由下一交易日PM结合原开仓FAC形成唯一`hold/reduce/exit`；forced-risk等运营路径保持独立。
 
-成交后退场链固定为：technical确定性原始ATR14与LLM结构失效价随AEC进入唯一SCC，PM只从已验证SCC重建内部证据，分别取得同方向结构位、方向无关ATR和同方向fundamental期限/中期方向。次日PM追溯原开仓FAC，以合法结构位或`真实开仓价±ATR×当前真实命中的default/sector倍数`任一触发签exit。`position_pnl_ratio`优先使用完整周期手续费后`cycle_return_on_notional`：普通持仓达到-2%且复核失败时减仓50%，达到-4%时退出；新仓前两个交易日保持独立的-0.5%减仓、-2%退出复核。完整周期收益峰值为正、当前`cycle_return_on_notional<=0`且复核失败时，探索仓直接exit，real/scale保持既有减仓复核路径。明确技术反转签exit，基本面中期反向签reduce，期限到达只触发复评。`exit_hint`只解释，期限不冒充止损；现有template/setup覆盖只在setup键精确匹配时生效。
+成交后退场链固定为：technical确定性原始ATR14与LLM结构失效价随AEC进入唯一SCC，PM只从已验证SCC重建内部证据，分别取得同方向结构位、方向无关ATR和同方向fundamental期限/中期方向。次日PM追溯原开仓FAC，以合法结构位或`真实开仓价±ATR×当前真实命中的default/sector倍数`任一触发签exit。`position_pnl_ratio`优先使用完整周期手续费后`cycle_return_on_notional`：普通持仓达到-2%且复核失败时减仓50%，达到-4%时退出；新仓前两个交易日保持独立的-0.5%减仓、-2%退出复核。完整周期收益峰值为正、当前`cycle_return_on_notional<=0`且复核失败时，所有仓位类型均保持既有减仓复核路径。明确技术反转签exit，基本面中期反向签reduce，期限到达只触发复评。`exit_hint`只解释，期限不冒充止损；现有template/setup覆盖只在setup键精确匹配时生效。
 
 策略reduce/exit虽然是即时优先动作，仍必须取得合法1分钟成交基准。真实非异常分钟空结果只形成未成交事实和零transaction，禁止回退盘前参考价伪造成交；分钟接口异常继续hard fail。Trader仍不读取持仓失效字段、不重新决定退场，也不生成同日第二个策略动作。
 

@@ -54,3 +54,9 @@
 （1）[探索仓完整周期盈利回吐退出] `portfolio_manager.py`保留既有“原开仓FAC完整周期收益峰值为正、当前手续费后`cycle_return_on_notional<=0`且当日同向证据再验证失败”的触发条件，仅按已沿生命周期传递的`opening_authority_type`区分处理：`exploration_probe`首次触发即由PM唯一FAC全部退出，real/scale继续走既有减仓复核路径；`test_phase_flow_regression.py`覆盖探索仓退出、real仓保持减仓及当日证据复核通过不退出。原因：七八月独立复测中SR探索空单连续三次触发并由11手逐级减至5手、2手、0手，证明探索仓减半路径延长了已失效Alpha的亏损暴露；本次不改变开仓、Rank、正向学习作用域、成熟Alpha放大、Trader权限或新仓亏损复核路径。
 
 （2）[主LLM切换至DeepSeek V4 Pro思考模式] `dev.yaml`将唯一启用的主`llm`配置切换为`DeepSeek / deepseek-v4-pro`，开启thinking并请求`reasoning_effort=medium`，完整保留停用的`CodexOpenAI / gpt-5.6-sol`配置；`test_protocol_preflight_cli.py`同步验证DeepSeek provider kwargs与非敏感路由元数据。原因：让技术面、基本面、期货新闻面分析师和Researcher通过现有统一LLM入口共同切换模型，不改变其他智能体权限、AEC→SCC→PM FAC交易链或失败即抛错边界。
+
+==========2026年08月08日==========
+
+（1）[完整撤销探索仓完整周期盈利回吐直接退出] 撤销8月7日第一项：`portfolio_manager.py`删除探索仓首次`profit_giveback_revalidation_failed`时直接全部退出的分支，并删除该分支新增的`opening_authority_type`读取及诊断记录，使持仓生命周期代码恢复至七八月复测版本；对应回归测试、机制契约、检查表和项目规则同步恢复减仓口径。原因：七八月复测中的SR样本在首次触发后的分批减仓比同价全部退出少亏约650元，该样本不支持将直接退出固化为全局收益优化规则。
+
+（2）[主LLM切回GPT-5.6 Sol中等推理] `dev.yaml`将唯一启用的主`llm`配置切回`CodexOpenAI / gpt-5.6-sol`并明确使用`reasoning_effort=medium`，完整保留停用的`DeepSeek / deepseek-v4-pro`思考模式配置；协议预检测试、README和智能体内部机制文档同步更新。原因：三类分析师和Researcher必须继续通过统一主配置共同切换模型，不改变其他智能体权限、AEC→SCC→PM FAC交易链或失败即抛错边界。
