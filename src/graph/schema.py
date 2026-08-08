@@ -1,12 +1,101 @@
+import math
 import operator
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing_extensions import Annotated, TypedDict
 
 from graph.constants import Signal
+
+
+class ForwardForecast(BaseModel):
+    """One testable analyst forecast at a fixed trading-day horizon."""
+
+    horizon_days: int = Field(description="Forecast horizon; one of 1, 3, 5, 10 trading days")
+    up_probability: float = Field(description="Probability of a positive forward return")
+    down_probability: float = Field(description="Probability of a negative forward return")
+    range_probability: float = Field(description="Probability of a range outcome")
+    expected_return: float = Field(description="Expected underlying return over the horizon")
+    expected_return_low: float = Field(description="Lower bound of the expected return interval")
+    expected_return_high: float = Field(description="Upper bound of the expected return interval")
+    key_drivers: List[str] = Field(default_factory=list, description="Evidence drivers for this horizon")
+    forecast_invalidation: str = Field(description="Observable condition that invalidates this forecast thesis")
+
+    @field_validator("horizon_days", mode="before")
+    @classmethod
+    def normalize_horizon(cls, value):
+        parsed = int(value)
+        if parsed not in {1, 3, 5, 10}:
+            raise ValueError("forward_forecast_horizon_invalid")
+        return parsed
+
+    @field_validator(
+        "up_probability",
+        "down_probability",
+        "range_probability",
+        "expected_return",
+        "expected_return_low",
+        "expected_return_high",
+        mode="before",
+    )
+    @classmethod
+    def normalize_finite_number(cls, value):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("forward_forecast_number_not_finite")
+        return parsed
+
+    @field_validator("key_drivers", mode="before")
+    @classmethod
+    def normalize_drivers(cls, value):
+        if value is None:
+            return []
+        return [str(item).strip() for item in (value if isinstance(value, list) else [value]) if str(item).strip()]
+
+    @field_validator("forecast_invalidation", mode="before")
+    @classmethod
+    def normalize_invalidation(cls, value):
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("forward_forecast_invalidation_missing")
+        return text
+
+    @model_validator(mode="after")
+    def validate_distribution_and_interval(self):
+        probabilities = (
+            self.up_probability,
+            self.down_probability,
+            self.range_probability,
+        )
+        if any(value < 0.0 or value > 1.0 for value in probabilities):
+            raise ValueError("forward_forecast_probability_out_of_range")
+        if abs(sum(probabilities) - 1.0) > 1e-4:
+            raise ValueError("forward_forecast_probability_sum_invalid")
+        if not self.expected_return_low <= self.expected_return <= self.expected_return_high:
+            raise ValueError("forward_forecast_return_interval_invalid")
+        if not self.key_drivers:
+            raise ValueError("forward_forecast_drivers_missing")
+        return self
+
+
+def _neutral_forward_forecast_grid() -> List[ForwardForecast]:
+    """Return an auditable zero-information grid for deterministic neutral artifacts."""
+    return [
+        ForwardForecast(
+            horizon_days=horizon,
+            up_probability=0.25,
+            down_probability=0.25,
+            range_probability=0.50,
+            expected_return=0.0,
+            expected_return_low=0.0,
+            expected_return_high=0.0,
+            key_drivers=["no_directional_forecast_evidence"],
+            forecast_invalidation="new_pre_open_evidence_changes_the_neutral_distribution",
+        )
+        for horizon in (1, 3, 5, 10)
+    ]
 
 
 class AnalystSignal(BaseModel):
@@ -33,6 +122,10 @@ class AnalystSignal(BaseModel):
     execution_horizon: str = Field(default="unknown", description="Trader execution horizon")
     validation_horizon: str = Field(default="unknown", description="Reviewer validation horizon")
     expected_horizon_days: int = Field(default=0, description="Expected signal horizon in trading days")
+    forward_forecasts: List[ForwardForecast] = Field(
+        default_factory=_neutral_forward_forecast_grid,
+        description="Testable 1/3/5/10-trading-day probability and return forecasts",
+    )
     market_regime: str = Field(default="unknown", description="Market regime used by the analyst")
     trend_stage: str = Field(default="unknown", description="Trend or price-stage classification")
     setup_type: str = Field(default="unknown", description="Canonical setup classification")
@@ -279,6 +372,14 @@ class AnalystSignal(BaseModel):
             return max(0, int(value or 0))
         except Exception:
             return 0
+
+    @model_validator(mode="after")
+    def validate_forward_forecast_grid(self):
+        if self.forward_forecasts:
+            horizons = [item.horizon_days for item in self.forward_forecasts]
+            if sorted(horizons) != [1, 3, 5, 10] or len(set(horizons)) != 4:
+                raise ValueError("forward_forecast_horizon_grid_invalid")
+        return self
 
     @field_validator("confidence", "business_quality_score", "factor_alignment_score", "data_coverage_score", mode="before")
     @classmethod

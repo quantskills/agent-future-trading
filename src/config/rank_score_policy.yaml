@@ -25,6 +25,9 @@ rank_score_policy:
     trigger_execution_quality:
       current_trigger_quality_weight: 0.08
 
+    calibrated_forecast_value:
+      rank_signal_weight: 0.45
+
     product_setup_trigger_history:
       alpha_profile_adjustment: 1.00
 

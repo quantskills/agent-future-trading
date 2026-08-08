@@ -49,6 +49,37 @@ from tools.common.execution_trigger_semantics import (
 
 
 class AgentContractFixtureTest(unittest.TestCase):
+    def test_forward_forecast_grid_rejects_invalid_distribution_and_horizon(self):
+        with self.assertRaises(ValueError):
+            AnalystSignal(
+                agent_name="technical",
+                forward_forecasts=[{
+                    "horizon_days": horizon,
+                    "up_probability": 0.7,
+                    "down_probability": 0.2,
+                    "range_probability": 0.2,
+                    "expected_return": 0.01,
+                    "expected_return_low": -0.01,
+                    "expected_return_high": 0.02,
+                    "key_drivers": ["trend"],
+                    "forecast_invalidation": "trend_breaks",
+                } for horizon in (1, 3, 5, 10)],
+            )
+        with self.assertRaises(ValueError):
+            AnalystSignal(
+                agent_name="technical",
+                forward_forecasts=[{
+                    "horizon_days": horizon,
+                    "up_probability": 0.6,
+                    "down_probability": 0.2,
+                    "range_probability": 0.2,
+                    "expected_return": 0.01,
+                    "expected_return_low": -0.01,
+                    "expected_return_high": 0.02,
+                    "key_drivers": ["trend"],
+                    "forecast_invalidation": "trend_breaks",
+                } for horizon in (1, 3, 5, 5)],
+            )
     def test_all_required_agent_contract_fixtures_are_valid(self):
         fixture_path = SRC_ROOT / "tests" / "fixtures" / "agent_contracts" / "contract_fixtures.json"
         fixtures = json.loads(fixture_path.read_text(encoding="utf-8-sig"))

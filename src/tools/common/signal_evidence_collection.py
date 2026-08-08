@@ -138,6 +138,7 @@ ACTION_EVIDENCE_LIST_FIELDS = {
     "missing_evidence",
     "current_evidence_conflict",
     "factor_focus",
+    "forward_forecasts",
 }
 ACTION_EVIDENCE_MAPPING_FIELDS = {
     "data_usage_summary",
@@ -625,6 +626,8 @@ def validate_action_evidence_contract(
         if not isinstance(contract.get(field), bool):
             raise ValueError(f"action_evidence_contract_invalid_boolean:{field}")
     for field in ACTION_EVIDENCE_LIST_FIELDS:
+        if field == "forward_forecasts" and field not in contract:
+            continue
         if not isinstance(contract.get(field), list):
             raise ValueError(f"action_evidence_contract_invalid_list:{field}")
     for field in ACTION_EVIDENCE_MAPPING_FIELDS:
@@ -633,6 +636,55 @@ def validate_action_evidence_contract(
     expected_horizon_days = contract.get("expected_horizon_days")
     if isinstance(expected_horizon_days, bool) or not isinstance(expected_horizon_days, int):
         raise ValueError("action_evidence_contract_invalid_integer:expected_horizon_days")
+    forecasts = contract.get("forward_forecasts")
+    if forecasts is not None and (not isinstance(forecasts, list) or len(forecasts) != 4):
+        raise ValueError("action_evidence_contract_forward_forecasts_invalid_count")
+    forecast_horizons = []
+    for forecast in forecasts or []:
+        if not isinstance(forecast, Mapping):
+            raise ValueError("action_evidence_contract_forward_forecast_invalid_mapping")
+        allowed = {
+            "horizon_days",
+            "up_probability",
+            "down_probability",
+            "range_probability",
+            "expected_return",
+            "expected_return_low",
+            "expected_return_high",
+            "key_drivers",
+            "forecast_invalidation",
+        }
+        if set(forecast) != allowed:
+            raise ValueError("action_evidence_contract_forward_forecast_fields_invalid")
+        horizon = forecast.get("horizon_days")
+        if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon not in {1, 3, 5, 10}:
+            raise ValueError("action_evidence_contract_forward_forecast_horizon_invalid")
+        forecast_horizons.append(horizon)
+        probabilities = []
+        for field in ("up_probability", "down_probability", "range_probability"):
+            value = forecast.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ValueError(f"action_evidence_contract_forward_forecast_number_invalid:{field}")
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"action_evidence_contract_forward_forecast_probability_out_of_range:{field}")
+            probabilities.append(float(value))
+        if abs(sum(probabilities) - 1.0) > 1e-4:
+            raise ValueError("action_evidence_contract_forward_forecast_probability_sum_invalid")
+        returns = []
+        for field in ("expected_return_low", "expected_return", "expected_return_high"):
+            value = forecast.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ValueError(f"action_evidence_contract_forward_forecast_number_invalid:{field}")
+            returns.append(float(value))
+        if not returns[0] <= returns[1] <= returns[2]:
+            raise ValueError("action_evidence_contract_forward_forecast_interval_invalid")
+        drivers = forecast.get("key_drivers")
+        if not isinstance(drivers, list) or not [item for item in drivers if str(item or "").strip()]:
+            raise ValueError("action_evidence_contract_forward_forecast_drivers_missing")
+        if not isinstance(forecast.get("forecast_invalidation"), str) or not forecast["forecast_invalidation"].strip():
+            raise ValueError("action_evidence_contract_forward_forecast_invalidation_missing")
+    if forecasts is not None and sorted(forecast_horizons) != [1, 3, 5, 10]:
+        raise ValueError("action_evidence_contract_forward_forecast_horizon_grid_invalid")
     contract_analyst = _text(contract.get("analyst"))
     if contract_analyst not in ANALYST_ORDER:
         raise ValueError("action_evidence_contract_invalid_analyst")

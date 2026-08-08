@@ -14,6 +14,7 @@ Output format:
 - justification: brief explanation
 - horizon_class: short / medium / long / event_short / flat / unknown
 - expected_horizon_days: integer trading-day horizon
+- forward_forecasts: exactly four objects for horizon_days 1, 3, 5, and 10. Each object must contain up_probability, down_probability, range_probability summing to 1; expected_return, expected_return_low, expected_return_high as decimal returns; key_drivers as a non-empty list; and forecast_invalidation as an observable thesis-invalidating condition. These are prediction facts, never trade commands.
 - market_regime: concise regime label
 - trend_stage: concise trend or event-stage label
 - setup_type: one of trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / fundamental_timing_setup / news_event_setup / unknown

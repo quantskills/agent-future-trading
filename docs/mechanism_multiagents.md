@@ -104,7 +104,7 @@ protocol_governor
 | `trader` | 审计通过的 PM 合约、盘中行情、执行配置 | 成交/未成交、触发事实、执行结果 | 否 | 读研究库或 action-value 下单、改 PM 方向、改目标手数、放宽触发、把防御性两步反转翻译变成当前策略反向开仓路径 | Accountant、Reviewer |
 | `accountant` | 成交、持仓、结算价、费用、保证金率、合约乘数 | settlement、PnL、保证金、权益、持仓状态 | 否 | 用 LLM、学习、复盘改账；写交易动作 | Reviewer |
 | `reviewer` | recommendation、审计、执行结果、成交、结算、账户/持仓和阶段状态 | Phase4 事实复盘、交易日志、事实归因、研究输入材料 | 否 | 下单、调仓、写最终 action-value、重新裁决合约合法性或账户硬风险、触发 Researcher LLM | Researcher |
-| `researcher` | Phase4与结算完成后，通过正式ID链验证的AEC、SCC、FAC、审计、执行、成交和结算事实 | 可为空的验证后结构化研究、action-value、profile、state、分析师校准信息 | 受限可调 | 保存原始模型内容；改当天合约、成交、结算、PnL、交易员权限；强制每笔交易学习 | 分析师正式校准检索、PM `decision_memory_retrieval` |
+| `researcher` | Phase4与结算完成后，通过正式ID链验证的AEC、SCC、FAC、审计、执行、成交和结算事实 | 可为空的验证后结构化研究、action-value、profile、state、1/3/5/10日预测到期评价和分层分析师校准信息 | 受限可调 | 保存原始模型内容；改当天合约、成交、结算、PnL、交易员权限；使用未到期预测；强制每笔交易学习 | 分析师正式校准检索、PM `decision_memory_retrieval`与到期预测校准读取 |
 | `protocol_governor` | 代码、配置、DB、artifact、字段语义、契约覆盖；只读取字段矩阵已登记路径 | 只由字段矩阵已登记字段组成的回测前就绪报告和每日物理结果非策略风险报告 | 否 | 读取或复查智能体内部机制；使用未登记字段或通用容器补字段；自建动作语义；生成交易动作、改手数、写业务表、评价收益为 pass/fail | 开发与回测闸门 |
 
 ## 6. 唯一事实入口总原则

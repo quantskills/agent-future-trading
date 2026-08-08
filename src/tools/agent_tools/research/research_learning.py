@@ -2784,6 +2784,12 @@ def apply_researcher_learning(
         config_id=config_id,
         trading_date=trading_date,
     )
+    forecast_evaluation_rows = research_memory_writers.write_analyst_forecast_evaluations(
+        cursor,
+        cfg=cfg,
+        config_id=config_id,
+        trading_date=trading_date,
+    )
     perf_counts = research_memory_writers.write_template_and_analyst_learning(
         cursor,
         cfg=cfg,
@@ -2969,6 +2975,7 @@ def apply_researcher_learning(
         "researcher_agent": "researcher",
         "signal_context_rows": context_rows,
         "strategy_memory_history_rows": memory_rows,
+        "forecast_evaluation_rows": forecast_evaluation_rows,
         **perf_counts,
         "trade_episode_rows": episode_rows,
         "opportunity_ranking_preference_rows": opportunity_ranking_preference_rows,

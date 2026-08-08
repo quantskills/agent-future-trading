@@ -1431,6 +1431,302 @@ def _completed_pair_rows_for_memory_bootstrap(
     )
 
 
+def _forecast_side(prob_up: float, prob_down: float, prob_range: float) -> str:
+    values = {"long": prob_up, "short": prob_down, "flat": prob_range}
+    return max(values, key=lambda key: (values[key], {"flat": 0, "short": 1, "long": 2}[key]))
+
+
+def _estimated_round_trip_fee_rate(
+    cfg: Mapping[str, Any],
+    *,
+    ticker: str,
+    reference_price: float,
+) -> float:
+    execution = cfg.get("execution") if isinstance(cfg.get("execution"), Mapping) else {}
+    commission = execution.get("commission") if isinstance(execution.get("commission"), Mapping) else {}
+    rules = commission.get("by_underlying") if isinstance(commission.get("by_underlying"), Mapping) else {}
+    rule = rules.get(str(ticker or "").upper())
+    rule = rule if isinstance(rule, Mapping) else {}
+    mode = str(rule.get("mode") or "")
+    open_cost = _safe_float(rule.get("open"), 0.0)
+    close_cost = _safe_float(rule.get("close"), 0.0)
+    if mode == "by_value":
+        return max(0.0, open_cost + close_cost)
+    if mode == "by_lot" and reference_price > 0.0:
+        info = FuturesContractInfoCache.get_contract_info(str(ticker or "").upper()) or {}
+        multiplier = _safe_float(info.get("contract_multiplier"), 0.0)
+        if multiplier > 0.0:
+            return max(0.0, (open_cost + close_cost) / (reference_price * multiplier))
+    return 0.0002
+
+
+def _write_analyst_forecast_evaluations(
+    cursor: sqlite3.Cursor,
+    *,
+    cfg: Dict[str, Any],
+    config_id: str,
+    trading_date: str,
+) -> int:
+    """Evaluate matured analyst forecasts using settled future trading-day prices."""
+    cursor.execute(
+        '''
+        SELECT s.id, s.ticker, s.analyst, s.signal, s.setup_type, s.artifact_json,
+               s.artifact_json_artifact_path, s.artifact_json_sha256,
+               substr(p.trading_date, 1, 10) AS reference_portfolio_date
+        FROM signal s
+        JOIN portfolio p ON s.portfolio_id = p.id
+        WHERE p.config_id = ?
+          AND substr(p.trading_date, 1, 10) < ?
+        ORDER BY reference_portfolio_date, s.ticker, s.analyst
+        ''',
+        (config_id, str(trading_date)[:10]),
+    )
+    signal_rows = [dict(row) for row in cursor.fetchall()]
+    settled_day_cache: Dict[str, List[str]] = {}
+    inserted = 0
+    now = _utc_now()
+    for row in signal_rows:
+        artifact = load_externalized_json(
+            row.get("artifact_json"),
+            row.get("artifact_json_artifact_path"),
+            row.get("artifact_json_sha256"),
+        )
+        artifact = artifact if isinstance(artifact, Mapping) else {}
+        metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), Mapping) else {}
+        contract = metadata.get("action_evidence_contract") if isinstance(metadata.get("action_evidence_contract"), Mapping) else {}
+        forecasts = contract.get("forward_forecasts") if isinstance(contract.get("forward_forecasts"), list) else []
+        if not forecasts:
+            continue
+        data_usage = contract.get("data_usage_summary") if isinstance(contract.get("data_usage_summary"), Mapping) else {}
+        forecast_date = str(data_usage.get("trading_date") or "")[:10]
+        if not forecast_date or forecast_date >= str(trading_date)[:10]:
+            continue
+        future_days = settled_day_cache.get(forecast_date)
+        if future_days is None:
+            future_days = _settled_trading_days(
+                cursor,
+                config_id,
+                forecast_date,
+                str(trading_date)[:10],
+            )
+            settled_day_cache[forecast_date] = future_days
+        ticker = str(row.get("ticker") or "").upper()
+        entry_price = _ticker_base_price_on_day(cursor, config_id, ticker, forecast_date)
+        if entry_price <= 0.0:
+            continue
+        sector = str(contract.get("sector") or _sector_for_ticker(cfg, ticker) or "*")
+        signal_side = str(contract.get("side") or "flat").lower()
+        setup_type = str(contract.get("setup_type") or row.get("setup_type") or "*")
+        market_regime = str(contract.get("market_regime") or "*")
+        for forecast in forecasts:
+            if not isinstance(forecast, Mapping):
+                continue
+            horizon = _safe_int(forecast.get("horizon_days"), 0)
+            if horizon not in {1, 3, 5, 10} or len(future_days) < horizon:
+                continue
+            evaluation_date = future_days[horizon - 1]
+            exit_price = _ticker_base_price_on_day(cursor, config_id, ticker, evaluation_date)
+            if exit_price <= 0.0:
+                continue
+            realized_return = exit_price / entry_price - 1.0
+            outcome = "long" if realized_return > 0.001 else "short" if realized_return < -0.001 else "flat"
+            up_probability = _safe_float(forecast.get("up_probability"), 0.0)
+            down_probability = _safe_float(forecast.get("down_probability"), 0.0)
+            range_probability = _safe_float(forecast.get("range_probability"), 0.0)
+            predicted_side = _forecast_side(up_probability, down_probability, range_probability)
+            signed_return = realized_return if predicted_side == "long" else -realized_return if predicted_side == "short" else -abs(realized_return)
+            round_trip_fee_rate = _estimated_round_trip_fee_rate(
+                cfg,
+                ticker=ticker,
+                reference_price=entry_price,
+            )
+            predicted_after_fee = signed_return - round_trip_fee_rate
+            actual_vector = {
+                "long": (1.0, 0.0, 0.0),
+                "short": (0.0, 1.0, 0.0),
+                "flat": (0.0, 0.0, 1.0),
+            }[outcome]
+            brier_score = sum(
+                (probability - actual) ** 2
+                for probability, actual in zip(
+                    (up_probability, down_probability, range_probability),
+                    actual_vector,
+                )
+            ) / 3.0
+            payload = {
+                "prediction_source": "analyst_aec_forward_forecasts",
+                "price_source": "future_recommendation_base_price",
+                "no_lookahead": True,
+                "predicted_side": predicted_side,
+                "realized_side": outcome,
+                "round_trip_fee_rate": round_trip_fee_rate,
+                "key_drivers": list(forecast.get("key_drivers") or []),
+                "forecast_invalidation": str(forecast.get("forecast_invalidation") or ""),
+            }
+            cursor.execute(
+                '''
+                INSERT INTO analyst_forecast_evaluation (
+                    id, config_id, signal_id, forecast_date, evaluation_date, ticker,
+                    sector, analyst, signal_side, setup_type, market_regime, horizon_days,
+                    up_probability, down_probability, range_probability, expected_return,
+                    expected_return_low, expected_return_high, realized_return,
+                    predicted_side_return_after_fee, direction_hit, brier_score,
+                    created_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(config_id, signal_id, horizon_days) DO NOTHING
+                ''',
+                (
+                    str(uuid.uuid4()), config_id, row.get("id"), forecast_date,
+                    evaluation_date, ticker, sector, row.get("analyst"), signal_side,
+                    setup_type, market_regime, horizon, up_probability,
+                    down_probability, range_probability,
+                    _safe_float(forecast.get("expected_return")),
+                    _safe_float(forecast.get("expected_return_low")),
+                    _safe_float(forecast.get("expected_return_high")),
+                    realized_return, predicted_after_fee,
+                    1 if predicted_side == outcome else 0, brier_score, now,
+                    _json_dumps(payload),
+                ),
+            )
+            inserted += int(cursor.rowcount or 0)
+    return inserted
+
+
+def _write_forecast_calibration_performance(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+    expires_after_days: int,
+    min_samples: int,
+) -> int:
+    """Publish hierarchical forecast calibration rows for analyst and PM use."""
+
+    def summarize(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+        sample_count = len(rows)
+        hit_rate = sum(_safe_int(row.get("direction_hit"), 0) for row in rows) / sample_count
+        mean_after_fee_return = sum(
+            _safe_float(row.get("predicted_side_return_after_fee"), 0.0)
+            for row in rows
+        ) / sample_count
+        mean_brier = sum(_safe_float(row.get("brier_score"), 0.0) for row in rows) / sample_count
+        expected_mean = sum(_safe_float(row.get("expected_return"), 0.0) for row in rows) / sample_count
+        realized_mean = sum(_safe_float(row.get("realized_return"), 0.0) for row in rows) / sample_count
+        return {
+            "sample_count": float(sample_count),
+            "direction_hit_rate": hit_rate,
+            "mean_brier_score": mean_brier,
+            "mean_expected_return": expected_mean,
+            "mean_realized_return": realized_mean,
+            "expected_return_calibration_error": abs(expected_mean - realized_mean),
+            "mean_predicted_side_return_after_fee": mean_after_fee_return,
+        }
+
+    cursor.execute(
+        '''
+        SELECT *
+        FROM analyst_forecast_evaluation
+        WHERE config_id = ? AND evaluation_date <= ?
+        ORDER BY evaluation_date, id
+        ''',
+        (config_id, str(trading_date)[:10]),
+    )
+    groups: Dict[Tuple[str, str, str, int, str], List[Dict[str, Any]]] = defaultdict(list)
+    for raw in cursor.fetchall():
+        row = dict(raw)
+        analyst = str(row.get("analyst") or "")
+        ticker = str(row.get("ticker") or "*").upper()
+        sector = str(row.get("sector") or "*")
+        horizon = _safe_int(row.get("horizon_days"), 0)
+        side = str(row.get("signal_side") or "neutral").lower()
+        for key in {
+            (analyst, ticker, sector, horizon, side),
+            (analyst, "*", sector, horizon, side),
+            (analyst, "*", "*", horizon, side),
+        }:
+            groups[key].append(row)
+
+    now = _utc_now()
+    rows_written = 0
+    for (analyst, ticker, sector, horizon, side), rows in groups.items():
+        if len(rows) < min_samples:
+            continue
+        aggregate = summarize(rows)
+        sample_count = int(aggregate["sample_count"])
+        hit_rate = aggregate["direction_hit_rate"]
+        mean_after_fee_return = aggregate["mean_predicted_side_return_after_fee"]
+        mean_brier = aggregate["mean_brier_score"]
+        latest_sample_date = max(str(row.get("evaluation_date") or "")[:10] for row in rows)
+        scope_level = "ticker" if ticker != "*" else "sector" if sector != "*" else "global"
+        confidence = min(1.0, sample_count / max(4.0, float(min_samples * 2))) * max(0.0, 1.0 - mean_brier)
+        by_regime: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            by_regime[str(row.get("market_regime") or "*")].append(row)
+        regime_performance = {
+            regime: summarize(regime_rows)
+            for regime, regime_rows in sorted(by_regime.items())
+            if regime != "*" and len(regime_rows) >= min_samples
+        }
+        summary = {
+            "forecast_calibration_summary": {
+                "scope_level": scope_level,
+                "horizon_days": horizon,
+                **aggregate,
+                "sample_count": sample_count,
+                "market_regime_performance": regime_performance,
+                "market_regime_match": 0.5,
+                "future_only": True,
+            },
+            "learning_economics_basis": "matured_direction_forecast_after_fee_return",
+            "mean_return_on_notional": mean_after_fee_return,
+            "latest_complete_episode_date": latest_sample_date,
+        }
+        horizon_class = f"{horizon}d"
+        if not _performance_summary_requires_refresh(
+            cursor,
+            table_name="analyst_performance",
+            where_sql=(
+                "config_id = ? AND analyst = ? AND ticker = ? AND sector = ? "
+                "AND horizon_class = ? AND signal_side = ?"
+            ),
+            params=(config_id, analyst, ticker, sector, horizon_class, side),
+            sample_count=sample_count,
+            latest_sample_date=latest_sample_date,
+            mean_return_on_notional=mean_after_fee_return,
+        ):
+            continue
+        cursor.execute(
+            '''
+            INSERT INTO analyst_performance (
+                id, config_id, analyst, ticker, sector, horizon_class, signal_side,
+                sample_count, hit_rate, avg_pnl, net_pnl, confidence_score,
+                last_sample_date, last_updated, valid_until, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(config_id, analyst, ticker, sector, horizon_class, signal_side)
+            DO UPDATE SET
+                sample_count=excluded.sample_count,
+                hit_rate=excluded.hit_rate,
+                avg_pnl=excluded.avg_pnl,
+                net_pnl=excluded.net_pnl,
+                confidence_score=excluded.confidence_score,
+                last_sample_date=excluded.last_sample_date,
+                last_updated=excluded.last_updated,
+                valid_until=excluded.valid_until,
+                payload_json=excluded.payload_json
+            ''',
+            (
+                str(uuid.uuid4()), config_id, analyst, ticker, sector,
+                horizon_class, side, sample_count, hit_rate,
+                mean_after_fee_return, mean_after_fee_return * sample_count,
+                confidence, latest_sample_date, now,
+                _valid_until(latest_sample_date, expires_after_days),
+                _json_dumps(summary),
+            ),
+        )
+        rows_written += 1
+    return rows_written
+
+
 def _performance_summary_requires_refresh(
     cursor: sqlite3.Cursor,
     *,
@@ -1638,7 +1934,13 @@ def _write_template_and_analyst_learning(
         item = dict(pair)
         item["setup_type"] = template
         item["signal_combo"] = combo
-        template_groups[(ticker, side, template, horizon, expected_days, regime)].append(item)
+        for template_key in {
+            (ticker, side, template, horizon, expected_days, regime),
+            (ticker, side, template, horizon, expected_days, "*"),
+            ("*", side, template, horizon, expected_days, regime),
+            ("*", side, template, horizon, expected_days, "*"),
+        }:
+            template_groups[template_key].append(item)
 
         sector = _sector_for_ticker(cfg, ticker)
         for analyst, payload in _analyst_payloads(snapshot).items():
@@ -1648,15 +1950,19 @@ def _write_template_and_analyst_learning(
             analyst_horizon = _analyst_horizon_class(snapshot, analyst, expected_days)
             pnl = _safe_float(pair.get("net_pnl"))
             return_on_notional = _safe_float(pair.get("return_on_notional"))
-            analyst_groups[(analyst, ticker, sector, analyst_horizon, signal_side)].append(
-                {
-                    "attributed_pnl": pnl if signal_side == side else -pnl,
-                    "attributed_return_on_notional": (
-                        return_on_notional if signal_side == side else -return_on_notional
-                    ),
-                    "sample_date": str(pair.get("close_date") or "")[:10],
-                }
-            )
+            attributed_item = {
+                "attributed_pnl": pnl if signal_side == side else -pnl,
+                "attributed_return_on_notional": (
+                    return_on_notional if signal_side == side else -return_on_notional
+                ),
+                "sample_date": str(pair.get("close_date") or "")[:10],
+            }
+            for analyst_key in {
+                (analyst, ticker, sector, analyst_horizon, signal_side),
+                (analyst, "*", sector, analyst_horizon, signal_side),
+                (analyst, "*", "*", analyst_horizon, signal_side),
+            }:
+                analyst_groups[analyst_key].append(attributed_item)
 
     now = _utc_now()
     template_rows = 0
@@ -1826,7 +2132,7 @@ def _write_template_and_analyst_learning(
             ),
         )
         analyst_rows += 1
-        if digest_confidence >= 0.25:
+        if ticker != "*" and digest_confidence >= 0.25:
             if mean_return_on_notional >= 0:
                 digest = (
                     f"{ticker} {horizon} {signal_side}: recent mature samples support this analyst "
@@ -1895,6 +2201,13 @@ def _write_template_and_analyst_learning(
             )
             digest_rows += 1
 
+    forecast_rows = _write_forecast_calibration_performance(
+        cursor,
+        config_id=config_id,
+        trading_date=trading_date,
+        expires_after_days=expires_after_days,
+        min_samples=min_samples,
+    )
     _insert_learning_event(
         cursor,
         config_id=config_id,
@@ -1903,9 +2216,9 @@ def _write_template_and_analyst_learning(
         scope_type="daily",
         scope_key=trading_date,
         evidence={"completed_pairs": len(pairs), "min_samples": min_samples},
-        action={"template_rows": template_rows, "analyst_rows": analyst_rows, "digest_rows": digest_rows},
+        action={"template_rows": template_rows, "analyst_rows": analyst_rows, "forecast_rows": forecast_rows, "digest_rows": digest_rows},
     )
-    return {"template_rows": template_rows, "analyst_rows": analyst_rows, "digest_rows": digest_rows}
+    return {"template_rows": template_rows, "analyst_rows": analyst_rows, "forecast_rows": forecast_rows, "digest_rows": digest_rows}
 
 
 def _table_columns(cursor: sqlite3.Cursor, table_name: str) -> set[str]:
@@ -6973,6 +7286,7 @@ def _reset_alpha_setup_memory(cursor: sqlite3.Cursor, *, config_id: str) -> None
 
 
 ensure_research_learning_schema = _ensure_research_learning_schema
+write_analyst_forecast_evaluations = _write_analyst_forecast_evaluations
 insert_learning_event = _insert_learning_event
 insert_researcher_learning_completion_event = _insert_researcher_learning_completion_event
 insert_causal_review_candidate = _insert_causal_review_candidate

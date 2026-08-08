@@ -14,7 +14,7 @@ AgentQuant 是一个面向中国期货主力合约的多智能体交易策略系
 AgentQuant 以交易日为最小运行单元，每个交易日分为四个阶段：
 
 1. **Phase1 策略生成**  
-   技术面、基本面、新闻面分析师读取盘前可见数据，生成结构化预测证据；信号收集员汇总三类分析师证据，输出 `signal_collection_contract`；投资组合经理按六步机制连续更新同一个内存状态，Step4 读取并路由学习，只有新增风险路径进入 Step5 全市场 rank、预算和 sizing，最后由 Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract`。Step1–5 不输出 artifact 和合约草稿。
+   技术面、基本面、新闻面分析师读取盘前可见数据，生成含 1/3/5/10 日方向概率、预期收益区间、驱动和预测失效条件的结构化预测证据；信号收集员汇总三类分析师证据，输出 `signal_collection_contract`；投资组合经理按六步机制连续更新同一个内存状态，Step4 读取过去已到期的预测校准，只有新增风险路径进入 Step5 全市场 rank、预算和 sizing，最后由 Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract`。Step1–5 不输出 artifact 和合约草稿。
 
 2. **Phase2 交易执行**  
    交易员读取 Phase1 审计后的 `final_action_contract`，结合盘中确认、合约、持仓、手数、滑点、涨跌停、保证金和订单语义，写入真实交易流水。交易员只执行或跳过已批准计划，不创造新的交易策略，不从投资组合经理草稿或研究 action-value 推导交易。
@@ -283,7 +283,7 @@ python run\plot_config.py --config config\dev.yaml
 | 配置与组合 | `config`、`portfolio`、`trading_day_phase` |
 | 分析与推荐 | `signal`、`futures_recommendation`、`signal_context_history` |
 | 执行与结算 | `futures_transactions`、`futures_intraday_decision`、`daily_settlement`、`ticker_daily_pnl` |
-| 学习与研究 | `trade_episode_memory`、`no_trade_opportunity_memory`、`alpha_setup_sample`、`alpha_setup_profile`、`alpha_setup_action_value`、`exploratory_hypothesis`、`adaptive_policy_state`、`learning_event_log` |
+| 学习与研究 | `trade_episode_memory`、`no_trade_opportunity_memory`、`analyst_forecast_evaluation`、`analyst_performance`、`setup_type_performance`、`alpha_setup_sample`、`alpha_setup_profile`、`alpha_setup_action_value`、`exploratory_hypothesis`、`adaptive_policy_state`、`learning_event_log` |
 | 评估 | `config_outcome` |
 
 ## 十一、测试与检查

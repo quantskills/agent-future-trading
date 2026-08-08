@@ -1055,7 +1055,7 @@ position sizing 结果沿用现有确定性工具：
 
 #### 5.5 排名积分制度
 
-排名使用唯一 `rank_score`。它是七项分量的有符号总和，不做 `[0,1]` 截断：
+排名使用唯一 `rank_score`。它是八项分量的有符号总和，不做 `[0,1]` 截断：
 
 ```text
 rank_score =
@@ -1064,6 +1064,7 @@ rank_score =
   + open/add/scale action-value 积分
   + 产品/setup/trigger 已验证历史积分
   + 当前 trigger 质量积分
+  + 到期预测校准价值积分
   + 资金效率积分
   - 冲突、风险、失效和缺失证据扣分
 ```
@@ -1087,10 +1088,11 @@ rank_score =
 | gating failure 总上限 | `-0.16` | 限定该类扣分边界 |
 | 资金效率 | 最高 `+0.02` | 同等质量下优先资金效率更高者 |
 | 当日 trigger 质量 | `+0.08 * trigger_quality_score` | 只读取PM由已验证SCC重建的当日technical/event执行证据；历史trigger结果不得进入本分项 |
+| 到期预测校准价值 | `+0.45 * rank_signal` | 只读取过去已到期预测的方向准确率、Brier、预测方向手续费后收益和作用域匹配；冷启动为0，负值不禁入 |
 
 `product_setup_trigger_history`、当前 trigger 质量、市场冲突、关键数据缺口、基本面缺口和失效风险继续按 catalog 中对应权重计入。所有积分必须保留组成项，不能只保存一个无法解释的总分。
 
-`rank_score_policy.rank_score` 下七个参数组与 `rank_score_components` 固定同名；每个组内的权重键与 Python 消费的输入字段同名。调参时禁止新增 `_weight`、`_bonus` 别名或只改 YAML 不改消费端。
+`rank_score_policy.rank_score` 下八个参数组与 `rank_score_components` 固定同名；新增的 `calibrated_forecast_value` 只读取到期历史预测的方向准确率、Brier、预测方向手续费后收益与作用域匹配，冷启动固定为 0。每个组内的权重键与 Python 消费的输入字段同名。调参时禁止新增 `_weight`、`_bonus` 别名或只改 YAML 不改消费端。
 
 `execution_profile_learning_weight` 不属于排名配置，catalog 不得保留该入口。按第 4 步已经确定的学习边界，execution/profile 学习只能进入执行画像，不得直接或通过 `opportunity_score` 间接增加或扣减 `rank_score`，不能借 trigger 质量名义重新进入决策层。
 
@@ -1117,7 +1119,7 @@ rank_score =
 
 交易属性必须在进入 rank 前由 Step4 的最终 scorecard 和 `final_entry_authority` 确定。`exploration_probe`、`real_budget_entry`、`alpha_scale_entry` 均由 Step4 的当日证据、正式学习和失效边界形成；rank 不生成、修改或升级资金层。
 
-PM 只对实际增加风险的候选排序。资金层、当日证据、正式 open/add 学习、setup 历史、当前 trigger 质量、资金效率及冲突/失效风险各自只进入一次 `rank_score`；最终排序固定为 `rank_score` 降序，再以标准化 `ticker` 作为唯一稳定兜底键，不再用资金层、tier、证据、`candidate_quality` 或资金效率形成第二套排序：
+PM 只对实际增加风险的候选排序。资金层、当日证据、正式 open/add 学习、setup 历史、当前 trigger 质量、到期预测校准、资金效率及冲突/失效风险各自只进入一次 `rank_score`；最终排序固定为 `rank_score` 降序，再以标准化 `ticker` 作为唯一稳定键，不再用资金层、tier、证据、`candidate_quality` 或资金效率形成第二套排序：
 
 1. `alpha_scale_entry`：当前证据成立，且有重复正向真实经验支持的已验证候选。
 2. `real_budget_entry`：当前证据完整的 `tradeable_candidate`。

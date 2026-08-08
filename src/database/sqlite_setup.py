@@ -614,6 +614,43 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
     )
     cursor.execute(
         '''
+        CREATE TABLE IF NOT EXISTS analyst_forecast_evaluation (
+            id TEXT PRIMARY KEY,
+            config_id TEXT NOT NULL,
+            signal_id TEXT NOT NULL,
+            forecast_date TEXT NOT NULL,
+            evaluation_date TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            sector TEXT NOT NULL DEFAULT '*',
+            analyst TEXT NOT NULL,
+            signal_side TEXT NOT NULL DEFAULT 'neutral',
+            setup_type TEXT NOT NULL DEFAULT '*',
+            market_regime TEXT NOT NULL DEFAULT '*',
+            horizon_days INTEGER NOT NULL,
+            up_probability REAL NOT NULL,
+            down_probability REAL NOT NULL,
+            range_probability REAL NOT NULL,
+            expected_return REAL NOT NULL,
+            expected_return_low REAL NOT NULL,
+            expected_return_high REAL NOT NULL,
+            realized_return REAL NOT NULL,
+            predicted_side_return_after_fee REAL NOT NULL,
+            direction_hit INTEGER NOT NULL DEFAULT 0,
+            brier_score REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            payload_json TEXT,
+            UNIQUE(config_id, signal_id, horizon_days),
+            FOREIGN KEY (config_id) REFERENCES config(id),
+            FOREIGN KEY (signal_id) REFERENCES signal(id)
+        )
+        '''
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_forecast_evaluation_scope "
+        "ON analyst_forecast_evaluation(config_id, ticker, analyst, evaluation_date)"
+    )
+    cursor.execute(
+        '''
         CREATE TABLE IF NOT EXISTS adaptive_policy_state (
             id TEXT PRIMARY KEY,
             config_id TEXT NOT NULL,

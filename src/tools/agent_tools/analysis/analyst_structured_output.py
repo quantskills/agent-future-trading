@@ -8,7 +8,7 @@ from pydantic import Field, GetJsonSchemaHandler, model_validator
 from pydantic_core import CoreSchema, PydanticCustomError
 
 from graph.constants import Signal
-from graph.schema import AnalystSignal
+from graph.schema import AnalystSignal, ForwardForecast, _neutral_forward_forecast_grid
 from tools.agent_tools.analysis.analyst_quality import (
     has_analyst_invalidation_boundary,
 )
@@ -58,6 +58,15 @@ def _declares_complete_executable_setup(
 class _LLMAnalystOutput(AnalystSignal):
     """LLM-facing output; system-owned freshness and ATR are not producible."""
 
+    forward_forecasts: list[ForwardForecast] = Field(
+        default_factory=_neutral_forward_forecast_grid,
+        description=(
+            "Exactly four testable forecasts for 1, 3, 5, and 10 trading days; "
+            "each contains a probability distribution, expected-return interval, "
+            "drivers, and a forecast-thesis invalidation condition"
+        )
+    )
+
     @classmethod
     def __get_pydantic_json_schema__(
         cls,
@@ -76,6 +85,10 @@ class _LLMAnalystOutput(AnalystSignal):
                 for name in required
                 if name not in {"data_freshness", "atr_stop_distance"}
             ]
+            if "forward_forecasts" not in schema["required"]:
+                schema["required"].append("forward_forecasts")
+        else:
+            schema["required"] = ["forward_forecasts"]
         return schema
 
 

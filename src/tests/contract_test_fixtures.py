@@ -89,6 +89,20 @@ def build_test_aec(
         ) if directional else None,
         "horizon_class": "short" if directional else "flat",
         "expected_horizon_days": 3 if directional else 0,
+        "forward_forecasts": [
+            {
+                "horizon_days": horizon,
+                "up_probability": 0.60 if side == "long" else 0.20 if side == "short" else 0.25,
+                "down_probability": 0.20 if side == "long" else 0.60 if side == "short" else 0.25,
+                "range_probability": 0.20 if directional else 0.50,
+                "expected_return": 0.01 if side == "long" else -0.01 if side == "short" else 0.0,
+                "expected_return_low": -0.01,
+                "expected_return_high": 0.02 if side == "long" else 0.01,
+                "key_drivers": ["test_evidence"],
+                "forecast_invalidation": "test_evidence_invalidated",
+            }
+            for horizon in (1, 3, 5, 10)
+        ],
         "market_regime": "trend" if directional else "unknown",
         "evidence_quality": "high" if directional else "low",
         "evidence_strength": "strong" if directional else "weak",

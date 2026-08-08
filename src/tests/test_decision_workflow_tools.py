@@ -125,6 +125,101 @@ def _signal(agent_name: str, signal: Signal, confidence: float, **contract_overr
 
 
 class DecisionWorkflowToolTest(unittest.TestCase):
+    def test_matured_forecast_calibration_changes_rank_without_blocking_candidate(self):
+        signal = _signal("technical", Signal.BULLISH, 0.72)
+        performance = [
+            {
+                "analyst": "technical",
+                "ticker": "BU",
+                "sector": "energy",
+                "signal_side": "long",
+                "sample_count": 8,
+                "confidence_score": 0.8,
+                "payload": {
+                    "forecast_calibration_summary": {
+                        "scope_level": "ticker",
+                        "direction_hit_rate": 0.75,
+                        "mean_brier_score": 0.16,
+                        "mean_predicted_side_return_after_fee": 0.012,
+                        "market_regime_match": 1.0,
+                    }
+                },
+            }
+        ]
+        common = {
+            "ticker": "BU",
+            "analyst_signals": [signal],
+            "signal_collection_contract": {"dominant_side": "long"},
+            "market_confirmation": {"confirmation_score": 0.65},
+            "data_quality_summary": {},
+            "adaptive_policy_state": [],
+            "alpha_setup_profiles": [],
+            "decision_date": "2025-03-05",
+            "config": {},
+        }
+        cold = build_opportunity_scorecard(**common)
+        calibrated = build_opportunity_scorecard(**common, analyst_performance=performance)
+        cold_rank = _ensure_final_rank_score_fields(dict(cold["long"]), config={})
+        calibrated_rank = _ensure_final_rank_score_fields(dict(calibrated["long"]), config={})
+
+        self.assertEqual(cold["long"]["final_state"], calibrated["long"]["final_state"])
+        self.assertEqual(cold_rank["rank_score_components"]["calibrated_forecast_value"], 0.0)
+        self.assertGreater(
+            calibrated_rank["rank_score_components"]["calibrated_forecast_value"],
+            0.0,
+        )
+        self.assertGreater(calibrated_rank["rank_score"], cold_rank["rank_score"])
+
+    def test_forecast_calibration_uses_specific_scope_and_matching_regime(self):
+        signal = _signal("technical", Signal.BULLISH, 0.72)
+        rows = []
+        for scope, ticker, sector, after_fee in (
+            ("global", "*", "*", -0.02),
+            ("sector", "*", "test", -0.01),
+            ("ticker", "BU", "test", 0.015),
+        ):
+            rows.append({
+                "analyst": "technical",
+                "ticker": ticker,
+                "sector": sector,
+                "horizon_class": "3d",
+                "signal_side": "long",
+                "sample_count": 8,
+                "confidence_score": 0.8,
+                "payload": {"forecast_calibration_summary": {
+                    "scope_level": scope,
+                    "direction_hit_rate": 0.4,
+                    "mean_brier_score": 0.3,
+                    "mean_predicted_side_return_after_fee": after_fee,
+                    "market_regime_performance": {
+                        "trend": {
+                            "sample_count": 4,
+                            "direction_hit_rate": 0.8,
+                            "mean_brier_score": 0.12,
+                            "mean_predicted_side_return_after_fee": after_fee,
+                        }
+                    },
+                    "market_regime_match": 0.5,
+                }},
+            })
+        scorecard = build_opportunity_scorecard(
+            ticker="BU",
+            analyst_signals=[signal],
+            signal_collection_contract={"dominant_side": "long"},
+            market_confirmation={"confirmation_score": 0.65},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            analyst_performance=rows,
+            decision_date="2025-03-05",
+            config={},
+        )
+        summary = scorecard["long"]["forecast_calibration_summary"]
+        self.assertEqual(len(summary["source_rows"]), 1)
+        self.assertEqual(summary["source_rows"][0]["scope_level"], "ticker")
+        self.assertEqual(summary["market_regime_match"], 1.0)
+        self.assertEqual(summary["direction_accuracy"], 0.8)
+
     def test_pm_memory_without_current_setup_starts_at_fallback_not_exact(self):
         class MemoryDB:
             def get_alpha_setup_action_values(self, **_kwargs):
@@ -1371,7 +1466,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertEqual(execution_row["opportunity_score"], base_row["opportunity_score"])
         self.assertEqual(
             set(execution_row["rank_score_input_components"]),
-            {"cold_start_evidence_quality"},
+            {"cold_start_evidence_quality", "forecast_calibration"},
         )
         base_rank = _ensure_final_rank_score_fields(dict(base_row), config={})
         execution_rank = _ensure_final_rank_score_fields(dict(execution_row), config={})
@@ -1519,7 +1614,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertEqual(result["candidate_count"], 1)
         self.assertGreater(row["rank_score_components"]["capital_efficiency"], 0.0)
         self.assertLessEqual(row["rank_score_components"]["capital_efficiency"], 0.02)
-        self.assertEqual(len(row["rank_score_components"]), 7)
+        self.assertEqual(len(row["rank_score_components"]), 8)
         self.assertLess(sum(row["rank_score_components"].values()), 0.0)
         self.assertEqual(
             row["rank_score"],
@@ -1651,6 +1746,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 "open_add_action_value_delta",
                 "product_setup_trigger_history",
                 "trigger_execution_quality",
+                "calibrated_forecast_value",
                 "capital_efficiency",
                 "conflict_risk_invalidation_penalty",
             },
@@ -1666,6 +1762,10 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertEqual(
             policy["trigger_execution_quality"],
             {"current_trigger_quality_weight": 0.08},
+        )
+        self.assertEqual(
+            policy["calibrated_forecast_value"],
+            {"rank_signal_weight": 0.45},
         )
         self.assertEqual(
             set(policy["open_add_action_value_delta"]),

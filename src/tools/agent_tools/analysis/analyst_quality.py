@@ -721,7 +721,13 @@ def _sync_signal_fields_to_action_evidence_contract(
     for field in AnalystSignal.model_fields:
         if field in ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS or field == "signal":
             continue
-        contract[field] = getattr(signal, field)
+        value = getattr(signal, field)
+        if field == "forward_forecasts":
+            value = [
+                item.model_dump() if hasattr(item, "model_dump") else dict(item)
+                for item in (value or [])
+            ]
+        contract[field] = value
     data_usage_summary = metadata.get("data_usage_summary")
     if isinstance(data_usage_summary, dict):
         contract["data_usage_summary"] = dict(data_usage_summary)

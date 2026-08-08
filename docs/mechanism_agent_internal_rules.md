@@ -415,7 +415,7 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 | 2 | 单品种方向 | `pm_ticker_side_selection`、SCC 方向事实 | 无真实冲突时只把 SCC 唯一 long/short 主方向写成优先级1并同步 `preferred_side`；flat/mixed/conflicted 时保持 flat | 读取学习或机会分重选方向；比较持仓、生成生命周期、rank、手数和交易权限 |
 | 3 | 持仓与交易状态 | `pm_lifecycle_action_port`、`pm_state_transition`、`current_lots`、Step2 方向结果 | 在内存中比较持仓与代表方向，形成 `candidate_quality`、`candidate_layer_hint`、`primary_lifecycle_action_port` | 改写上游 `opportunity_state`；生成最终动作、目标手数和合约；把 Step3 与 Step6 比较作为失败依据 |
 | 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 在首次正式学习消费前取得完整 canonical PM 学习池，保留 Step2 方向并冻结；同一个最终 scorecard 结合当日证据和正式学习确定生命周期、`candidate_quality`、probe/real/scale 资金层及层内连续比例 | Step4 后追加正式学习；依赖尚未生成的 rank 升层；把 similar/weak/incomplete prior 当正式记录；把临时路由当最终 `decision_learning_rows`；拿 execution 学习给开仓权限 |
-| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理实际增加风险的 `open/open_probe/open_real/add/scale` 和条件开仓；七项有符号总和不截断，只按 `rank_score` 降序和 ticker 稳定键生成预算顺序 | 让非新增风险合约进入 rank；以负分或零分禁止 probe；让 `add/scale` 绕过 rank；再按层级、tier、证据、候选质量或资金效率生成第二排序；生成第二排名分数或独立 artifact |
+| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理实际增加风险的 `open/open_probe/open_real/add/scale` 和条件开仓；八项有符号总和不截断，含过去到期预测校准价值，只按 `rank_score` 降序和 ticker 稳定键生成预算顺序 | 让非新增风险合约进入 rank；使用未到期预测；以负分或零分禁止 probe；让 `add/scale` 绕过 rank；生成第二排名分数或独立 artifact |
 | 6 | 最终合约签发与自检 | `pm_contract_builder`、`step6_contract_generation_check`、`pm_contract_self_check`、`FuturesRecommendation` 返回入口 | 从最终 PM 内存状态原子生成唯一 `final_action_contract` 与唯一 `FuturesRecommendation`，按最终动作和手数重新形成学习事实，并检查最终输出自身 | 分散写多个交易合约；读取 Step1–5 早期状态做回溯比较；返回半成品；让 Trader/Reviewer 补签合约 |
 
 顺序硬规则：
@@ -457,7 +457,7 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 4. `execution_*_catalog.yaml` 只定义手续费、滑点和退出执行事实；不能产生 PM 交易动作。
 5. 任何 YAML 参数如果会改变交易强度，必须落到 probe、normal、scale、hard cap、diagnostic 中的一类，不能成为第六套隐性门控。
 
-Step4先用当日证据和冻结canonical学习决定probe/real/alpha_scale及层内连续比例；Step5不得反向升层。Step5只对新增风险计算一次七项有符号总分，其中层级分固定为`alpha_scale=6.0`、`real_budget=3.0`、`exploration_probe=0.0`，当日trigger分固定为已验证SCC执行来源的`trigger_quality_score*0.08`。历史trigger结果只属于open/add学习分量。最终只按`rank_score`降序和ticker排序，负分不禁入；6/3/0分带必须保证任意scale高于任意real、任意real高于任意probe，同层再由其余分量区分。
+Step4先用当日证据和冻结canonical学习决定probe/real/alpha_scale及层内连续比例；Step5不得反向升层。Step5只对新增风险计算一次八项有符号总分，其中层级分固定为`alpha_scale=6.0`、`real_budget=3.0`、`exploration_probe=0.0`，当日trigger分固定为已验证SCC执行来源的`trigger_quality_score*0.08`，到期预测校准项只读取过去成熟评价。历史trigger结果只属于open/add学习分量。最终只按`rank_score`降序和ticker排序，负分不禁入；6/3/0分带必须保证任意scale高于任意real、任意real高于任意probe，同层再由其余分量区分。
 
 唯一scorecard按`opportunity_score + 0.04*trigger_valid + 0.04*invalidation_present`形成`candidate_quality`并限制到`[0,1]`；setup、正式学习/profile和冲突已在`opportunity_score`中计入，Step2及后续不得再加一次。这个有限分只服务Step4层内比例，不能替代或截断Step5有符号rank。最终生命周期为hold且目标比例未变时直接保留`current_lots`，不得因价格变化把同一比例重新换算成更少手数。
 

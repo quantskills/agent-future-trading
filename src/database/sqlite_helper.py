@@ -3947,6 +3947,50 @@ class SQLiteDB(BaseDB):
             if conn:
                 conn.close()
 
+    def get_forecast_calibration_performance(
+        self,
+        config_id: str,
+        ticker: str,
+        trading_date=None,
+        limit: int = 60,
+    ) -> List[Dict[str, Any]]:
+        """Read matured multi-horizon forecast calibration across fallback scopes."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            ticker_value = str(ticker or "").upper()
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            params: List[Any] = [config_id, ticker_value]
+            where = ["config_id = ?", "ticker IN (?, '*')", "horizon_class IN ('1d', '3d', '5d', '10d')"]
+            if trading_day_value:
+                where.extend(["last_sample_date < ?", "(valid_until IS NULL OR valid_until >= ?)"])
+                params.extend([trading_day_value, trading_day_value])
+            cursor.execute(
+                f'''
+                SELECT * FROM analyst_performance
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                    CASE WHEN ticker = ? THEN 0 ELSE 1 END,
+                    confidence_score DESC, sample_count DESC, last_updated DESC
+                LIMIT ?
+                ''',
+                tuple(params + [ticker_value, int(limit)]),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
+                rows.append(item)
+            return rows
+        except Exception:
+            logger.warning("forecast_calibration_performance_unavailable")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
     def save_learning_context_budget(
         self,
         *,

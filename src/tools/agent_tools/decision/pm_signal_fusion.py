@@ -22,6 +22,114 @@ from tools.common.signal_evidence_collection import has_concrete_entry_trigger
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
 
 
+def build_forecast_calibration_summary(
+    *,
+    analyst_signals: Iterable[Any],
+    analyst_performance: Iterable[Mapping[str, Any]] | None,
+    target_side: str,
+) -> dict[str, Any]:
+    """Fuse matured forecast accuracy and after-fee return without trade authority."""
+    target = str(target_side or "").lower()
+    signal_by_analyst = {
+        str(getattr(signal, "agent_name", "") or ""): signal
+        for signal in (analyst_signals or [])
+    }
+    best_candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in analyst_performance or []:
+        if not isinstance(raw, Mapping):
+            continue
+        payload = raw.get("payload") if isinstance(raw.get("payload"), Mapping) else {}
+        calibration = payload.get("forecast_calibration_summary") if isinstance(payload.get("forecast_calibration_summary"), Mapping) else {}
+        if not calibration:
+            continue
+        analyst = str(raw.get("analyst") or "")
+        signal = signal_by_analyst.get(analyst)
+        if signal is None or _signal_side(signal) != target:
+            continue
+        current_sector = str(_contract_value(signal, "sector", "*") or "*")
+        current_regime = str(_contract_value(signal, "market_regime", "*") or "*")
+        row_ticker = str(raw.get("ticker") or "*").upper()
+        row_sector = str(raw.get("sector") or "*")
+        if row_ticker == "*" and row_sector != "*" and current_sector != "*" and row_sector != current_sector:
+            continue
+        row_side = str(raw.get("signal_side") or "neutral").lower()
+        if row_side not in {target, "neutral", "*"}:
+            continue
+        sample_count = _safe_int(raw.get("sample_count"), 0)
+        if sample_count < 2:
+            continue
+        scope_level = str(calibration.get("scope_level") or "global")
+        scope_weight = {"ticker": 1.0, "sector": 0.8, "global": 0.6}.get(scope_level, 0.5)
+        confidence = max(0.0, min(1.0, _safe_float(raw.get("confidence_score"), 0.0)))
+        regime_performance = calibration.get("market_regime_performance")
+        regime_performance = regime_performance if isinstance(regime_performance, Mapping) else {}
+        regime_metrics = regime_performance.get(current_regime)
+        regime_metrics = regime_metrics if isinstance(regime_metrics, Mapping) else calibration
+        regime_match = 1.0 if current_regime in regime_performance else _safe_float(
+            calibration.get("market_regime_match"), 0.5
+        )
+        candidate = {
+            "analyst": analyst,
+            "horizon_class": str(raw.get("horizon_class") or "*"),
+            "scope_level": scope_level,
+            "sample_count": _safe_int(regime_metrics.get("sample_count"), sample_count),
+            "weight": max(0.01, scope_weight * max(0.25, confidence)),
+            "direction_hit_rate": _safe_float(regime_metrics.get("direction_hit_rate"), 0.5),
+            "mean_brier_score": _safe_float(regime_metrics.get("mean_brier_score"), 1.0 / 3.0),
+            "mean_predicted_side_return_after_fee": _safe_float(
+                regime_metrics.get("mean_predicted_side_return_after_fee"), 0.0
+            ),
+            "market_regime": current_regime,
+            "market_regime_match": regime_match,
+        }
+        key = (analyst, candidate["horizon_class"])
+        previous = best_candidates.get(key)
+        specificity = {"ticker": 3, "sector": 2, "global": 1}.get(scope_level, 0)
+        previous_specificity = {
+            "ticker": 3,
+            "sector": 2,
+            "global": 1,
+        }.get(str((previous or {}).get("scope_level") or ""), -1)
+        if previous is None or specificity > previous_specificity:
+            best_candidates[key] = candidate
+    candidates = list(best_candidates.values())
+    if not candidates:
+        return {
+            "status": "cold_start",
+            "sample_count": 0,
+            "direction_accuracy": 0.5,
+            "mean_brier_score": 1.0 / 3.0,
+            "expected_return_after_fee": 0.0,
+            "market_regime_match": 0.5,
+            "rank_signal": 0.0,
+            "source_rows": [],
+            "not_trade_authority": True,
+        }
+    total_weight = sum(item["weight"] for item in candidates)
+    weighted = lambda key: sum(item[key] * item["weight"] for item in candidates) / total_weight
+    accuracy = weighted("direction_hit_rate")
+    brier = weighted("mean_brier_score")
+    expected_after_fee = weighted("mean_predicted_side_return_after_fee")
+    regime_match = weighted("market_regime_match")
+    rank_signal = (
+        0.45 * (accuracy - 0.5) * 2.0
+        + 0.35 * max(-1.0, min(1.0, expected_after_fee / 0.02))
+        + 0.20 * (regime_match - 0.5) * 2.0
+        - 0.15 * max(0.0, min(1.0, brier / (2.0 / 3.0)))
+    )
+    return {
+        "status": "matured",
+        "sample_count": sum(item["sample_count"] for item in candidates),
+        "direction_accuracy": round(accuracy, 6),
+        "mean_brier_score": round(brier, 6),
+        "expected_return_after_fee": round(expected_after_fee, 8),
+        "market_regime_match": round(regime_match, 6),
+        "rank_signal": round(max(-1.0, min(1.0, rank_signal)), 6),
+        "source_rows": candidates,
+        "not_trade_authority": True,
+    }
+
+
 def build_scc_market_confirmation(
     signal_collection_contract: Mapping[str, Any] | None,
     *,
@@ -922,6 +1030,7 @@ def build_opportunity_scorecard(
     alpha_setup_action_values: Iterable[Mapping[str, Any]] | None = None,
     signal_collection_contract: Mapping[str, Any] | None = None,
     formal_setup_by_side: Mapping[str, Any] | None = None,
+    analyst_performance: Iterable[Mapping[str, Any]] | None = None,
     decision_date: Any = None,
     config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1007,6 +1116,11 @@ def build_opportunity_scorecard(
 
     side_rows: dict[str, dict[str, Any]] = {}
     for side in ("long", "short"):
+        forecast_calibration = build_forecast_calibration_summary(
+            analyst_signals=signals,
+            analyst_performance=analyst_performance,
+            target_side=side,
+        )
         directional_signals = [signal for signal in signals if _signal_side(signal) == side]
         opportunity_state_counts: dict[str, int] = {}
         for signal in directional_signals:
@@ -1390,7 +1504,9 @@ def build_opportunity_scorecard(
             "candidate_layer_hint": _candidate_layer_hint(final_state),
             "rank_score_input_components": {
                 "cold_start_evidence_quality": cold_start_evidence_quality,
+                "forecast_calibration": forecast_calibration,
             },
+            "forecast_calibration_summary": forecast_calibration,
             "opportunity_score_components": {
                 key: round(float(value or 0.0), 4)
                 for key, value in score_components.items()

@@ -271,12 +271,19 @@ def _rank_score_components_for_row(row: Dict[str, Any], *, config: Dict[str, Any
             * len([item for item in gating_failures if str(item or "").strip()]),
         )
     )
+    forecast_section = _policy_section(rank_section, "calibrated_forecast_value")
+    forecast_calibration = rank_score_inputs.get("forecast_calibration") if isinstance(rank_score_inputs.get("forecast_calibration"), dict) else {}
+    calibrated_forecast_value = (
+        _policy_float(forecast_section, "rank_signal_weight", 0.45)
+        * max(-1.0, min(1.0, _safe_float(forecast_calibration.get("rank_signal"), 0.0)))
+    )
     return {
         "cold_start_evidence_quality": round(cold_start_evidence, 6),
         "capital_layer_priority": round(tier_bonus.get(layer_policy_key, 0.0), 6),
         "open_add_action_value_delta": round(_rank_learning_delta(action_value_learning, policy=policy), 6),
         "product_setup_trigger_history": round(product_setup_trigger_history, 6),
         "trigger_execution_quality": round(trigger_execution_quality, 6),
+        "calibrated_forecast_value": round(calibrated_forecast_value, 6),
         "capital_efficiency": 0.0,
         "conflict_risk_invalidation_penalty": round(-conflict_and_risk_penalty, 6),
     }

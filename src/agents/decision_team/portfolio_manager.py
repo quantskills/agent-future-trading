@@ -11026,8 +11026,17 @@ def _run_pm_six_step_decision(state: FundState):
     }
     alpha_setup_profiles: list[dict] = []
     alpha_setup_action_values: list[dict] = []
-    step4_rejected_or_downgraded: list[dict] = []
     pm_memory_db = _ExplicitPMLearningScopeDBView(db) if db else db
+    forecast_calibration_performance: list[dict] = []
+    if pm_memory_db and config_id and hasattr(pm_memory_db, "get_forecast_calibration_performance"):
+        forecast_calibration_performance = pm_memory_db.get_forecast_calibration_performance(
+            config_id=config_id,
+            ticker=ticker,
+            trading_date=trading_date,
+            limit=60,
+        )
+    pm_learning_audit["forecast_calibration_row_count"] = len(forecast_calibration_performance)
+    step4_rejected_or_downgraded: list[dict] = []
     pm_learning_audit["alpha_setup_profile_count"] = len(alpha_setup_profiles)
     pm_learning_audit["alpha_setup_profiles"] = alpha_setup_profiles[:6]
     pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
@@ -11234,6 +11243,7 @@ def _run_pm_six_step_decision(state: FundState):
         alpha_setup_profiles=alpha_setup_profiles,
         alpha_setup_action_values=scorecard_alpha_setup_action_values,
         signal_collection_contract=signal_collection_contract,
+        analyst_performance=forecast_calibration_performance,
         formal_setup_by_side={
             side: identity.get("setup_type")
             for side, identity in formal_learning_identity_by_side.items()
@@ -11383,6 +11393,7 @@ def _run_pm_six_step_decision(state: FundState):
         alpha_setup_profiles=alpha_setup_profiles,
         alpha_setup_action_values=scorecard_alpha_setup_action_values,
         signal_collection_contract=signal_collection_contract,
+        analyst_performance=forecast_calibration_performance,
         formal_setup_by_side={
             side: identity.get("setup_type")
             for side, identity in formal_learning_identity_by_side.items()
@@ -11620,6 +11631,7 @@ def _run_pm_six_step_decision(state: FundState):
         alpha_setup_profiles=alpha_setup_profiles,
         alpha_setup_action_values=scorecard_alpha_setup_action_values,
         signal_collection_contract=signal_collection_contract,
+        analyst_performance=forecast_calibration_performance,
         formal_setup_by_side={
             side: identity.get("setup_type")
             for side, identity in formal_learning_identity_by_side.items()

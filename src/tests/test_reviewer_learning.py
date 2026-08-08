@@ -109,6 +109,7 @@ from tools.agent_tools.research.research_memory_writers import (
     _write_template_and_analyst_learning,
     _write_trade_episode_memory,
     _write_validated_causal_policy_rules,
+    _write_analyst_forecast_evaluations,
     _upsert_analyst_digest_by_scope_and_content,
 )
 from tools.agent_tools.decision.pm_capital_allocator import enriched_policy_evidence
@@ -4407,6 +4408,180 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         _ensure_reviewer_learning_schema(conn.cursor())
         return conn
+
+    def test_forecast_evaluation_uses_aec_logical_date_not_reference_portfolio_date(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.executescript(
+                '''
+                CREATE TABLE portfolio (id TEXT PRIMARY KEY, config_id TEXT, trading_date TEXT);
+                CREATE TABLE signal (
+                    id TEXT PRIMARY KEY, portfolio_id TEXT, ticker TEXT, analyst TEXT,
+                    signal TEXT, setup_type TEXT, artifact_json TEXT,
+                    artifact_json_artifact_path TEXT, artifact_json_sha256 TEXT
+                );
+                CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT);
+                CREATE TABLE futures_recommendation (
+                    config_id TEXT, underlying_code TEXT, effective_trade_date TEXT,
+                    base_price REAL, execution_price REAL, open_price REAL,
+                    prev_close_price REAL, created_at TEXT
+                );
+                '''
+            )
+            cursor.executemany(
+                "INSERT INTO portfolio VALUES (?, 'cfg', ?)",
+                [("p0", "2025-03-03"), ("p1", "2025-03-04"), ("p2", "2025-03-05")],
+            )
+            cursor.executemany(
+                "INSERT INTO daily_settlement VALUES (?, ?)",
+                [("p1", "2025-03-04"), ("p2", "2025-03-05")],
+            )
+            contract = build_test_aec(
+                "technical", ticker="BU", trading_date="2025-03-04",
+                signal="Bullish", side="long", trigger_valid=True,
+                current_trigger_confirmed=True,
+            )
+            artifact = json.dumps({"metadata": {"action_evidence_contract": contract}})
+            cursor.execute(
+                "INSERT INTO signal VALUES ('s1', 'p0', 'BU', 'technical', 'Bullish', 'trend', ?, NULL, NULL)",
+                (artifact,),
+            )
+            cursor.executemany(
+                "INSERT INTO futures_recommendation VALUES ('cfg', 'BU', ?, ?, NULL, NULL, NULL, ?)",
+                [("2025-03-04", 100.0, "2025-03-04T09:00:00"), ("2025-03-05", 102.0, "2025-03-05T09:00:00")],
+            )
+            written = _write_analyst_forecast_evaluations(
+                cursor, cfg={}, config_id="cfg", trading_date="2025-03-05"
+            )
+            row = cursor.execute(
+                "SELECT forecast_date, evaluation_date, realized_return FROM analyst_forecast_evaluation"
+            ).fetchone()
+            self.assertEqual(written, 1)
+            self.assertEqual(row["forecast_date"], "2025-03-04")
+            self.assertEqual(row["evaluation_date"], "2025-03-05")
+            self.assertAlmostEqual(row["realized_return"], 0.02)
+        finally:
+            conn.close()
+
+    def test_forecast_evaluation_uses_execution_commission_catalog_rate(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.executescript(
+                '''
+                CREATE TABLE portfolio (id TEXT PRIMARY KEY, config_id TEXT, trading_date TEXT);
+                CREATE TABLE signal (
+                    id TEXT PRIMARY KEY, portfolio_id TEXT, ticker TEXT, analyst TEXT,
+                    signal TEXT, setup_type TEXT, artifact_json TEXT,
+                    artifact_json_artifact_path TEXT, artifact_json_sha256 TEXT
+                );
+                CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT);
+                CREATE TABLE futures_recommendation (
+                    config_id TEXT, underlying_code TEXT, effective_trade_date TEXT,
+                    base_price REAL, execution_price REAL, open_price REAL,
+                    prev_close_price REAL, created_at TEXT
+                );
+                '''
+            )
+            cursor.executemany(
+                "INSERT INTO portfolio VALUES (?, 'cfg', ?)",
+                [("p0", "2025-03-03"), ("p1", "2025-03-04"), ("p2", "2025-03-05")],
+            )
+            cursor.executemany(
+                "INSERT INTO daily_settlement VALUES (?, ?)",
+                [("p1", "2025-03-04"), ("p2", "2025-03-05")],
+            )
+            contract = build_test_aec(
+                "technical", ticker="BU", trading_date="2025-03-04",
+                signal="Bullish", side="long", trigger_valid=True,
+                current_trigger_confirmed=True,
+            )
+            cursor.execute(
+                "INSERT INTO signal VALUES ('s1', 'p0', 'BU', 'technical', 'Bullish', 'trend', ?, NULL, NULL)",
+                (json.dumps({"metadata": {"action_evidence_contract": contract}}),),
+            )
+            cursor.executemany(
+                "INSERT INTO futures_recommendation VALUES ('cfg', 'BU', ?, ?, NULL, NULL, NULL, ?)",
+                [("2025-03-04", 100.0, "2025-03-04T09:00:00"), ("2025-03-05", 102.0, "2025-03-05T09:00:00")],
+            )
+            cfg = {"execution": {"commission": {"by_underlying": {
+                "BU": {"mode": "by_value", "open": 0.001, "close": 0.002}
+            }}}}
+            _write_analyst_forecast_evaluations(
+                cursor, cfg=cfg, config_id="cfg", trading_date="2025-03-05"
+            )
+            row = cursor.execute(
+                "SELECT predicted_side_return_after_fee, payload_json FROM analyst_forecast_evaluation"
+            ).fetchone()
+            self.assertAlmostEqual(row["predicted_side_return_after_fee"], 0.017)
+            self.assertEqual(json.loads(row["payload_json"])["round_trip_fee_rate"], 0.003)
+        finally:
+            conn.close()
+
+    def test_template_learning_publishes_hierarchical_rows(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE futures_recommendation (id TEXT PRIMARY KEY, signal_snapshot TEXT)")
+            snapshot = {
+                "signal_collection_contract": {
+                    "source_contracts": [{
+                        "analyst": "technical",
+                        "action_evidence_contract": {"signal": "Bullish", "horizon_class": "short"},
+                    }]
+                },
+                "final_action_contract": {
+                    "final_action": "open_probe", "current_lots": 0, "target_lots": 1,
+                    "lots_delta": 1, "setup_type": "trend_breakout_setup",
+                    "horizon_class": "short", "expected_horizon_days": 3,
+                    "market_regime": "trend",
+                },
+            }
+            cursor.executemany(
+                "INSERT INTO futures_recommendation VALUES (?, ?)",
+                [("rec-h-1", json.dumps(snapshot)), ("rec-h-2", json.dumps(snapshot))],
+            )
+            cursor.executemany(
+                '''
+                INSERT INTO trade_episode_memory (
+                    id, config_id, trading_date, ticker, side, sector, setup_type,
+                    signal_combo, horizon_class, market_regime, open_date, close_date,
+                    holding_days, net_pnl, return_on_notional, outcome_label,
+                    payload_json, created_at
+                ) VALUES (?, 'cfg', ?, 'BU', 'long', 'energy', 'trend_breakout_setup',
+                    '*', 'short', 'trend', ?, ?, 1, ?, ?, 'winner', ?, ?)
+                ''',
+                [
+                    ("h-1", "2025-03-02", "2025-03-01", "2025-03-02", 100.0, 0.01, json.dumps({"open_recommendation_id": "rec-h-1"}), "2025-03-02T16:00:00"),
+                    ("h-2", "2025-03-04", "2025-03-03", "2025-03-04", 120.0, 0.012, json.dumps({"open_recommendation_id": "rec-h-2"}), "2025-03-04T16:00:00"),
+                ],
+            )
+            _write_template_and_analyst_learning(
+                cursor,
+                cfg={"learning": {"anti_overfit": {"min_samples_for_template": 2}}},
+                config_id="cfg",
+                trading_date="2025-03-05",
+            )
+
+            scopes = {
+                (row[0], row[1])
+                for row in cursor.execute(
+                    "SELECT ticker, market_regime FROM setup_type_performance WHERE config_id='cfg'"
+                ).fetchall()
+            }
+            analyst_scopes = {
+                (row[0], row[1])
+                for row in cursor.execute(
+                    "SELECT ticker, sector FROM analyst_performance WHERE config_id='cfg'"
+                ).fetchall()
+            }
+            self.assertEqual(scopes, {("BU", "trend"), ("BU", "*"), ("*", "trend"), ("*", "*")})
+            self.assertIn(("BU", "energy"), analyst_scopes)
+            self.assertIn(("*", "energy"), analyst_scopes)
+            self.assertIn(("*", "*"), analyst_scopes)
+        finally:
+            conn.close()
 
     def test_template_and_analyst_digest_refresh_only_on_new_complete_episode(self):
         conn = self._connection()

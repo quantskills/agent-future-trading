@@ -59,8 +59,9 @@ profile 与 action-value 的区别：profile 是“这个 setup 整体成绩如�
 | `trade_episode_memory` | 仓位从 0 开始并最终回到 0 后形成的一条完整学习周期 | Researcher 生成 sample/profile/action-value；分析师读取相对化摘要；PM 不直接读 episode 表 | 只收完整策略周期；rollover/forced-risk 不得污染 |
 | `no_trade_opportunity_memory` | 记录未交易原因和后续固定窗口反事实结果 | Researcher 汇总，并间接转成 sample/profile/policy；分析师读取安全摘要 | 反事实不得冒充真实成交收益 |
 | `analyst_learning_digest` | 面向 technical/fundamental/commodity_news/PM 作用域的压缩学习摘要 | 三类分析师通过 `build_learning_context` 消费各自作用域；`portfolio_manager` 作用域行不属于 PM 的 `decision_memory_retrieval` 正式输入 | 只在完整 episode 样本数或最新结束日变化时刷新，并按最新结束日计算有效期 |
-| `analyst_performance` | 分析师在品种和周期作用域下的表现统计 | 分析师动态权重校准；Researcher 生成上下文参数政策 | 只由合格完整 episode 刷新 |
-| `setup_type_performance` | 已完成 setup 的聚合表现 | 分析师动态权重校准；Researcher 生成成熟政策 | 未交易反事实不得生成成熟 `alpha_promotion` |
+| `analyst_forecast_evaluation` | AEC 中 1/3/5/10 日预测到期后的方向命中、Brier、标的实际收益和预测方向手续费后收益 | Researcher 聚合；分析师与 PM 只读到期后的摘要 | 预测期限未到不得写入；评价不能改写原预测 |
+| `analyst_performance` | 分析师在品种、板块、全局及固定预测期限作用域下的表现统计 | 分析师动态权重校准；PM 校准预测 Rank；Researcher 生成上下文参数政策 | 完整 episode 归因与到期预测评价分别写入明确 payload，任何来源都不得使用未来样本 |
+| `setup_type_performance` | 已完成 setup 的精确、去状态、跨品种和全局层级聚合表现 | 分析师动态权重校准；Researcher 生成成熟政策 | 层级回退只解决小样本碎片化；未交易反事实不得生成成熟 `alpha_promotion` |
 | `strategy_memory` | 按品种、方向和 signal combo 汇总的较宽策略先验 | PM 经 `decision_memory_retrieval` 用于风险门和资金控制 | 不是精确 action-value，不得单独授权 real/scale |
 | `research_position_feedback` | 记录 PM 是否实际声明消费学习，以及后续动作、成交和结算 | Researcher 闭环和开发验收，不直接控制交易 | 只有最终 FAC 实际消费的正式学习才可形成反馈 |
 | `signal_context_history` | 每日 SCC/FAC 等上下文事实快照 | Researcher 后续归因和聚合 | 只记录已落地正式事实 |
@@ -119,6 +120,8 @@ Phase1 投资组合经理 final_action_contract
 
 1. 分析师消费本专业校准类结构化研究，输出更干净的 `action_evidence_contract`。
 2. 投资组合经理经 `decision_memory_retrieval` 消费交易决策类结构化研究，再按 PM 六步机制通过生命周期路由、仅新增风险 Step5 全市场资金部署和唯一 `final_action_contract` 落地。
+
+多期限预测评价属于第二条路径中的只读校准输入：Researcher 以 AEC 的逻辑交易日为预测起点，在 1、3、5、10 个结算交易日分别成熟预测，按执行手续费事实表计算预测方向手续费后收益，并按品种、板块、市场状态和全局层级汇总方向准确率与 Brier。PM 只把该摘要变成 Step5 的有符号 `calibrated_forecast_value`，冷启动为 0，负值保留交易候选且只降低相对资金顺序。
 
 信号收集员、审计员、交易员、会计师、复盘员都不能直接读取研究库来生成或改变交易权限。
 
