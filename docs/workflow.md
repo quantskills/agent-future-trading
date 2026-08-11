@@ -6,7 +6,7 @@
 
 本文中的 `T` 始终表示期货逻辑交易日，`Prev(T)` / `Next(T)` 由正式交易日与夜盘映射机制确定，不按自然日加减。对有夜盘的品种，物理 `Prev(T)` 晚间产生的分钟线、订单和成交可以属于逻辑 `T`；`created_at`、分钟 `datetime` 表示物理时间，业务 `trading_date` 仍统一登记逻辑交易日。
 
-Proposal 为逻辑 `T` 生成策略时，`reference_portfolio_id` 必须指向 `portfolio.trading_date=Prev(T)` 的最近已结算账户/持仓快照；PandaAI 日线与新闻不得晚于 `Prev(T)`。历史日线查询默认不包含结束日，需要精确消费该日时必须显式使用包含结束日语义。Finoview 按同一 factor catalog 中的实际频率、freshness、`release_lag_days` 和正式交易日机制选择最新可见 `tradeDate`，Router 格式化输入与 factor snapshot 共用同一选择器；`recordTime` 不作为发布时间或可见边界。三份 AEC、SCC、recommendation 及其 `effective_trade_date` 均属于逻辑 `T`。
+Proposal 为逻辑 `T` 生成策略时，`reference_portfolio_id` 必须指向 `portfolio.trading_date=Prev(T)` 的最近已结算账户/持仓快照；PandaAI 日线与新闻不得晚于 `Prev(T)`。历史日线查询默认不包含结束日，需要精确消费该日时必须显式使用包含结束日语义。PandaAI 日线保留现有持久化缓存，扩展数据按接口名和完整历史参数持久化成功响应及确定性空响应；分钟线仍由 Trader 在实际获批合约上按 cutoff 调用。PandaAI `500009` 必须转为 `pandaai_daily_quota_exhausted` 并立即终止当日预取，禁止继续遍历剩余品种。Finoview 按同一 factor catalog 中的实际频率、freshness、`release_lag_days` 和正式交易日机制选择最新可见 `tradeDate`，Router 格式化输入与 factor snapshot 共用同一选择器；`recordTime` 不作为发布时间或可见边界。三份 AEC、SCC、recommendation 及其 `effective_trade_date` 均属于逻辑 `T`。
 
 ```text
 【物理输入】

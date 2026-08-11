@@ -20,3 +20,7 @@
 （4）[预测到期评价与分层研究闭环] `sqlite_setup.py`新增`analyst_forecast_evaluation`，`research_memory_writers.py`以AEC逻辑交易日为预测起点，仅在期限到达后按执行手续费事实表计算方向命中、Brier、标的收益和预测方向手续费后收益，并按品种、板块、市场状态和全局层级写入分析师绩效；完整episode绩效同步写入精确、去状态、跨品种和全局setup层级。原因：让真实成交与全市场预测结果形成足够密度的未来校准数据，解决细粒度分组令正式学习表长期为空的问题。
 
 （5）[手续费后预测校准进入唯一Rank] `sqlite_helper.py`新增到期预测校准检索，`pm_signal_fusion.py`按品种、板块、全局依次回退，并确定性融合匹配市场状态下的方向准确率、Brier和预测方向手续费后收益；`pm_full_market_capital_deployment.py`与`rank_score_policy.yaml`新增唯一`calibrated_forecast_value`分项，冷启动为0，负值只降低相对顺序。原因：阻止原始LLM置信度继续被解释为盈利概率，同时保留探索仓、负Rank候选和既有交易机会链。
+
+==========2026年08月10日==========
+
+（1）[PandaAI扩展数据持久化与日额度硬停止] `api.py`在现有`pandaai_market_cache.db`中新增按接口名和完整参数精确命中的扩展数据缓存，只保存成功响应与确定性空响应；将`500009`转换为稳定`pandaai_daily_quota_exhausted`并阻断同一进程的后续远程请求。`analyst_data_usage.py`让Phase1日线、交易日参考日期和扩展数据预取收到该错误后立即上抛，不再遍历剩余品种。原因：消除跨回测子进程对同一历史扩展参数的重复请求，并阻止额度耗尽后继续消耗请求与等待时间；策略生成、PM、审计、Trader分钟线调用和交易行为均未修改。

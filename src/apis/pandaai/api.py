@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """PandaAI API client implementation for Chinese futures market."""
 
+import hashlib
+import json
 import math
 import os
 import re
@@ -9,7 +11,7 @@ import sqlite3
 import threading
 import time
 import importlib
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -28,6 +30,16 @@ _PANDAAI_GATEWAY_STATUS_CODES = frozenset({502, 503, 504})
 _PANDAAI_RATE_LIMIT_STATUS_CODES = frozenset({429})
 _PANDAAI_RATE_LIMIT_SERVICE_CODES = frozenset({500001, 500002, 500003, 500006})
 _PANDAAI_TRANSIENT_SERVICE_CODES = frozenset({400002, 500004, 500005, 900001})
+_PANDAAI_DAILY_QUOTA_SERVICE_CODE = 500009
+
+
+class PandaAIDailyQuotaExhausted(RuntimeError):
+    """Stable hard failure raised after PandaAI reports exhausted daily data flow."""
+
+    error_code = "pandaai_daily_quota_exhausted"
+
+    def __init__(self):
+        super().__init__(f"{self.error_code}: {_PANDAAI_DAILY_QUOTA_SERVICE_CODE}")
 
 
 def _exception_chain(exc: BaseException):
@@ -81,6 +93,16 @@ def is_pandaai_gateway_error(exc: BaseException) -> bool:
     return False
 
 
+def is_pandaai_daily_quota_exhausted(exc: BaseException) -> bool:
+    """Identify PandaAI's non-retryable daily total-flow exhaustion response."""
+    if _PANDAAI_DAILY_QUOTA_SERVICE_CODE in _exception_numeric_values(exc):
+        return True
+    return any(
+        str(_PANDAAI_DAILY_QUOTA_SERVICE_CODE) in message or "单日总流量超限" in message
+        for message in _exception_messages(exc)
+    )
+
+
 class PandaAIAPI:
     """PandaAI API wrapper with the futures methods AgentQuant already uses."""
 
@@ -100,6 +122,8 @@ class PandaAIAPI:
     _shared_token_lock = threading.Lock()
     _market_cache_db_initialized = False
     _market_cache_db_lock = threading.Lock()
+    _daily_quota_lock = threading.Lock()
+    _daily_quota_exhausted_on: Optional[str] = None
 
     RATE_LIMIT_ERROR_CODE = "500010"
     RATE_LIMIT_ERROR_TEXT = "\u8bf7\u6c42\u6b21\u6570\u8d85\u9650"
@@ -176,6 +200,26 @@ class PandaAIAPI:
         if raw is None:
             return default
         return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+    @classmethod
+    def _daily_quota_day_key(cls) -> str:
+        return date.today().isoformat()
+
+    @classmethod
+    def _mark_daily_quota_exhausted(cls) -> None:
+        with cls._daily_quota_lock:
+            cls._daily_quota_exhausted_on = cls._daily_quota_day_key()
+
+    @classmethod
+    def _raise_if_daily_quota_exhausted(cls) -> None:
+        with cls._daily_quota_lock:
+            exhausted_on = cls._daily_quota_exhausted_on
+            current_day = cls._daily_quota_day_key()
+            if exhausted_on is not None and exhausted_on != current_day:
+                cls._daily_quota_exhausted_on = None
+                exhausted_on = None
+        if exhausted_on == current_day:
+            raise PandaAIDailyQuotaExhausted()
 
     def _dependency_error_message(self, feature_name: str) -> str:
         detail = str(_PANDAS_IMPORT_ERROR) if _PANDAS_IMPORT_ERROR else "pandas is unavailable"
@@ -371,6 +415,7 @@ class PandaAIAPI:
             self.__class__._last_request_at = time.monotonic()
 
     def _call_pandaai(self, method_name: str, **kwargs):
+        self._raise_if_daily_quota_exhausted()
         self._ensure_token()
         sdk_method_name = self._resolve_sdk_method_name(method_name)
         method = getattr(self._panda_data, sdk_method_name, None)
@@ -381,10 +426,16 @@ class PandaAIAPI:
         network_wait_seconds = self._network_retry_initial_wait_seconds
         token_refreshed = False
         while True:
+            self._raise_if_daily_quota_exhausted()
             self._wait_for_request_slot()
+            self._raise_if_daily_quota_exhausted()
             try:
                 return method(**kwargs)
             except Exception as exc:
+                if is_pandaai_daily_quota_exhausted(exc):
+                    self._mark_daily_quota_exhausted()
+                    logger.error("pandaai_daily_quota_exhausted")
+                    raise PandaAIDailyQuotaExhausted() from exc
                 if self._is_token_expired_error(exc) and not token_refreshed:
                     logger.warning("pandaai_token_refresh_required")
                     self._refresh_token_after_expiry()
@@ -443,6 +494,20 @@ class PandaAIAPI:
                     )
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pandaai_extra_data_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        method_name TEXT NOT NULL,
+                        params_json TEXT NOT NULL,
+                        sdk_method_name TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        records_json TEXT NOT NULL,
+                        row_count INTEGER NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
                 conn.commit()
             self.__class__._market_cache_db_initialized = True
 
@@ -490,8 +555,6 @@ class PandaAIAPI:
                 ).fetchone()
             if not row:
                 return None
-            import json
-
             records = json.loads(row[0])
             if isinstance(records, list):
                 normalized = [dict(item) for item in records if isinstance(item, dict)]
@@ -521,8 +584,6 @@ class PandaAIAPI:
             return
         self._ensure_market_cache_db()
         try:
-            import json
-
             with sqlite3.connect(self._market_cache_db_path, timeout=30.0) as conn:
                 conn.execute(
                     """
@@ -536,12 +597,108 @@ class PandaAIAPI:
                         end_key,
                         json.dumps(records, ensure_ascii=False, default=str),
                         len(records),
-                        datetime.utcnow().isoformat(),
+                        datetime.now(timezone.utc).isoformat(),
                     ),
                 )
                 conn.commit()
         except Exception:
             logger.warning("pandaai_market_cache_write_failed")
+
+    def _persistent_extra_cache_identity(self, method_name: str, kwargs: dict[str, Any]) -> tuple[str, str]:
+        params_json = json.dumps(kwargs, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        cache_key = hashlib.sha256(f"{method_name}\n{params_json}".encode("utf-8")).hexdigest()
+        return cache_key, params_json
+
+    def _read_persistent_extra_cache(
+        self,
+        method_name: str,
+        kwargs: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self._persistent_market_cache_enabled:
+            return None
+        self._ensure_market_cache_db()
+        cache_key, params_json = self._persistent_extra_cache_identity(method_name, kwargs)
+        try:
+            with sqlite3.connect(self._market_cache_db_path, timeout=30.0) as conn:
+                row = conn.execute(
+                    """
+                    SELECT method_name, params_json, sdk_method_name, status, records_json, row_count
+                    FROM pandaai_extra_data_cache
+                    WHERE cache_key = ?
+                    """,
+                    (cache_key,),
+                ).fetchone()
+            if not row or row[0] != method_name or row[1] != params_json:
+                return None
+            status = str(row[3])
+            records_raw = json.loads(row[4])
+            if not isinstance(records_raw, list):
+                raise ValueError("extra cache records are not a list")
+            records = [dict(item) for item in records_raw if isinstance(item, dict)]
+            row_count = int(row[5])
+            valid_status = status in {"ok", "no_data"}
+            valid_shape = row_count == len(records)
+            valid_content = (status == "ok" and bool(records)) or (status == "no_data" and not records)
+            if not (valid_status and valid_shape and valid_content):
+                logger.warning("pandaai_extra_cache_record_invalid")
+                return None
+            return {
+                "records": records,
+                "status": status,
+                "reason": None if status == "ok" else "empty_response",
+                "error": None,
+                "method": method_name,
+                "sdk_method": str(row[2]),
+                "params": dict(kwargs),
+                "row_count": row_count,
+            }
+        except Exception:
+            logger.warning("pandaai_extra_cache_read_failed")
+            return None
+
+    def _write_persistent_extra_cache(
+        self,
+        method_name: str,
+        kwargs: dict[str, Any],
+        sdk_method_name: str,
+        status: str,
+        records: list[dict[str, Any]],
+    ) -> None:
+        if not self._persistent_market_cache_enabled:
+            return
+        if status not in {"ok", "no_data"}:
+            return
+        if any(not isinstance(item, dict) for item in records):
+            logger.warning("pandaai_extra_cache_record_invalid")
+            return
+        if (status == "ok") != bool(records):
+            logger.warning("pandaai_extra_cache_record_invalid")
+            return
+        self._ensure_market_cache_db()
+        cache_key, params_json = self._persistent_extra_cache_identity(method_name, kwargs)
+        try:
+            with sqlite3.connect(self._market_cache_db_path, timeout=30.0) as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO pandaai_extra_data_cache (
+                        cache_key, method_name, params_json, sdk_method_name,
+                        status, records_json, row_count, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cache_key,
+                        method_name,
+                        params_json,
+                        sdk_method_name,
+                        status,
+                        json.dumps(records, ensure_ascii=False, default=str),
+                        len(records),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+                conn.commit()
+        except Exception:
+            logger.warning("pandaai_extra_cache_write_failed")
 
     def _resolve_sdk_method_name(self, method_name: str) -> str:
         """Map documented/legacy PandaAI names to the installed SDK names."""
@@ -659,6 +816,13 @@ class PandaAIAPI:
             diagnostic["records"] = list(self._extra_cache[cache_key])
             return diagnostic
 
+        persistent_diagnostic = self._read_persistent_extra_cache(method_name, kwargs)
+        if persistent_diagnostic is not None:
+            records = list(persistent_diagnostic["records"])
+            self._extra_cache[cache_key] = records
+            self._extra_diagnostics_cache[cache_key] = dict(persistent_diagnostic)
+            return dict(persistent_diagnostic)
+
         unavailable_key = self._extra_unavailable_key(method_name, kwargs)
         if unavailable_key in self._unavailable_extra_feature_cache:
             diagnostic = dict(self._unavailable_extra_feature_cache[unavailable_key])
@@ -716,7 +880,16 @@ class PandaAIAPI:
                 "row_count": len(records),
             }
             self._extra_diagnostics_cache[cache_key] = diagnostic
+            self._write_persistent_extra_cache(
+                method_name,
+                kwargs,
+                sdk_method_name,
+                status,
+                records,
+            )
             return dict(diagnostic)
+        except PandaAIDailyQuotaExhausted:
+            raise
         except Exception as exc:
             status, reason = self._classify_extra_data_error(exc)
             logger.warning("pandaai_extra_data_unavailable")
@@ -737,6 +910,8 @@ class PandaAIAPI:
     def _classify_extra_data_error(self, exc: Exception) -> tuple[str, str]:
         message = str(exc)
         lowered = message.lower()
+        if is_pandaai_daily_quota_exhausted(exc):
+            return "provider_error", "daily_quota_exhausted"
         if "200103" in message or "访问权限不足" in message or "access permission" in lowered or "api permission" in lowered:
             return "permission_error", "account_permission_denied"
         if "参数不能为空" in message or "required" in lowered or "missing" in lowered:

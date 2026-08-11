@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+from apis.pandaai.api import PandaAIDailyQuotaExhausted
 from util.logger import logger
 from util.trading_calendar import get_previous_trading_day
 
@@ -140,6 +141,10 @@ def prefetch_pandaai_daily_data(router: Any, config: Dict[str, Any], tickers: It
             try:
                 router.get_daily_candles_df(ticker=ticker, trading_date=trading_date)
                 stats["market_requests"] += 1
+            except PandaAIDailyQuotaExhausted:
+                stats["market_failed"] += 1
+                logger.error("analyst_pandaai_daily_quota_exhausted")
+                raise
             except Exception:
                 stats["market_failed"] += 1
                 logger.warning("analyst_market_cache_prefetch_failed")
@@ -159,6 +164,9 @@ def prefetch_pandaai_daily_data(router: Any, config: Dict[str, Any], tickers: It
                     trading_date=reference_date,
                     underlying_code=ticker_list[0] if ticker_list else None,
                 )
+        except PandaAIDailyQuotaExhausted:
+            logger.error("analyst_pandaai_daily_quota_exhausted")
+            raise
         except Exception:
             logger.warning("analyst_extra_cache_reference_date_unavailable")
             return stats
@@ -173,6 +181,10 @@ def prefetch_pandaai_daily_data(router: Any, config: Dict[str, Any], tickers: It
                     features=features,
                 )
                 stats["extra_requests"] += 1
+            except PandaAIDailyQuotaExhausted:
+                stats["extra_failed"] += 1
+                logger.error("analyst_pandaai_daily_quota_exhausted")
+                raise
             except Exception:
                 stats["extra_failed"] += 1
                 logger.warning("analyst_extra_cache_prefetch_failed")

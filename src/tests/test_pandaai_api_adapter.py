@@ -11,7 +11,8 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from apis.pandaai.api import PandaAIAPI
+from apis.pandaai.api import PandaAIAPI, PandaAIDailyQuotaExhausted
+from tools.agent_tools.analysis.analyst_data_usage import prefetch_pandaai_daily_data
 
 
 class FakeProviderError(RuntimeError):
@@ -34,6 +35,7 @@ class PandaAIAdapterTest(unittest.TestCase):
         PandaAIAPI._shared_token_initialized = False
         PandaAIAPI._shared_sdk_user_cache_configured = False
         PandaAIAPI._market_cache_db_initialized = False
+        PandaAIAPI._daily_quota_exhausted_on = None
         PandaAIAPI._last_request_at = 0.0
         PandaAIAPI._rate_limit_cooldown_until = 0.0
 
@@ -717,6 +719,76 @@ class PandaAIAdapterTest(unittest.TestCase):
 
                 self.assertEqual(len(calls), 1)
 
+    def test_daily_quota_exhaustion_stops_followup_provider_calls(self):
+        fake, env_patch, module_patch = self._build_api()
+        calls = []
+
+        def get_future_basis(**kwargs):
+            calls.append(kwargs)
+            raise FakeProviderError("单日总流量超限", code=500009)
+
+        fake.get_future_basis = get_future_basis
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            api._wait_for_request_slot = lambda: None
+            with self.assertRaisesRegex(PandaAIDailyQuotaExhausted, "pandaai_daily_quota_exhausted: 500009"):
+                api._query_extra_data_with_diagnostic(
+                    "get_future_basis",
+                    underlying_symbol="BU",
+                    start_date="20250806",
+                    end_date="20250821",
+                    fields=[],
+                )
+            with self.assertRaises(PandaAIDailyQuotaExhausted):
+                api._query_extra_data_with_diagnostic(
+                    "get_future_basis",
+                    underlying_symbol="BU",
+                    start_date="20250806",
+                    end_date="20250821",
+                    fields=[],
+                )
+
+        self.assertEqual(len(calls), 1)
+
+    def test_daily_extra_prefetch_stops_after_first_quota_error(self):
+        class QuotaRouter:
+            def __init__(self):
+                self.calls = []
+
+            def get_pandaai_futures_extra_snapshot(self, **kwargs):
+                self.calls.append(kwargs["underlying_code"])
+                raise PandaAIDailyQuotaExhausted()
+
+        router = QuotaRouter()
+        config = {
+            "runtime": {
+                "data_cache": {
+                    "enabled": True,
+                    "prefetch_pandaai_market": False,
+                    "prefetch_pandaai_extra": True,
+                }
+            },
+            "pandaai_extra_data": {
+                "enabled": True,
+                "reference_lag_days": 1,
+                "lookback_days": 5,
+                "features": {"basis": True},
+            },
+        }
+        with patch(
+            "tools.agent_tools.analysis.analyst_data_usage.get_previous_trading_day",
+            return_value=datetime(2025, 8, 21),
+        ):
+            with self.assertRaises(PandaAIDailyQuotaExhausted):
+                prefetch_pandaai_daily_data(
+                    router,
+                    config,
+                    ["BU", "C", "CF"],
+                    datetime(2025, 8, 22),
+                )
+
+        self.assertEqual(router.calls, ["BU"])
+
     def test_short_zhengzhou_contract_code_expands_at_pandaai_boundary(self):
         fake, env_patch, module_patch = self._build_api()
         with env_patch, module_patch:
@@ -1313,6 +1385,67 @@ class PandaAIAdapterTest(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(len(market_calls), 1)
+
+    def test_persistent_extra_cache_exact_hit_avoids_provider_request(self):
+        fake, env_patch, module_patch = self._build_api()
+        with tempfile.TemporaryDirectory(
+            prefix="agentquant_pandaai_extra_cache_",
+            ignore_cleanup_errors=True,
+        ) as tmpdir:
+            env = {
+                "PANDAAI_PERSISTENT_MARKET_CACHE": "1",
+                "PANDAAI_MARKET_CACHE_DB": str(Path(tmpdir) / "market.db"),
+            }
+            kwargs = {
+                "underlying_symbol": "BU",
+                "start_date": "20250806",
+                "end_date": "20250821",
+                "fields": [],
+            }
+            with env_patch, module_patch, patch.dict(os.environ, env, clear=False):
+                api = PandaAIAPI()
+                first = api._query_extra_data_with_diagnostic("get_future_basis", **kwargs)
+                PandaAIAPI._shared_extra_cache.clear()
+                PandaAIAPI._shared_extra_diagnostics_cache.clear()
+                second = PandaAIAPI()._query_extra_data_with_diagnostic("get_future_basis", **kwargs)
+
+        basis_calls = [call for call in fake.calls if call["func"] == "get_future_basis"]
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(len(basis_calls), 1)
+
+    def test_persistent_extra_cache_reuses_deterministic_empty_response(self):
+        fake, env_patch, module_patch = self._build_api()
+        basis_calls = []
+
+        def get_future_basis(**kwargs):
+            basis_calls.append(kwargs)
+            return []
+
+        fake.get_future_basis = get_future_basis
+        with tempfile.TemporaryDirectory(
+            prefix="agentquant_pandaai_empty_extra_cache_",
+            ignore_cleanup_errors=True,
+        ) as tmpdir:
+            env = {
+                "PANDAAI_PERSISTENT_MARKET_CACHE": "1",
+                "PANDAAI_MARKET_CACHE_DB": str(Path(tmpdir) / "market.db"),
+            }
+            kwargs = {
+                "underlying_symbol": "BU",
+                "start_date": "20250806",
+                "end_date": "20250821",
+                "fields": [],
+            }
+            with env_patch, module_patch, patch.dict(os.environ, env, clear=False):
+                first = PandaAIAPI()._query_extra_data_with_diagnostic("get_future_basis", **kwargs)
+                PandaAIAPI._shared_extra_cache.clear()
+                PandaAIAPI._shared_extra_diagnostics_cache.clear()
+                second = PandaAIAPI()._query_extra_data_with_diagnostic("get_future_basis", **kwargs)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "no_data")
+        self.assertEqual(len(basis_calls), 1)
 
     def test_invalid_or_empty_persistent_cache_is_not_returned_as_data(self):
         invalid_cases = (
