@@ -34,6 +34,9 @@ def _validated_row(**overrides):
         "market_regime": "trend",
         "policy_type": "contextual_rule_calibration:technical_parameters",
         "policy_action": "calibrate",
+        "setup_type": "*",
+        "source_trading_date": "2025-03-01",
+        "valid_until": "2025-03-20",
         "rule_validation_status": "validated_rule_applied",
         "confidence_score": 0.60,
         "sample_count": 5,
@@ -117,6 +120,11 @@ class TechnicalParameterLearningFlowTest(unittest.TestCase):
 
         self.assertNotEqual(adjusted, params)
         self.assertEqual([item["id"] for item in diagnostics["applied"]], [matching["id"]])
+        self.assertEqual(
+            diagnostics["applied"][0]["policy_type"],
+            "contextual_rule_calibration:technical_parameters",
+        )
+        self.assertEqual(diagnostics["applied"][0]["source_trading_date"], "2025-03-01")
 
     def test_exact_market_regime_takes_priority_over_wildcard_regime(self):
         params = calculate_adaptive_params(

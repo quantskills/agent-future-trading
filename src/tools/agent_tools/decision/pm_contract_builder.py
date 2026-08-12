@@ -882,6 +882,7 @@ def build_final_action_contract(
     opportunity_scorecard: dict | None,
     market_confirmation: dict | None,
     alpha_setup_action_values: list | None,
+    adaptive_policy_applied: list | None = None,
     execution_contract_fields: dict | None = None,
     contract_code: str | None = None,
     final_contract_scope: dict | None = None,
@@ -1082,6 +1083,11 @@ def build_final_action_contract(
         },
         "learning_used": {
             "alpha_setup_action_values": selected_action_values,
+            "adaptive_policy_applied": [
+                dict(row)
+                for row in (adaptive_policy_applied or [])
+                if isinstance(row, dict)
+            ],
             "memory_requirements": memory_requirements,
             "memory_retrieval": memory_retrieval,
             "positive_open_seed": diagnostics.get("positive_open_action_value_seed") if isinstance(diagnostics.get("positive_open_action_value_seed"), dict) else {},

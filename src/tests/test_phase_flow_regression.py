@@ -2285,6 +2285,15 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                     "applied": [
                         {
                             "id": "technical-policy-1",
+                            "policy_type": "contextual_rule_calibration:technical_parameters",
+                            "policy_action": "calibrate",
+                            "ticker": "RB",
+                            "side": "*",
+                            "setup_type": "*",
+                            "horizon_class": "short",
+                            "market_regime": "trend",
+                            "source_trading_date": "2025-07-01",
+                            "valid_until": "2025-07-15",
                             "changed": {
                                 "trend.short": {
                                     "from": 10,
@@ -2362,6 +2371,15 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             [
                 {
                     "policy_id": "technical-policy-1",
+                    "policy_type": "contextual_rule_calibration:technical_parameters",
+                    "policy_action": "calibrate",
+                    "ticker": "RB",
+                    "side": "*",
+                    "setup_type": "*",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "source_trading_date": "2025-07-01",
+                    "valid_until": "2025-07-15",
                     "parameter_changes": {
                         "trend.short": {"from": 10, "to": 9},
                     },
@@ -9254,7 +9272,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_mean": 1800.0,
                     "reward_sum": 1800.0,
                     "win_rate": 1.0,
-                    "confidence_score": 0.16,
+                    "confidence_score": 0.60,
                     "action_preference": "positive_candidate_open",
                     "max_position_impact": 0.03,
                     "payload": {
@@ -13118,6 +13136,55 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(detail["target_margin_ratio"], 0.105)
         self.assertIn("step4_alpha_scale_release", detail["reason_codes"])
 
+    def test_four_positive_samples_release_real_budget_but_not_alpha_scale(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=["alpha_setup_ev_fusion", "qualified_positive_expectancy"],
+            control_diagnostics={
+                "alpha_setup_ev_fusion": {
+                    "scorecard_state": "tradeable_candidate",
+                    "candidate_quality": 0.75,
+                    "has_tradeable_support": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
+                    "qualified_positive_expectancy": True,
+                    "positive_action_value": True,
+                    "strong_realtime_evidence": True,
+                    "strong_market_confirmation": True,
+                    "technical_supports_side": True,
+                    "technical_entry_timing_supports_side": True,
+                    "technical_opposes_side": False,
+                    "fundamental_supports_side": True,
+                    "fundamental_opposes_side": False,
+                    "current_confirmation_score": 0.78,
+                    "independent_support_count": 2,
+                    "action_value_stats": {
+                        "sample_count": 4,
+                        "reward_sum": 9000.0,
+                        "mean_return_on_notional": 0.018,
+                    },
+                }
+            },
+            full_config={
+                "portfolio_manager": {
+                    "alpha_setup_ev_fusion": {
+                        "real_trade_min_action_value_samples": 2,
+                        "alpha_scale_min_action_value_samples": 5,
+                    }
+                },
+                "position_budget_policy": {
+                    "normal_trade_margin_ratio": 0.030,
+                    "normal_trade_margin_max_ratio": 0.060,
+                    "deployable_margin_ratio": 0.060,
+                    "deployable_margin_max_ratio": 0.120,
+                },
+            },
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(detail["authority_type"], "real_budget_entry")
+        self.assertEqual(detail["capital_layer"], CAPITAL_LAYER_REAL_BUDGET)
+        self.assertFalse(detail["alpha_scale_eligible"])
+
     def test_pending_technical_setup_can_scale_without_becoming_direct_execution(self):
         allowed, detail = _final_contract_authority(
             control_reasons=[
@@ -13240,7 +13307,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertNotIn("rank_capital_priority_real_budget_release", detail)
         self.assertNotIn("rank_capital_priority_real_budget_release", detail["reason_codes"])
 
-    def test_probe_candidate_quality_spans_the_existing_margin_range(self):
+    def test_step4_probe_keeps_floor_and_preserves_existing_margin_range_for_step5(self):
         def authority_for_quality(quality):
             return _final_contract_authority(
                 control_reasons=["alpha_setup_ev_fusion"],
@@ -13273,7 +13340,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         high = authority_for_quality(1.0)
         self.assertEqual(low["capital_layer"], CAPITAL_LAYER_EXPLORATION)
         self.assertAlmostEqual(low["target_margin_ratio"], 0.008)
-        self.assertAlmostEqual(high["target_margin_ratio"], 0.015)
+        self.assertAlmostEqual(high["target_margin_ratio"], 0.008)
+        self.assertAlmostEqual(low["max_allowed_margin_ratio"], 0.015)
+        self.assertAlmostEqual(high["max_allowed_margin_ratio"], 0.015)
 
     def test_rank_one_without_current_evidence_does_not_release_real_budget(self):
         allowed, detail = _final_contract_authority(

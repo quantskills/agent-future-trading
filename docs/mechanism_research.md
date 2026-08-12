@@ -46,7 +46,7 @@
 | `setup_type` | 一笔机会采用的交易形态身份，不是收益、动作或记忆表。技术分析师正式枚举为 `trend_breakout_setup`、`trend_pullback_setup`、`range_reversal_setup`、`volatility_breakout_setup`、`failed_rebound_setup`、`unknown`；PM 将选中的 canonical setup 冻结进 FAC | 技术分析师产生当日值；PM 冻结最终值；Researcher 继承 | SCC、PM 识别当日机会；后续所有正式记忆用它隔离作用域 | 不是独立表；不得从成交结果或次日 SCC 重建 |
 | `alpha_setup_sample` | 一条最小学习观察，记录某个 setup 在某日发生的交易、未交易、持仓动作或执行结果 | Researcher 的 `write_alpha_setup_profiles`/`upsert_alpha_setup_sample_and_profile` | Researcher 聚合；其他智能体不直接消费原始 sample | 原始 sample 不是交易授权 |
 | `alpha_setup_profile` | 同一 `ticker/side/horizon/regime/setup/data_combo` 下多条 sample 的“成绩单”，包括样本数、胜率、盈亏因子、净盈亏、置信度和生命周期状态 | Researcher 确定性聚合 sample | 分析师读取安全摘要；PM 经 `decision_memory_retrieval` 读取同 setup profile | PM 正式消费必须匹配 setup；candidate/watchlist 不具备成熟放大权 |
-| `alpha_setup_action_value` | 同一学习身份下，对某个动作 lane 的历史结果总结；回答“历史上 open/hold/reduce/exit/execution 等动作表现如何”，不是明日指令 | Researcher 在 profile 刷新时按动作分账聚合 | PM 经 `decision_memory_retrieval` 用于评分、排名、生命周期和执行偏好；分析师只读显式授权的安全校准投影 | 只有 canonical family/lane/preference 和 consumer_scope 完整的记录具备正式消费资格 |
+| `alpha_setup_action_value` | 同一学习身份下，对某个动作 lane 的历史结果总结；回答“历史上 open/hold/reduce/exit/execution 等动作表现如何”，不是明日指令 | Researcher 在 profile 刷新时按动作分账聚合 | PM 经 `decision_memory_retrieval` 用于评分、排名、生命周期和执行偏好；分析师只读显式授权的安全校准投影 | 只有 canonical family/lane/preference 和 consumer_scope 完整的记录具备正式消费资格；置信度直接采用已包含样本量的对应动作生命周期置信度，不再二次乘样本比例 |
 | `adaptive_policy_state` | 从合格历史事实导出的有时效、置信度和样本门槛的未来软规则，如参数校准、cap、probe；不是订单 | Researcher 的多个 policy writer | PM 经 `decision_memory_retrieval` 消费交易决策类 policy；技术分析师只消费 `contextual_rule_calibration:technical_parameters` | `fast_candidate_alpha` 仅来自合格 `missed_alpha_accountability`，只授予下一交易日同作用域 probe 权限 |
 | `provisional_policy_state` | 低成熟度、可回滚的临时政策，仅允许进入 PM risk gate 的低权限校准 | Researcher | PM risk gate 经 `decision_memory_retrieval` 消费 | 不得直接授权 real/scale、方向或手数 |
 
@@ -121,7 +121,7 @@ Phase1 投资组合经理 final_action_contract
 1. 分析师消费本专业校准类结构化研究，输出更干净的 `action_evidence_contract`。
 2. 投资组合经理经 `decision_memory_retrieval` 消费交易决策类结构化研究，再按 PM 六步机制通过生命周期路由、仅新增风险 Step5 全市场资金部署和唯一 `final_action_contract` 落地。
 
-多期限预测评价属于第二条路径中的只读校准输入：Researcher 以 AEC 的逻辑交易日为预测起点，在 1、3、5、10 个结算交易日分别成熟预测，按执行手续费事实表计算预测方向手续费后收益，并按品种、板块、市场状态和全局层级汇总方向准确率与 Brier。PM 只把该摘要变成 Step5 的有符号 `calibrated_forecast_value`，冷启动为 0，负值保留交易候选且只降低相对资金顺序。
+多期限预测评价属于第二条路径中的只读校准输入：Researcher 以 AEC 的逻辑交易日为预测起点，在 1、3、5、10 个结算交易日分别成熟预测，按执行手续费事实表计算预测方向手续费后收益，并按品种、板块、市场状态和全局层级汇总方向准确率与 Brier。PM 先按候选 `expected_horizon_days` 映射到同一预测网格，再读取三名分析师当日该期限的完整概率分布；历史摘要只校准对应分析师、期限和信号侧的当日概率与预期收益。中性分析师仍按上涨、下跌、震荡概率参与；结果只进入 Step5 有符号 `calibrated_forecast_value`，不新增一致性门槛，冷启动为 0，负值保留交易候选且只降低相对资金顺序。
 
 信号收集员、审计员、交易员、会计师、复盘员都不能直接读取研究库来生成或改变交易权限。
 
@@ -156,9 +156,9 @@ Researcher 的数据库写入、`researcher_learning_completed`、外置 payload
 | `alpha_setup_sample` | 单个 setup 的交易、未交易、执行样本 | 研究员汇总 | 必须有交易日、方向、setup、horizon、regime、数据质量 |
 | `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师读取校准类摘要；投资组合经理经 `decision_memory_retrieval` 消费交易决策类摘要 | 只作为同作用域证据，不是品种黑名单 |
 | `alpha_setup_action_value` | 按 `canonical_action_family` 与 open/add/hold/reduce/exit/execution/conditional_monitor lane 分账的动作学习结果，并带 `memory_side_role` | 投资组合经理只经 `decision_memory_retrieval` 消费顶层 `pm_learning` 正式行；分析师只消费其中显式授权 `analyst_calibration` 的安全投影 | 分析师不得读取原始 PM 行；交易员、审计员不直接读取；不能跨 action family/lane 使用 |
-| `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | 投资组合经理只经 `decision_memory_retrieval` 消费 | 必须被当日证据、失效边界、资金和审计再验证；审计员和交易员不直接消费 |
+| `adaptive_policy_state` | protect/cap/probe/watchlist 及 technical_parameters 等未来策略状态 | 投资组合经理只经 `decision_memory_retrieval` 消费交易决策 policy；技术分析师只消费 exact-ticker、short-horizon 的 `contextual_rule_calibration:technical_parameters` | 必须被当日证据、失效边界、资金和审计再验证；审计员和交易员不直接消费 |
 | `opportunity_ranking_preference` | 投资组合经理新增风险排序、资金分配理由、排名与后续收益的关系 | 目前仅供 Researcher 和开发评估诊断，没有正式 PM 消费端 | 不能声称已经影响未来 rank 或资金部署；本次不新增消费链 |
-| `research_position_feedback` | 正式 action-value 是否被 PM 实际声明消费，以及该合约后续是否成交和结算 | Researcher 和开发评估诊断 | 只匹配 `learning_used.alpha_setup_action_values` 与最终 `decision_learning_rows`；未实际消费学习时不强制生成反馈，也不作为新 rank、手数或交易输入 |
+| `research_position_feedback` | 正式 action-value 与 adaptive policy 是否被实际消费，以及该合约后续是否成交和结算 | Researcher 和开发评估诊断 | action-value 只匹配 `learning_used.alpha_setup_action_values` 与最终 `decision_learning_rows`；policy 只读取 `learning_used.adaptive_policy_applied`，两类引用独立归因，不作为新 rank、手数或交易输入 |
 | `setup_execution_learning` | 盘中触发、未成交、涨跌停、追价、执行质量 | 投资组合经理经 `decision_memory_retrieval` 消费后写入未来合约执行字段 | 只能影响未来 `final_action_contract.execution_profile/entry_trigger`，不改方向、不改手数；交易员不直接读取 |
 | `evidence_fusion_attribution` | PM 是否正确处理多维证据一致性、冲突、反向证据、新闻时效、profile 下假突破和确认需求 | 目前仅供 Researcher 和开发评估诊断，没有正式分析师或 PM 消费端 | 不能声称已影响未来证据、rank 或仓位；不创建交易权限，不改当天事实，本次不新增消费链 |
 
@@ -222,7 +222,7 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 
 同一批通过 T+1、canonical、作用域、family/lane 和安全投影校验的正式 open/add 摘要必须同时用于 LLM 前 Prompt 和 LLM 后确定性校准，不得清空 Prompt 侧。Prompt 只允许模型条件性参考，最终 setup 或 canonical trigger 不精确匹配时，后置确定性校准贡献必须为零。
 
-技术面分析师额外保留一项专业机制：在 LLM 调用前，根据当前可见价格形成初始自适应参数和初始 `market_regime`，再读取过去有效、作用域匹配且经过验证的 `contextual_rule_calibration:technical_parameters`，有界调整 EMA、RSI 和 Bollinger 参数，并用校准后的参数重新计算最终技术指标和 `technical_context`。该机制不直接修改 `signal`、`opportunity_state`、触发、手数、rank、预算和交易权限。
+技术面分析师额外保留一项专业机制：Researcher 从 exact-ticker、short-horizon 技术绩效用独立查询和独立配额生产 `contextual_rule_calibration:technical_parameters`，不允许跨品种通配 policy，也不与 PM contextual policy 共享配额。在下一交易日 LLM 调用前，技术分析师根据当前可见价格形成初始自适应参数和初始 `market_regime`，再读取过去有效、作用域匹配且经过验证的 technical policy，有界调整 EMA、RSI 和 Bollinger 参数，并用校准后的参数重新计算最终技术指标和 `technical_context`。`learning_impact_summary` 记录实际改变参数的 policy ID、作用域及参数前后值，并沿 AEC→SCC 进入 PM Step6；该机制不直接修改 `signal`、`opportunity_state`、触发、手数、rank、预算和交易权限。
 
 完整持仓 episode 进入分析师提示词时，只投影结构化的相对结构失效距离、原始 ATR 距离、预期/实际持有期、最终退出原因和手续费后 `return_on_notional`；其检索继续服从既有 ticker/sector/horizon 范围和 T+1 边界，并按 `ABS(return_on_notional)` 选择代表周期，人民币 `net_pnl` 只保留数据库审计，不进入提示词、排序或周期好坏判断。历史开仓价、历史结构价等绝对价格不得复制到当日信号，旧 episode 自由文本不得作为回退来源。正式 action-value 只有在同品种、严格早于当日、有效期合法、canonical 语义完整，且其顶层 `consumer_scope=pm_learning`、内嵌 `signal_calibration.contract_version` 合法、内嵌 `consumer_scope=analyst_calibration` 并明确允许 `analysis_team` 使用时，才投影为不含原始学习 ID、人民币reward、rank、手数和保证金的提示词摘要；该摘要保留`mean_return_on_notional`与最新完整周期收益率。分析师校准强度只按手续费后名义收益率、样本数、置信度和胜率计算；同完整作用域最新完整周期亏损时，正式action-value的负向校准优先撤销旧正向Profile校准。similar、weak、incomplete、counterfactual prior 不进入该投影。
 
@@ -288,6 +288,8 @@ signal_collection_contract
 策略失效不新增状态机：同 ticker、side、setup 和标准化 market_regime 的最近最多5个手续费后完整周期达到既有 `cap_min_samples` 且平均 `return_on_notional<0` 时，复用 `capped` 撤销 real/scale 放大；horizon和data_combo不拆分该负期望统计。新 probe 改善该滚动均值后，再由既有 watchlist/protected/deployable 样本、胜率、盈利因子和收益门槛恢复。人民币盈亏继续用于财务事实和既有生命周期审计，不得重新进入 Rank 或仓位学习方向判断。
 
 PM 的决策学习生命周期与 Trader 的条件执行生命周期必须分开。`current_lots=0 -> target_lots!=0` 的条件 probe 在 PM 中仍使用 open/add 决策学习并参加新增风险 rank，但 `requires_intraday_confirmation` 继续要求 Trader 等待触发；只有手数不变且仅保留监控的最终合约才使用 conditional_monitor 决策学习。正式学习进入 `learning_used` 只证明 PM 消费事实，不证明合约一定获预算、通过审计、触发或成交。
+
+Adaptive policy 的实际应用只由 `final_action_contract.learning_used.adaptive_policy_applied` 证明。技术参数 policy 沿 signal/AEC→SCC，PM policy 沿 control diagnostics 进入 Step6；只有真实改变评分、参数、仓位比例或资金层且未被后续规则覆盖的 policy 才写入。Researcher 的 `research_position_feedback.policy_refs_json` 只读取该字段，不读取 policy 检索列表，也不因 `memory_refs_json` 为空而清空；policy 与 action-value 分别归因。
 
 对最终 `hold/reduce/exit` 合约，生命周期匹配只是必要条件。只有某条正式 action-value 的精确 ID 被对应软生命周期控制选中、实际改变了最终动作或仓位比例，并且该影响没有被后续规则覆盖，才允许同时进入最终 `decision_learning_rows` 与 `learning_used.alpha_setup_action_values`。唯一窄桥接是：canonical、`pm_learning` 的负向 hold 记录确实使同方向持仓比例下降时，可保持原 hold family/lane 和精确 ID 进入最终 reduce FAC；它不得被重标为 reduce，也不得把其他 hold 记录全局放行。结构/ATR 止损、明确技术反转、基本面中期反向和其他独立确定性生命周期规则即使得到同 lane 历史记录，也不得把该记录写成实际消费学习。
 

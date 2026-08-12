@@ -36,7 +36,6 @@ from tools.common.final_action_semantics import (
     derive_review_expectation,
     validate_action_preference_family_consistency,
 )
-from tools.common.learning_contract import CONTRACT_KEY
 from tools.common.learning_identity import formal_fac_learning_identity
 
 ANALYSTS = ("technical", "fundamental", "commodity_news")
@@ -1774,9 +1773,8 @@ def _episode_lesson_text(
 
 
 def _policy_ref(row: Dict[str, Any]) -> Dict[str, Any]:
-    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-    contract = payload.get(CONTRACT_KEY) if isinstance(payload.get(CONTRACT_KEY), dict) else {}
     return {
+        "id": str(row.get("id") or ""),
         "policy_type": str(row.get("policy_type") or ""),
         "policy_action": str(row.get("policy_action") or ""),
         "ticker": str(row.get("ticker") or "*").upper(),
@@ -1784,9 +1782,8 @@ def _policy_ref(row: Dict[str, Any]) -> Dict[str, Any]:
         "setup_type": str(row.get("setup_type") or "*"),
         "horizon_class": str(row.get("horizon_class") or "*"),
         "market_regime": str(row.get("market_regime") or "*"),
-        "sample_count": _safe_int(row.get("sample_count")),
-        "confidence_score": _safe_float(row.get("confidence_score")),
-        "position_authority": str(contract.get("position_authority") or ""),
+        "source_trading_date": str(row.get("source_trading_date") or ""),
+        "valid_until": str(row.get("valid_until") or ""),
     }
 
 
@@ -1884,23 +1881,19 @@ def _feedback_learning_refs(trace: Dict[str, Any]) -> Tuple[List[Dict[str, Any]]
             "sample_count": _value(row, "sample_count"),
         })
 
-    adaptive_policy = source.get("adaptive_policy_state")
     policies = (
-        adaptive_policy.get("policies")
-        if isinstance(adaptive_policy, dict) and isinstance(adaptive_policy.get("policies"), list)
+        source.get("adaptive_policy_applied")
+        if isinstance(source.get("adaptive_policy_applied"), list)
         else []
     )
-    if not policies and isinstance(source.get("adaptive_policy_applied"), list):
-        policies = source.get("adaptive_policy_applied")
     policy_refs = [
         _policy_ref(item)
         for item in policies
         if isinstance(item, dict)
+        and str(item.get("id") or "").strip()
         and str(item.get("policy_type") or "").strip()
         and str(item.get("policy_action") or "").strip()
     ]
-    if not memory_refs:
-        policy_refs = []
     return (
         memory_refs,
         policy_refs,

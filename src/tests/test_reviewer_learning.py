@@ -64,6 +64,7 @@ from tools.agent_tools.research.research_learning import (
     _execution_learning_from_snapshot,
     _recent_trade_episodes_for_research,
     _write_alpha_setup_policy_state,
+    backfill_alpha_setup_profiles_from_history,
     run_researcher_causal_review,
     validate_exploratory_hypotheses,
     write_alpha_setup_profiles,
@@ -4409,6 +4410,83 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         _ensure_reviewer_learning_schema(conn.cursor())
         return conn
 
+    def test_alpha_setup_bootstrap_uses_existing_reviewer_transaction_grouping(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.executescript(
+                """
+                CREATE TABLE futures_recommendation (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT,
+                    trading_date TEXT,
+                    source_type TEXT,
+                    underlying_code TEXT,
+                    created_at TEXT
+                );
+                CREATE TABLE futures_transactions (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT,
+                    trading_date TEXT,
+                    ticker TEXT,
+                    recommendation_id TEXT,
+                    created_at TEXT
+                );
+                """
+            )
+            cursor.execute(
+                "INSERT INTO futures_recommendation VALUES "
+                "('rec-1', 'cfg', '2025-03-20', 'strategy', 'RB', '2025-03-20T08:00:00')"
+            )
+            cursor.executemany(
+                "INSERT INTO futures_transactions VALUES (?, 'cfg', '2025-03-20', 'RB', 'rec-1', ?)",
+                [
+                    ("tx-1", "2025-03-20T09:01:00"),
+                    ("tx-2", "2025-03-20T09:02:00"),
+                ],
+            )
+
+            def write_profiles(
+                _cursor,
+                *,
+                cfg,
+                config_id,
+                trading_date,
+                strategy_recommendations,
+                transactions_by_recommendation,
+            ):
+                self.assertEqual(config_id, "cfg")
+                self.assertEqual(trading_date, "2025-03-20")
+                self.assertEqual(len(strategy_recommendations), 1)
+                self.assertEqual(
+                    [row["id"] for row in transactions_by_recommendation["rec-1"]],
+                    ["tx-1", "tx-2"],
+                )
+                return {
+                    "rows": 1,
+                    "status": "applied",
+                    "lifecycle_counts": {"candidate": 1},
+                }
+
+            with patch(
+                "tools.agent_tools.research.research_learning.write_alpha_setup_profiles",
+                side_effect=write_profiles,
+            ):
+                result = backfill_alpha_setup_profiles_from_history(
+                    cursor,
+                    cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                    config_id="cfg",
+                    start_date="2025-03-20",
+                    end_date="2025-03-20",
+                    reset=True,
+                )
+
+            self.assertEqual(result["status"], "applied")
+            self.assertEqual(result["date_count"], 1)
+            self.assertEqual(result["sample_rows"], 1)
+        finally:
+            conn.close()
+
     def test_forecast_evaluation_uses_aec_logical_date_not_reference_portfolio_date(self):
         conn = self._connection()
         try:
@@ -6018,21 +6096,20 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                                 }
                             ]
                         },
-                        "adaptive_policy_state": {
-                            "policies": [
-                                {
-                                    "policy_type": "learning_mechanism:alpha_promotion",
-                                    "policy_action": "protect",
-                                    "ticker": "BU",
-                                    "side": "long",
-                                    "setup_type": "trend_breakout_setup",
-                                    "horizon_class": "short",
-                                    "market_regime": "trend",
-                                    "sample_count": 4,
-                                    "confidence_score": 0.7,
-                                }
-                            ]
-                        },
+                        "adaptive_policy_applied": [
+                            {
+                                "id": "policy-alpha-promotion-1",
+                                "policy_type": "learning_mechanism:alpha_promotion",
+                                "policy_action": "protect",
+                                "ticker": "BU",
+                                "side": "long",
+                                "setup_type": "trend_breakout_setup",
+                                "horizon_class": "short",
+                                "market_regime": "trend",
+                                "source_trading_date": "2025-02-27",
+                                "valid_until": "2025-03-29",
+                            }
+                        ],
                         "position_effect": {
                             "current_lots": 0,
                             "target_lots": 2,
@@ -9189,6 +9266,84 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_action_value_confidence_uses_lifecycle_sample_weight_once(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cfg = {
+                "learning": {
+                    "alpha_setup_profile": {
+                        "enabled": True,
+                        "min_samples_deployable": 7,
+                    }
+                }
+            }
+            for index, (trading_date, net_pnl) in enumerate(
+                (("2025-03-20", 1800.0), ("2025-03-21", 2200.0)),
+                start=1,
+            ):
+                upsert_alpha_setup_sample_and_profile(
+                    cursor,
+                    cfg=cfg,
+                    config_id="cfg",
+                    trading_date=trading_date,
+                    sample={
+                        "ticker": "I",
+                        "side": "long",
+                        "sector": "black",
+                        "horizon_class": "short",
+                        "market_regime": "choppy_bullish_bias",
+                        "setup_type": "trend_breakout_setup",
+                        "data_combo": "technical+fundamental+news",
+                        "recommendation_id": f"rec-i-{index}",
+                        "action_taken": "open_long",
+                        "current_lots": 0,
+                        "target_lots": 1,
+                        "executed_lots": 1,
+                        "net_pnl": net_pnl,
+                        "commission": 0.0,
+                        "source_type": "trade_episode",
+                        "opportunity_state": "tradeable_candidate",
+                        "outcome_label": "profit",
+                        "evidence": {
+                            "final_action_contract": {
+                                "final_action": "open_probe",
+                                "current_lots": 0,
+                                "target_lots": 1,
+                                "lots_delta": 1,
+                                "authority_type": "exploration_probe",
+                                "entry_trigger": "breakout",
+                                "capital_deployment": {
+                                    "capital_layer": "exploration_probe",
+                                    "selected_for_capital_deployment": True,
+                                },
+                            }
+                        },
+                        "result": {
+                            "episode_net_pnl": net_pnl,
+                            "return_on_notional": net_pnl / 100000.0,
+                        },
+                    },
+                )
+
+            row = cursor.execute(
+                """
+                SELECT sample_count, confidence_score, payload_json
+                FROM alpha_setup_action_value
+                WHERE config_id='cfg' AND ticker='I' AND action_name='open'
+                """
+            ).fetchone()
+            payload = load_externalized_json(row["payload_json"])
+
+            self.assertEqual(row["sample_count"], 2)
+            self.assertGreaterEqual(row["confidence_score"], 0.35)
+            self.assertAlmostEqual(
+                row["confidence_score"],
+                payload["profile_lifecycle"]["confidence_score"],
+            )
+        finally:
+            conn.close()
+
     def test_alpha_setup_loss_episode_writes_entry_quality_outcome(self):
         conn = self._connection()
         try:
@@ -10769,6 +10924,79 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             payload = load_externalized_json(row["payload_json"])
             self.assertIn("technical_parameters", payload["rule_adjustments"])
             self.assertIn("trend_short_multiplier", payload["rule_adjustments"]["technical_parameters"])
+        finally:
+            conn.close()
+
+    def test_technical_parameter_policy_has_independent_exact_ticker_quota(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            rows = [
+                ("ap-fundamental-1", "fundamental", "BU", "medium", "long", 0.75, 4200.0, "2025-03-10T12:00:00"),
+                ("ap-fundamental-2", "fundamental", "RB", "medium", "long", 0.72, 3900.0, "2025-03-10T11:00:00"),
+                ("ap-technical-wildcard", "technical", "*", "short", "long", 0.80, 5000.0, "2025-03-10T13:00:00"),
+                ("ap-technical-exact", "technical", "CF", "short", "short", 0.78, 4700.0, "2025-03-10T10:00:00"),
+            ]
+            for row_id, analyst, ticker, horizon, side, hit_rate, net_pnl, updated in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO analyst_performance (
+                        id, config_id, analyst, ticker, sector, horizon_class, signal_side,
+                        sample_count, hit_rate, avg_pnl, net_pnl, confidence_score,
+                        last_updated, valid_until, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row_id,
+                        "cfg",
+                        analyst,
+                        ticker,
+                        "agriculture",
+                        horizon,
+                        side,
+                        6,
+                        hit_rate,
+                        net_pnl / 6.0,
+                        net_pnl,
+                        0.60,
+                        updated,
+                        "2025-03-30",
+                        json.dumps({"sample_count": 6}),
+                    ),
+                )
+
+            written = _write_contextual_rule_calibration_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-10",
+                cfg={
+                    "learning": {
+                        "contextual_rule_calibration": {
+                            "enabled": True,
+                            "valid_days": 5,
+                            "max_rows_per_day": 2,
+                            "min_analyst_samples": 3,
+                            "min_analyst_confidence": 0.35,
+                            "technical_positive_hit_rate": 0.60,
+                            "technical_weak_hit_rate": 0.40,
+                        }
+                    }
+                },
+                strategy_recommendations=[],
+                no_trade_reason_counter=Counter(),
+            )
+
+            self.assertEqual(written, 3)
+            technical = cursor.execute(
+                """
+                SELECT ticker, horizon_class, policy_type
+                FROM adaptive_policy_state
+                WHERE policy_type = 'contextual_rule_calibration:technical_parameters'
+                """
+            ).fetchall()
+            self.assertEqual(len(technical), 1)
+            self.assertEqual(technical[0]["ticker"], "CF")
+            self.assertEqual(technical[0]["horizon_class"], "short")
         finally:
             conn.close()
 

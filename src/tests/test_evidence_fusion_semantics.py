@@ -10,6 +10,10 @@ if str(SRC_ROOT) not in sys.path:
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from agents.decision_team.auditor import audit_futures_recommendation
+from agents.decision_team.portfolio_manager import (
+    _collect_applied_adaptive_policies,
+    _technical_policy_applications_from_signals,
+)
 from tools.agent_tools.analysis.analyst_quality import apply_trade_research_contract
 from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
 from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_side
@@ -24,7 +28,10 @@ from tools.common.evidence_fusion_semantics import (
 from tools.common.execution_trigger_semantics import (
     canonical_entry_invalidation_condition,
 )
-from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tools.common.signal_evidence_collection import (
+    build_pm_evidence_signals_from_scc,
+    build_signal_collection_contract,
+)
 from tests.contract_test_fixtures import build_test_aec
 
 
@@ -497,6 +504,20 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             },
             market_confirmation={"confirmation_score": 0.70},
             alpha_setup_action_values=action_values,
+            adaptive_policy_applied=[
+                {
+                    "id": "policy-1",
+                    "policy_type": "fast_loss_sentinel",
+                    "policy_action": "cap",
+                    "ticker": "RB",
+                    "side": "long",
+                    "setup_type": "trend_breakout",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "source_trading_date": "2025-05-05",
+                    "valid_until": "2025-05-12",
+                }
+            ],
             execution_contract_fields={
                 "execution_profile": "pullback",
                 "execution_action_value_preference": {
@@ -540,6 +561,10 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         self.assertEqual(
             contract["learning_used"]["pm_lifecycle_learning_router"]["pm_lifecycle_action_port"],
             "open_add_new_risk",
+        )
+        self.assertEqual(
+            [row["id"] for row in contract["learning_used"]["adaptive_policy_applied"]],
+            ["policy-1"],
         )
         impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
         self.assertEqual(impact["open_add_rank_score_delta"], 0.031)
@@ -630,14 +655,161 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         policy_only_refs, policy_only_policies = _feedback_learning_refs({
             "learning_used": {
                 "adaptive_policy_applied": [{
+                    "id": "policy-only-1",
                     "policy_type": "learning_mechanism:alpha_setup_ev",
                     "policy_action": "cap",
                     "ticker": "RB",
+                    "side": "long",
+                    "setup_type": "trend_breakout",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "source_trading_date": "2025-05-05",
+                    "valid_until": "2025-05-12",
                 }],
             },
         })
         self.assertEqual(policy_only_refs, [])
-        self.assertEqual(policy_only_policies, [])
+        self.assertEqual([row["id"] for row in policy_only_policies], ["policy-only-1"])
+
+    def test_actual_policy_collection_uses_existing_signal_and_control_paths(self):
+        technical_signal = type(
+            "TechnicalSignal",
+            (),
+            {
+                "learning_impact_summary": {
+                    "technical_parameter_calibration_applied": True,
+                    "technical_parameter_calibrations": [
+                        {
+                            "policy_id": "technical-policy-1",
+                            "policy_type": "contextual_rule_calibration:technical_parameters",
+                            "policy_action": "calibrate",
+                            "ticker": "RB",
+                            "side": "*",
+                            "setup_type": "*",
+                            "horizon_class": "short",
+                            "market_regime": "trend",
+                            "source_trading_date": "2025-05-05",
+                            "valid_until": "2025-05-20",
+                            "parameter_changes": {
+                                "trend.short": {"from": 10, "to": 9},
+                            },
+                        }
+                    ],
+                }
+            },
+        )()
+        score_policy = {
+            "id": "score-policy-1",
+            "policy_type": "alpha_promotion",
+            "policy_action": "protect",
+            "ticker": "RB",
+            "side": "long",
+            "setup_type": "trend_breakout",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "source_trading_date": "2025-05-01",
+            "valid_until": "2025-05-30",
+        }
+        cap_policy = {
+            **score_policy,
+            "id": "cap-policy-1",
+            "policy_type": "fast_loss_sentinel",
+            "policy_action": "cap",
+        }
+        retrieved_only = {
+            **score_policy,
+            "id": "retrieved-only",
+            "policy_action": "watchlist",
+        }
+        applied = _collect_applied_adaptive_policies(
+            analyst_signals=[technical_signal],
+            control_diagnostics={
+                "adaptive_policy_position_control": {
+                    "decision": "cap_applied",
+                    "pre_control_ratio": 0.02,
+                    "final_ratio": 0.01,
+                    "applied_policy": cap_policy,
+                }
+            },
+            control_reasons=["fast_loss_sentinel"],
+            opportunity_scorecard={
+                "preferred_side": "long",
+                "long": {
+                    "opportunity_score_components": {"positive_learning": 0.066},
+                    "action_value_learning_summary": {
+                        "positive_learning_signal": 0.10,
+                        "negative_learning_signal": 0.0,
+                        "positive_amplification_suspended": False,
+                    },
+                },
+            },
+            adaptive_policy_state=[score_policy, cap_policy, retrieved_only],
+            final_position_ratio=0.01,
+        )
+
+        self.assertEqual(
+            [row["id"] for row in applied],
+            ["technical-policy-1", "score-policy-1", "cap-policy-1"],
+        )
+        self.assertTrue(
+            all(
+                set(row)
+                == {
+                    "id",
+                    "policy_type",
+                    "policy_action",
+                    "ticker",
+                    "side",
+                    "setup_type",
+                    "horizon_class",
+                    "market_regime",
+                    "source_trading_date",
+                    "valid_until",
+                }
+                for row in applied
+            )
+        )
+
+    def test_technical_policy_application_survives_aec_scc_pm_round_trip(self):
+        signals = [
+            self._analyst_signal(analyst="technical", signal=Signal.BULLISH),
+            self._analyst_signal(analyst="fundamental", signal=Signal.BULLISH),
+            self._analyst_signal(analyst="commodity_news", signal=Signal.BULLISH),
+        ]
+        impact = {
+            "technical_parameter_calibration_applied": True,
+            "technical_parameter_calibrations": [
+                {
+                    "policy_id": "technical-policy-round-trip",
+                    "policy_type": "contextual_rule_calibration:technical_parameters",
+                    "policy_action": "calibrate",
+                    "ticker": "RB",
+                    "side": "*",
+                    "setup_type": "*",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "source_trading_date": "2025-05-05",
+                    "valid_until": "2025-05-20",
+                    "parameter_changes": {"trend.short": {"from": 10, "to": 9}},
+                }
+            ],
+        }
+        signals[0].learning_impact_summary = impact
+        signals[0].metadata["action_evidence_contract"]["learning_impact_summary"] = impact
+        collection = build_signal_collection_contract(
+            ticker="RB",
+            trading_date="2025-05-06",
+            analyst_signals=signals,
+            enabled_analysts=["technical", "fundamental", "commodity_news"],
+        )
+
+        pm_signals = build_pm_evidence_signals_from_scc(collection)
+        applied = _technical_policy_applications_from_signals(pm_signals)
+
+        self.assertEqual(
+            [row["id"] for row in applied],
+            ["technical-policy-round-trip"],
+        )
 
     def test_reviewer_fusion_attribution_is_read_only_learning_context(self):
         attribution = build_reviewer_fusion_attribution(

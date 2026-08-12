@@ -676,6 +676,15 @@ def _technical_parameter_calibration_summary(
         summary.append(
             {
                 "policy_id": str(row.get("id") or ""),
+                "policy_type": str(row.get("policy_type") or ""),
+                "policy_action": str(row.get("policy_action") or ""),
+                "ticker": str(row.get("ticker") or "*").upper(),
+                "side": str(row.get("side") or "*").lower(),
+                "setup_type": str(row.get("setup_type") or "*"),
+                "horizon_class": str(row.get("horizon_class") or "*"),
+                "market_regime": str(row.get("market_regime") or "*"),
+                "source_trading_date": str(row.get("source_trading_date") or ""),
+                "valid_until": str(row.get("valid_until") or ""),
                 "parameter_changes": parameter_changes,
             }
         )

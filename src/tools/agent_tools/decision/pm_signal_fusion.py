@@ -27,14 +27,58 @@ def build_forecast_calibration_summary(
     analyst_signals: Iterable[Any],
     analyst_performance: Iterable[Mapping[str, Any]] | None,
     target_side: str,
+    expected_horizon_days: int | None = None,
 ) -> dict[str, Any]:
-    """Fuse matured forecast accuracy and after-fee return without trade authority."""
+    """Calibrate the current three-analyst forecast at the candidate horizon."""
     target = str(target_side or "").lower()
+    signals = list(analyst_signals or [])
     signal_by_analyst = {
         str(getattr(signal, "agent_name", "") or ""): signal
-        for signal in (analyst_signals or [])
+        for signal in signals
     }
-    best_candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    candidate_horizon_days = _safe_int(expected_horizon_days, 0)
+    if candidate_horizon_days <= 0:
+        for analyst in ("fundamental", "technical", "commodity_news"):
+            signal = signal_by_analyst.get(analyst)
+            if signal is None or _signal_side(signal) != target:
+                continue
+            candidate_horizon_days = _safe_int(
+                _contract_value(signal, "expected_horizon_days", 0),
+                0,
+            )
+            if candidate_horizon_days > 0:
+                break
+    matched_horizon_days = _forecast_horizon_days(candidate_horizon_days)
+    horizon_class = f"{matched_horizon_days}d" if matched_horizon_days else ""
+
+    forecasts_by_analyst: dict[str, dict[str, Any]] = {}
+    if matched_horizon_days:
+        for analyst in ANALYST_ORDER:
+            signal = signal_by_analyst.get(analyst)
+            forecast = _forecast_for_horizon(signal, matched_horizon_days)
+            if forecast:
+                forecasts_by_analyst[analyst] = forecast
+
+    cold_summary = {
+        "status": "cold_start",
+        "sample_count": 0,
+        "candidate_expected_horizon_days": candidate_horizon_days,
+        "matched_horizon_days": matched_horizon_days,
+        "direction_probability": 1.0 / 3.0,
+        "opposite_direction_probability": 1.0 / 3.0,
+        "range_probability": 1.0 / 3.0,
+        "direction_accuracy": 0.5,
+        "mean_brier_score": 1.0 / 3.0,
+        "expected_return_after_fee": 0.0,
+        "market_regime_match": 0.5,
+        "rank_signal": 0.0,
+        "source_rows": [],
+        "not_trade_authority": True,
+    }
+    if target not in {"long", "short"} or not forecasts_by_analyst:
+        return cold_summary
+
+    best_candidates: dict[str, dict[str, Any]] = {}
     for raw in analyst_performance or []:
         if not isinstance(raw, Mapping):
             continue
@@ -44,16 +88,27 @@ def build_forecast_calibration_summary(
             continue
         analyst = str(raw.get("analyst") or "")
         signal = signal_by_analyst.get(analyst)
-        if signal is None or _signal_side(signal) != target:
+        forecast = forecasts_by_analyst.get(analyst)
+        if signal is None or forecast is None:
             continue
+        row_horizon_days = _safe_int(calibration.get("horizon_days"), 0)
+        if row_horizon_days <= 0:
+            row_horizon = str(raw.get("horizon_class") or "").strip().lower()
+            row_horizon_days = _safe_int(row_horizon[:-1], 0) if row_horizon.endswith("d") else 0
+        if row_horizon_days != matched_horizon_days:
+            continue
+        current_ticker = str(_contract_value(signal, "ticker", "") or "").upper()
         current_sector = str(_contract_value(signal, "sector", "*") or "*")
         current_regime = str(_contract_value(signal, "market_regime", "*") or "*")
         row_ticker = str(raw.get("ticker") or "*").upper()
         row_sector = str(raw.get("sector") or "*")
+        if row_ticker != "*" and current_ticker and row_ticker != current_ticker:
+            continue
         if row_ticker == "*" and row_sector != "*" and current_sector != "*" and row_sector != current_sector:
             continue
-        row_side = str(raw.get("signal_side") or "neutral").lower()
-        if row_side not in {target, "neutral", "*"}:
+        current_signal_side = str(_contract_value(signal, "side", _signal_side(signal)) or "flat").lower()
+        row_side = str(raw.get("signal_side") or "flat").lower()
+        if row_side not in {current_signal_side, "*"}:
             continue
         sample_count = _safe_int(raw.get("sample_count"), 0)
         if sample_count < 2:
@@ -68,22 +123,82 @@ def build_forecast_calibration_summary(
         regime_match = 1.0 if current_regime in regime_performance else _safe_float(
             calibration.get("market_regime_match"), 0.5
         )
+        direction_hit_rate = max(
+            0.0,
+            min(1.0, _safe_float(regime_metrics.get("direction_hit_rate"), 0.5)),
+        )
+        mean_brier_score = max(
+            0.0,
+            min(2.0 / 3.0, _safe_float(regime_metrics.get("mean_brier_score"), 1.0 / 3.0)),
+        )
+        regime_match = max(0.0, min(1.0, regime_match))
+        historical_after_fee = _safe_float(
+            regime_metrics.get("mean_predicted_side_return_after_fee"),
+            0.0,
+        )
+        historical_calibration_signal = max(
+            -1.0,
+            min(
+                1.0,
+                0.45 * (direction_hit_rate - 0.5) * 2.0
+                + 0.35 * max(-1.0, min(1.0, historical_after_fee / 0.02))
+                + 0.20 * (regime_match - 0.5) * 2.0
+                - 0.15 * max(0.0, min(1.0, mean_brier_score / (2.0 / 3.0))),
+            ),
+        )
+        calibration_reliability = 0.5 * (historical_calibration_signal + 1.0)
+        target_probability = _safe_float(
+            forecast.get("up_probability" if target == "long" else "down_probability"),
+            1.0 / 3.0,
+        )
+        opposite_probability = _safe_float(
+            forecast.get("down_probability" if target == "long" else "up_probability"),
+            1.0 / 3.0,
+        )
+        range_probability = _safe_float(forecast.get("range_probability"), 1.0 / 3.0)
+        calibrated_target_probability = (
+            1.0 / 3.0
+            + calibration_reliability * (target_probability - 1.0 / 3.0)
+        )
+        calibrated_opposite_probability = (
+            1.0 / 3.0
+            + calibration_reliability * (opposite_probability - 1.0 / 3.0)
+        )
+        calibrated_range_probability = (
+            1.0 / 3.0
+            + calibration_reliability * (range_probability - 1.0 / 3.0)
+        )
+        current_target_return = _safe_float(forecast.get("expected_return"), 0.0)
+        if target == "short":
+            current_target_return = -current_target_return
+        analyst_rank_signal = calibrated_target_probability - calibrated_opposite_probability
         candidate = {
             "analyst": analyst,
-            "horizon_class": str(raw.get("horizon_class") or "*"),
+            "signal_side": current_signal_side,
+            "horizon_class": horizon_class,
+            "horizon_days": matched_horizon_days,
             "scope_level": scope_level,
             "sample_count": _safe_int(regime_metrics.get("sample_count"), sample_count),
             "weight": max(0.01, scope_weight * max(0.25, confidence)),
-            "direction_hit_rate": _safe_float(regime_metrics.get("direction_hit_rate"), 0.5),
-            "mean_brier_score": _safe_float(regime_metrics.get("mean_brier_score"), 1.0 / 3.0),
-            "mean_predicted_side_return_after_fee": _safe_float(
-                regime_metrics.get("mean_predicted_side_return_after_fee"), 0.0
-            ),
+            "direction_hit_rate": direction_hit_rate,
+            "mean_brier_score": mean_brier_score,
+            "mean_predicted_side_return_after_fee": historical_after_fee,
             "market_regime": current_regime,
             "market_regime_match": regime_match,
+            "target_probability": target_probability,
+            "opposite_probability": opposite_probability,
+            "range_probability": range_probability,
+            "historical_calibration_signal": historical_calibration_signal,
+            "calibration_reliability": calibration_reliability,
+            "calibrated_target_probability": calibrated_target_probability,
+            "calibrated_opposite_probability": calibrated_opposite_probability,
+            "calibrated_range_probability": calibrated_range_probability,
+            "current_target_expected_return": current_target_return,
+            "calibrated_expected_return_after_fee": historical_after_fee,
+            "rank_signal": analyst_rank_signal,
+            "calibration_status": "matured",
         }
-        key = (analyst, candidate["horizon_class"])
-        previous = best_candidates.get(key)
+        previous = best_candidates.get(analyst)
         specificity = {"ticker": 3, "sector": 2, "global": 1}.get(scope_level, 0)
         previous_specificity = {
             "ticker": 3,
@@ -91,43 +206,92 @@ def build_forecast_calibration_summary(
             "global": 1,
         }.get(str((previous or {}).get("scope_level") or ""), -1)
         if previous is None or specificity > previous_specificity:
-            best_candidates[key] = candidate
-    candidates = list(best_candidates.values())
+            best_candidates[analyst] = candidate
+
+    source_rows: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    for analyst in ANALYST_ORDER:
+        forecast = forecasts_by_analyst.get(analyst)
+        if forecast is None:
+            continue
+        candidate = best_candidates.get(analyst)
+        if candidate is not None:
+            candidates.append(candidate)
+            source_rows.append(candidate)
+            continue
+        signal = signal_by_analyst[analyst]
+        source_rows.append(
+            {
+                "analyst": analyst,
+                "signal_side": str(_contract_value(signal, "side", _signal_side(signal)) or "flat").lower(),
+                "horizon_class": horizon_class,
+                "horizon_days": matched_horizon_days,
+                "scope_level": "none",
+                "sample_count": 0,
+                "weight": 0.0,
+                "target_probability": _safe_float(
+                    forecast.get("up_probability" if target == "long" else "down_probability"),
+                    1.0 / 3.0,
+                ),
+                "opposite_probability": _safe_float(
+                    forecast.get("down_probability" if target == "long" else "up_probability"),
+                    1.0 / 3.0,
+                ),
+                "range_probability": _safe_float(forecast.get("range_probability"), 1.0 / 3.0),
+                "calibration_status": "cold_start",
+                "rank_signal": 0.0,
+            }
+        )
     if not candidates:
-        return {
-            "status": "cold_start",
-            "sample_count": 0,
-            "direction_accuracy": 0.5,
-            "mean_brier_score": 1.0 / 3.0,
-            "expected_return_after_fee": 0.0,
-            "market_regime_match": 0.5,
-            "rank_signal": 0.0,
-            "source_rows": [],
-            "not_trade_authority": True,
-        }
+        return {**cold_summary, "source_rows": source_rows}
     total_weight = sum(item["weight"] for item in candidates)
     weighted = lambda key: sum(item[key] * item["weight"] for item in candidates) / total_weight
     accuracy = weighted("direction_hit_rate")
     brier = weighted("mean_brier_score")
-    expected_after_fee = weighted("mean_predicted_side_return_after_fee")
+    expected_after_fee = weighted("calibrated_expected_return_after_fee")
     regime_match = weighted("market_regime_match")
-    rank_signal = (
-        0.45 * (accuracy - 0.5) * 2.0
-        + 0.35 * max(-1.0, min(1.0, expected_after_fee / 0.02))
-        + 0.20 * (regime_match - 0.5) * 2.0
-        - 0.15 * max(0.0, min(1.0, brier / (2.0 / 3.0)))
-    )
+    rank_signal = weighted("rank_signal")
     return {
         "status": "matured",
         "sample_count": sum(item["sample_count"] for item in candidates),
+        "candidate_expected_horizon_days": candidate_horizon_days,
+        "matched_horizon_days": matched_horizon_days,
+        "direction_probability": round(weighted("calibrated_target_probability"), 6),
+        "opposite_direction_probability": round(weighted("calibrated_opposite_probability"), 6),
+        "range_probability": round(weighted("calibrated_range_probability"), 6),
         "direction_accuracy": round(accuracy, 6),
         "mean_brier_score": round(brier, 6),
         "expected_return_after_fee": round(expected_after_fee, 8),
         "market_regime_match": round(regime_match, 6),
         "rank_signal": round(max(-1.0, min(1.0, rank_signal)), 6),
-        "source_rows": candidates,
+        "source_rows": source_rows,
         "not_trade_authority": True,
     }
+
+
+def _forecast_horizon_days(expected_horizon_days: Any) -> int:
+    expected = _safe_int(expected_horizon_days, 0)
+    if expected <= 0:
+        return 0
+    if expected == 1:
+        return 1
+    if expected <= 3:
+        return 3
+    if expected <= 5:
+        return 5
+    return 10
+
+
+def _forecast_for_horizon(signal: Any, horizon_days: int) -> dict[str, Any]:
+    if signal is None or horizon_days not in {1, 3, 5, 10}:
+        return {}
+    forecasts = _contract_value(signal, "forward_forecasts", [])
+    for forecast in forecasts if isinstance(forecasts, list) else []:
+        if not isinstance(forecast, Mapping):
+            continue
+        if _safe_int(forecast.get("horizon_days"), 0) == horizon_days:
+            return dict(forecast)
+    return {}
 
 
 def build_scc_market_confirmation(
@@ -1030,6 +1194,7 @@ def build_opportunity_scorecard(
     alpha_setup_action_values: Iterable[Mapping[str, Any]] | None = None,
     signal_collection_contract: Mapping[str, Any] | None = None,
     formal_setup_by_side: Mapping[str, Any] | None = None,
+    formal_expected_horizon_days_by_side: Mapping[str, Any] | None = None,
     analyst_performance: Iterable[Mapping[str, Any]] | None = None,
     decision_date: Any = None,
     config: Mapping[str, Any] | None = None,
@@ -1120,6 +1285,11 @@ def build_opportunity_scorecard(
             analyst_signals=signals,
             analyst_performance=analyst_performance,
             target_side=side,
+            expected_horizon_days=(
+                formal_expected_horizon_days_by_side.get(side)
+                if isinstance(formal_expected_horizon_days_by_side, Mapping)
+                else None
+            ),
         )
         directional_signals = [signal for signal in signals if _signal_side(signal) == side]
         opportunity_state_counts: dict[str, int] = {}

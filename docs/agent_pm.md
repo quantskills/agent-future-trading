@@ -144,6 +144,7 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
   - `position_sizing_result`
 - `learning_used`
   - `alpha_setup_action_values`
+  - `adaptive_policy_applied`
   - `memory_requirements`
   - `memory_retrieval`
     - `rejected_or_downgraded`
@@ -893,9 +894,9 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 
 本步可以更新 `candidate_quality`、`candidate_layer_hint` 和内部生命周期意图，但不得改写原始 `opportunity_state`，也不生成最终动作。候选状态发生变化后，后续步骤继续读取同一个对象。
 
-`candidate_quality` 只由唯一最终 scorecard 计算一次：`opportunity_score + trigger_valid完整性加分 + invalidation_present完整性加分`，再按候选比例语义限制在 `[0,1]`。`opportunity_score` 已经包含 setup、正式学习、profile 和冲突事实，Step2及后续控制不得再次加入这些原始分量或重算 `candidate_quality`。这里的 `[0,1]` 只服务 Step4 层内比例，不改变 Step5 保持有符号且可为负的 `rank_score`。
+`candidate_quality` 只由唯一最终 scorecard 计算一次：`opportunity_score + trigger_valid完整性加分 + invalidation_present完整性加分`，再按候选比例语义限制在 `[0,1]`。`opportunity_score` 已经包含 setup、正式学习、profile 和冲突事实，Step2及后续控制不得再次加入这些原始分量或重算 `candidate_quality`。这里的 `[0,1]` 服务 Step4 的资金层选择及 real/scale 层内比例，不改变 Step5 保持有符号且可为负的 `rank_score`。
 
-Step4 还必须在 Step5 之前确定新增风险候选的最终资金层和层内计划比例。冷启动或未验证机会保持 `exploration_probe`；正式 canonical open/add 正向学习只有与当日完整证据、technical 触发和失效边界同时成立时才可升为 `real_budget_entry`，中期基本面明确反向时仍只能保留 probe；成熟重复正收益、强确认、失效边界和合格同向基本面支持同时成立时才可升为 `alpha_scale_entry`。计划保证金比例由最终 `candidate_quality` 在现有区间内连续映射：probe `0.008-0.015`、real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130`。这是新增风险仓位的唯一软计划；Step4输出后只允许可用保证金、单品种保证金硬线、总保证金硬线、净敞口、市场最小手数和手数取整收缩，不得再用日盈亏或名义仓位软比例二次改写。`risk_control.max_single_position_ratio`保留为Step4前的名义风险锚，不是Step4后的第二资金所有者。Step4 不读取或等待尚未生成的 `opportunity_rank`。
+Step4 还必须在 Step5 之前确定新增风险候选的最终资金层。冷启动或未验证机会保持 `exploration_probe`；正式 canonical open/add 正向学习达到2个精确完整周期，并与当日完整证据、technical 触发和失效边界同时成立时才可升为 `real_budget_entry`，中期基本面明确反向时仍只能保留 probe；达到5个精确完整周期的成熟重复正收益、强确认、失效边界和合格同向基本面支持同时成立时才可升为 `alpha_scale_entry`。单样本无论置信度数值均只保留 candidate/probe；2至4样本不得直接进入 scale。Step4 给探索层固定 `0.008` 下限并保留 `0.015` 上限，最终探索比例由 Step5 唯一 `rank_score` 在该区间内确定；real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130` 仍由最终 `candidate_quality` 连续映射。Step5 完成后只允许可用保证金、单品种保证金硬线、总保证金硬线、净敞口、市场最小手数和手数取整收缩，不得再用日盈亏或名义仓位软比例二次改写。`risk_control.max_single_position_ratio`保留为Step4前的名义风险锚，不是第二资金所有者。Step4 不读取或等待尚未生成的 `opportunity_rank`。
 
 现有持仓通过真实 transaction 的 `recommendation_id` 追溯原开仓 FAC，并按已结算交易日计算持有天数。持仓期间正式学习检索以及 hold/reduce/exit FAC 的 `setup_type/horizon_class/expected_horizon_days/market_regime` 始终继承原开仓 FAC；当天 SCC 继续提供最新行情、确认分、结构失效和退出证据。没有新的入场 trigger 只表示不增加风险，不等于持仓失效；PM只读取原 FAC 的 `position_invalidation_level`、原始ATR14、期限和持仓依据，绝不复用入场`invalidation_level`。结构位、初始 ATR 及移动保护任一触发均形成唯一exit；`position_pnl_ratio`有原开仓上下文时优先等于完整周期手续费后`cycle_return_on_notional`，普通持仓达到-2%且当日同向证据再验证失败则减仓50%，达到-4%则退出，同向证据通过则继续持仓。原开仓 FAC 完整周期收益峰值为正、当前手续费后 `cycle_return_on_notional<=0` 且当日同向证据再验证失败时，所有仓位类型均保持既有减仓复核路径。明确技术反转形成exit，基本面中期反向按既有规则形成reduce，期限到达只用当日技术与基本面强制复评，不自动退出。
 
@@ -1088,11 +1089,11 @@ rank_score =
 | gating failure 总上限 | `-0.16` | 限定该类扣分边界 |
 | 资金效率 | 最高 `+0.02` | 同等质量下优先资金效率更高者 |
 | 当日 trigger 质量 | `+0.08 * trigger_quality_score` | 只读取PM由已验证SCC重建的当日technical/event执行证据；历史trigger结果不得进入本分项 |
-| 到期预测校准价值 | `+0.45 * rank_signal` | 只读取过去已到期预测的方向准确率、Brier、预测方向手续费后收益和作用域匹配；冷启动为0，负值不禁入 |
+| 到期预测校准价值 | `+0.45 * rank_signal` | 读取三名分析师当日同一候选期限的概率分布，再用过去同分析师、同预测期限、同信号侧的方向准确率、Brier、市场状态和预测方向手续费后收益校准；冷启动为0，负值不禁入 |
 
 `product_setup_trigger_history`、当前 trigger 质量、市场冲突、关键数据缺口、基本面缺口和失效风险继续按 catalog 中对应权重计入。所有积分必须保留组成项，不能只保存一个无法解释的总分。
 
-`rank_score_policy.rank_score` 下八个参数组与 `rank_score_components` 固定同名；新增的 `calibrated_forecast_value` 只读取到期历史预测的方向准确率、Brier、预测方向手续费后收益与作用域匹配，冷启动固定为 0。每个组内的权重键与 Python 消费的输入字段同名。调参时禁止新增 `_weight`、`_bonus` 别名或只改 YAML 不改消费端。
+`rank_score_policy.rank_score` 下八个参数组与 `rank_score_components` 固定同名；`calibrated_forecast_value` 按候选 `expected_horizon_days` 映射到 1/3/5/10 日网格，读取三名分析师该期限的上涨、下跌、震荡概率及预期收益，再用已到期历史的方向准确率、Brier、市场状态和预测方向手续费后收益校准。中性分析师按概率分布参与，不新增一致性门槛；没有成熟历史时对应分析师为冷启动且不产生 rank 增量。每个组内的权重键与 Python 消费的输入字段同名。调参时禁止新增 `_weight`、`_bonus` 别名或只改 YAML 不改消费端。
 
 `execution_profile_learning_weight` 不属于排名配置，catalog 不得保留该入口。按第 4 步已经确定的学习边界，execution/profile 学习只能进入执行画像，不得直接或通过 `opportunity_score` 间接增加或扣减 `rank_score`，不能借 trigger 质量名义重新进入决策层。
 
@@ -1129,7 +1130,7 @@ PM 只对实际增加风险的候选排序。资金层、当日证据、正式 o
 
 每个进入队列的候选只能获得一个连续、唯一的全市场 `opportunity_rank`。产品内部 `side_priority`、`ticker_side_priority` 不能替代全市场 rank。
 
-无论 `rank_score` 或 `opportunity_rank` 多高，`exploration_probe` 始终是小仓试探，不得由 Step5 升为 `real_budget_entry` 或 `alpha_scale_entry`；其计划比例已由 Step4 按 `candidate_quality` 在 `0.008-0.015` 内确定，rank 工具不重复生成第二套比例。层级分采用6/3/0，严格大于其余六项的最大合法总跨度，因此任意alpha_scale都高于任意real，任意real都高于任意probe；同层内部仍由同一个总分的证据、历史学习、setup、当日trigger、资金效率和风险拉开顺序。
+无论 `rank_score` 或 `opportunity_rank` 多高，`exploration_probe` 始终是小仓试探，不得由 Step5 升为 `real_budget_entry` 或 `alpha_scale_entry`。Step4 固定给出 `0.008` 探索下限和 `0.015` 上限；Step5 只用最终 `rank_score` 的 `[0,1]` 有界强度在该区间确定一次计划比例，非正 Rank 保留 `0.008`，高 Rank 增配但不越过 `0.015`，随后沿既有手数取整和硬预算收缩。层级分采用6/3/0，严格大于其余六项的最大合法总跨度，因此任意alpha_scale都高于任意real，任意real都高于任意probe；同层内部仍由同一个总分的证据、历史学习、setup、当日trigger、资金效率和风险拉开顺序。
 
 #### 5.8 排名与预算原子绑定
 
@@ -1419,6 +1420,8 @@ PM 从第 4 步保留的完整 canonical action-value 候选学习池重新开�
 `trigger_profile_learning_rows` 只进入 `learning_used.pm_lifecycle_learning_trace` 及执行画像摘要，矩阵规定的 `execution_profile_learning_direct_to_rank` 必须为 `false`。它不能改变最终动作、candidate quality、rank、预算和手数。
 
 `learning_used.memory_retrieval.rejected_or_downgraded` 和最终生命周期未接受的完整学习只保留必要 provenance 与拒绝原因，不进入正式决策列表。
+
+`learning_used.adaptive_policy_applied` 是 adaptive policy 实际生效的唯一正式列表。技术参数应用沿既有 signal/AEC→SCC 进入 Step6，PM 控制沿既有 control diagnostics 进入 Step6；每条只保存 policy 的 ID、类型、动作、作用域、来源交易日和有效期。仅检索到但未改变评分、参数、仓位比例或资金层的 policy 不得进入，Researcher 不得从其他 PM 内部字段重建该列表。
 
 #### 6.8 原子构建 final_action_contract
 

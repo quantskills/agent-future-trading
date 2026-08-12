@@ -435,6 +435,9 @@ portfolio_manager:
       min_confirmation_score: 0.52
       min_action_value_confidence: 0.35
       min_action_value_samples: 2
+      # real 允许在两个精确完整周期后由当日证据复核；scale 必须有五个重复正向周期。
+      real_trade_min_action_value_samples: 2
+      alpha_scale_min_action_value_samples: 5
       positive_reward_mean_min: 0.0
       negative_reward_mean_max: -0.01
       negative_reward_sum_max: -500.0

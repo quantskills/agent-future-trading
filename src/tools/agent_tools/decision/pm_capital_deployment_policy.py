@@ -762,6 +762,10 @@ def _apply_capital_utilization_control(
     if proposed_abs_ratio > abs(position_ratio):
         before = position_ratio
         position_ratio = (1.0 if position_ratio > 0 else -1.0) * proposed_abs_ratio
+        diagnostics["capital_utilization_target"].update({
+            "pre_control_ratio": float(before),
+            "final_ratio": float(position_ratio),
+        })
         reasons.append("capital_utilization_guard")
         if high_quality_memory:
             reasons.append("capital_utilization_memory_protected")

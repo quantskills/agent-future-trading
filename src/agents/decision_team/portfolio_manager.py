@@ -970,6 +970,7 @@ def _build_final_action_contract(
     opportunity_scorecard: dict | None,
     market_confirmation: dict | None,
     alpha_setup_action_values: list | None,
+    adaptive_policy_applied: list | None = None,
     execution_contract_fields: dict | None = None,
     contract_code: str | None = None,
     final_contract_scope: dict | None = None,
@@ -990,6 +991,7 @@ def _build_final_action_contract(
         opportunity_scorecard=opportunity_scorecard,
         market_confirmation=market_confirmation,
         alpha_setup_action_values=alpha_setup_action_values,
+        adaptive_policy_applied=adaptive_policy_applied,
         execution_contract_fields=execution_contract_fields,
         contract_code=contract_code,
         final_contract_scope=final_contract_scope,
@@ -1444,6 +1446,21 @@ def _sign_pm_memory_state(pm_state: dict) -> FuturesRecommendation:
         or
         execution_fields.get("signal_collection_contract")
     )
+    applied_policy_rows = list(pm_state.get("adaptive_policy_applied") or [])
+    applied_policy_rows.extend(
+        _technical_policy_applications_from_signals(
+            build_pm_evidence_signals_from_scc(signal_collection_contract)
+        )
+    )
+    adaptive_policy_applied: list[dict] = []
+    seen_applied_policy_ids: set[str] = set()
+    for candidate in applied_policy_rows:
+        row = _applied_policy_contract_row(candidate)
+        policy_id = str(row.get("id") or "")
+        if not row or policy_id in seen_applied_policy_ids:
+            continue
+        seen_applied_policy_ids.add(policy_id)
+        adaptive_policy_applied.append(row)
     current_lots = int(pm_state.get("current_lots") or 0)
     target_lots = int(pm_state.get("target_lots") or 0)
     state_requires_capital_deployment = bool(
@@ -1540,6 +1557,7 @@ def _sign_pm_memory_state(pm_state: dict) -> FuturesRecommendation:
         "opportunity_scorecard": dict(pm_state.get("opportunity_scorecard") or {}),
         "market_confirmation": dict(pm_state.get("market_confirmation") or {}),
         "alpha_setup_action_values": list(pm_state.get("alpha_setup_action_values") or []),
+        "adaptive_policy_applied": adaptive_policy_applied,
         "execution_contract_fields": execution_fields,
         "contract_code": recommendation_context.get("contract_code"),
         "final_contract_scope": final_contract_scope,
@@ -2749,12 +2767,8 @@ def _step4_capital_plan(
     """
     budget = _position_budget_policy_config(full_config)
     ev_cfg = (_get_portfolio_manager_config(full_config).get("alpha_setup_ev_fusion") or {})
-    mature_sample_count = int(
-        ev_cfg.get(
-            "real_trade_min_action_value_samples",
-            ev_cfg.get("min_action_value_samples", 2),
-        )
-        or 2
+    alpha_scale_min_sample_count = int(
+        ev_cfg.get("alpha_scale_min_action_value_samples", 5) or 5
     )
     quality = max(0.0, min(1.0, _safe_float(alpha_ev.get("candidate_quality"), 0.0)))
     action_stats = alpha_ev.get("action_value_stats") if isinstance(alpha_ev.get("action_value_stats"), dict) else {}
@@ -2768,7 +2782,8 @@ def _step4_capital_plan(
     mature_repeated_positive = bool(
         qualified_positive
         and alpha_ev.get("qualified_positive_expectancy")
-        and int(action_stats.get("sample_count") or 0) >= mature_sample_count
+        and int(action_stats.get("sample_count") or 0)
+        >= alpha_scale_min_sample_count
         and action_stats.get("mean_return_on_notional") is not None
         and _safe_float(action_stats.get("mean_return_on_notional"), 0.0) > 0.0
     )
@@ -2832,11 +2847,16 @@ def _step4_capital_plan(
         }
     lower = max(0.0, lower)
     upper = max(lower, upper)
+    target_margin_ratio = (
+        lower
+        if layer == CAPITAL_LAYER_EXPLORATION
+        else lower + quality * (upper - lower)
+    )
     return {
         "capital_layer": layer,
         "capital_ratio_source": ratio_source,
         "candidate_quality": quality,
-        "target_margin_ratio": lower + quality * (upper - lower),
+        "target_margin_ratio": target_margin_ratio,
         "max_margin_ratio": upper,
         "alpha_scale_eligible": alpha_scale,
         "exceptional_validated": exceptional,
@@ -3754,6 +3774,7 @@ def _build_pm_memory_state(
         semantic_block_reason = _structured_new_entry_block_reason(memory_state)
     if semantic_block_reason:
         current_lots = int(memory_state.get("current_lots") or 0)
+        adaptive_policy_applied = list(memory_state.get("adaptive_policy_applied") or [])
         memory_state = _build_blocked_pm_memory_state_update(
             ticker=ticker,
             current_lots=current_lots,
@@ -3770,6 +3791,7 @@ def _build_pm_memory_state(
                 },
             },
         )
+        memory_state["adaptive_policy_applied"] = adaptive_policy_applied
 
     memory_state["ticker"] = ticker
     memory_state["signal_collection_contract"] = deepcopy(collection_contract)
@@ -4419,6 +4441,7 @@ def _compact_policy_row(row: dict) -> dict:
     if not isinstance(row, dict):
         return {}
     return {
+        "id": row.get("id"),
         "policy_type": row.get("policy_type"),
         "policy_action": row.get("policy_action"),
         "ticker": row.get("ticker"),
@@ -4431,8 +4454,193 @@ def _compact_policy_row(row: dict) -> dict:
         "win_rate": row.get("win_rate"),
         "net_pnl": row.get("net_pnl"),
         "cap_multiplier": row.get("cap_multiplier"),
+        "source_trading_date": row.get("source_trading_date"),
         "valid_until": row.get("valid_until"),
     }
+
+
+def _applied_policy_contract_row(row: dict) -> dict:
+    if not isinstance(row, dict):
+        return {}
+    policy_id = str(row.get("id") or "").strip()
+    policy_type = str(row.get("policy_type") or "").strip()
+    policy_action = str(row.get("policy_action") or "").strip()
+    if not policy_id or not policy_type or not policy_action:
+        return {}
+    return {
+        "id": policy_id,
+        "policy_type": policy_type,
+        "policy_action": policy_action,
+        "ticker": str(row.get("ticker") or "*").upper(),
+        "side": str(row.get("side") or "*").lower(),
+        "setup_type": str(row.get("setup_type") or "*"),
+        "horizon_class": str(row.get("horizon_class") or "*"),
+        "market_regime": canonical_market_regime(row.get("market_regime"), "*"),
+        "source_trading_date": str(row.get("source_trading_date") or ""),
+        "valid_until": str(row.get("valid_until") or ""),
+    }
+
+
+def _ratio_changed(detail: dict, before_key: str, after_key: str) -> bool:
+    if not isinstance(detail, dict):
+        return False
+    before = _safe_float(detail.get(before_key), 0.0)
+    after = _safe_float(detail.get(after_key), before)
+    return abs(after - before) > 1e-12
+
+
+def _score_policy_applications(
+    *,
+    opportunity_scorecard: dict,
+    adaptive_policy_state: list | None,
+    final_position_ratio: float,
+) -> list[dict]:
+    scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
+    side = _target_side_from_ratio(final_position_ratio)
+    if side not in {"long", "short"}:
+        side = str(scorecard.get("preferred_side") or "").lower()
+    side_row = scorecard.get(side) if side in {"long", "short"} else {}
+    side_row = side_row if isinstance(side_row, dict) else {}
+    components = (
+        side_row.get("opportunity_score_components")
+        if isinstance(side_row.get("opportunity_score_components"), dict)
+        else {}
+    )
+    action_values = (
+        side_row.get("action_value_learning_summary")
+        if isinstance(side_row.get("action_value_learning_summary"), dict)
+        else {}
+    )
+    positive_policy_changed_score = bool(
+        abs(_safe_float(components.get("positive_learning"), 0.0)) > 1e-12
+        and not bool(action_values.get("positive_amplification_suspended"))
+        and 0.55 > _safe_float(action_values.get("positive_learning_signal"), 0.0) + 1e-12
+    )
+    negative_policy_changed_score = bool(
+        abs(_safe_float(components.get("negative_learning"), 0.0)) > 1e-12
+        and 0.75 > _safe_float(action_values.get("negative_learning_signal"), 0.0) + 1e-12
+    )
+    rows: list[dict] = []
+    for row in adaptive_policy_state or []:
+        if not isinstance(row, dict):
+            continue
+        action = str(row.get("policy_action") or "").lower()
+        if positive_policy_changed_score and action in {"protect", "allow", "probe"}:
+            rows.append(row)
+        elif negative_policy_changed_score and action in {"cap", "demote", "block"}:
+            rows.append(row)
+    return rows
+
+
+def _technical_policy_applications_from_signals(analyst_signals: list) -> list[dict]:
+    rows: list[dict] = []
+    for signal in analyst_signals or []:
+        impact = getattr(signal, "learning_impact_summary", {}) or {}
+        if not isinstance(impact, dict) or not bool(
+            impact.get("technical_parameter_calibration_applied")
+        ):
+            continue
+        for calibration in impact.get("technical_parameter_calibrations") or []:
+            if not isinstance(calibration, dict):
+                continue
+            rows.append(
+                {
+                    "id": calibration.get("policy_id"),
+                    "policy_type": calibration.get("policy_type"),
+                    "policy_action": calibration.get("policy_action"),
+                    "ticker": calibration.get("ticker"),
+                    "side": calibration.get("side"),
+                    "setup_type": calibration.get("setup_type"),
+                    "horizon_class": calibration.get("horizon_class"),
+                    "market_regime": calibration.get("market_regime"),
+                    "source_trading_date": calibration.get("source_trading_date"),
+                    "valid_until": calibration.get("valid_until"),
+                }
+            )
+    return rows
+
+
+def _collect_applied_adaptive_policies(
+    *,
+    analyst_signals: list,
+    control_diagnostics: dict,
+    control_reasons: list[str],
+    opportunity_scorecard: dict,
+    adaptive_policy_state: list | None,
+    final_position_ratio: float,
+) -> list[dict]:
+    candidates: list[dict] = _technical_policy_applications_from_signals(analyst_signals)
+
+    candidates.extend(
+        _score_policy_applications(
+            opportunity_scorecard=opportunity_scorecard,
+            adaptive_policy_state=adaptive_policy_state,
+            final_position_ratio=final_position_ratio,
+        )
+    )
+
+    diagnostics = control_diagnostics if isinstance(control_diagnostics, dict) else {}
+    cap_control = diagnostics.get("adaptive_policy_position_control")
+    cap_control = cap_control if isinstance(cap_control, dict) else {}
+    if cap_control.get("decision") == "cap_applied" and _ratio_changed(
+        cap_control,
+        "pre_control_ratio",
+        "final_ratio",
+    ):
+        candidates.append(cap_control.get("applied_policy"))
+
+    mature_release = diagnostics.get("mature_alpha_release")
+    mature_release = mature_release if isinstance(mature_release, dict) else {}
+    if mature_release.get("decision") == "released" and _ratio_changed(
+        mature_release,
+        "pre_control_ratio",
+        "final_ratio",
+    ):
+        candidates.extend(mature_release.get("policy_refs") or [])
+
+    fast_probe = diagnostics.get("fast_candidate_alpha_probe")
+    fast_probe = fast_probe if isinstance(fast_probe, dict) else {}
+    if fast_probe.get("decision") == "probe" and _ratio_changed(
+        fast_probe,
+        "pre_control_ratio",
+        "final_ratio",
+    ):
+        candidates.extend(fast_probe.get("policy_refs") or [])
+
+    holding = diagnostics.get("holding_rebalance_control")
+    holding = holding if isinstance(holding, dict) else {}
+    contextual = holding.get("contextual_rule_calibration")
+    contextual = contextual if isinstance(contextual, dict) else {}
+    candidates.extend(contextual.get("applied") or [])
+    daily_gate = holding.get("daily_tradeability_gate")
+    daily_gate = daily_gate if isinstance(daily_gate, dict) else {}
+    candidates.extend(daily_gate.get("policy_refs") or [])
+
+    capital_learning = diagnostics.get("capital_utilization_learning")
+    capital_learning = capital_learning if isinstance(capital_learning, dict) else {}
+    learned_block = capital_learning.get("learned_underperformance_block")
+    learned_block = learned_block if isinstance(learned_block, dict) else {}
+    if _ratio_changed(learned_block, "ratio_before", "ratio_after"):
+        candidates.append(capital_learning.get("learned_demote_record"))
+    capital_target = diagnostics.get("capital_utilization_target")
+    capital_target = capital_target if isinstance(capital_target, dict) else {}
+    if (
+        "capital_utilization_memory_protected" in set(control_reasons or [])
+        and _ratio_changed(capital_target, "pre_control_ratio", "final_ratio")
+        and not capital_learning.get("protected_memory")
+    ):
+        candidates.append(capital_learning.get("adaptive_protect_record"))
+
+    applied: list[dict] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        row = _applied_policy_contract_row(candidate)
+        policy_id = str(row.get("id") or "")
+        if not row or policy_id in seen:
+            continue
+        seen.add(policy_id)
+        applied.append(row)
+    return applied
 
 
 def _adaptive_policy_trace(adaptive_policy_state: list | None) -> dict:
@@ -6313,13 +6521,47 @@ def _formal_learning_identity_for_side(
             analyst_signals,
         ),
         "horizon_class": _resolve_decision_horizon(analyst_signals, signed_side),
-        "expected_horizon_days": 0,
+        "expected_horizon_days": _current_expected_horizon_days_from_signals(
+            normalized_side,
+            analyst_signals,
+        ),
         "market_regime": canonical_market_regime(
             _market_regime_from_signals(analyst_signals, normalized_side),
             "",
         ),
         "source": "current_signal_collection_contract",
     }
+
+
+def _current_expected_horizon_days_from_signals(
+    target_side: str,
+    analyst_signals: list,
+) -> int:
+    """Resolve the candidate horizon from the same SCC evidence used by PM."""
+    normalized_side = str(target_side or "").strip().lower()
+    if normalized_side not in {"long", "short"}:
+        return 0
+    payloads = _execution_signal_payloads(analyst_signals, normalized_side)
+    fundamental = payloads.get("fundamental")
+    if isinstance(fundamental, dict) and fundamental.get("side") == normalized_side:
+        _, expected_days = _horizon_pair(fundamental)
+        if expected_days:
+            return int(expected_days)
+    for conditional_path in (False, True):
+        try:
+            selected = _select_execution_evidence_payload(
+                payloads,
+                target_side=normalized_side,
+                conditional_path=conditional_path,
+            )
+        except ValueError as exc:
+            if str(exc) != "pm_execution_evidence_not_found":
+                raise
+            continue
+        _, expected_days = _horizon_pair(selected)
+        if expected_days:
+            return int(expected_days)
+    return 0
 
 
 def _policy_memory_route_for_lifecycle(
@@ -8981,15 +9223,16 @@ def _side_opportunity_state_summary(analyst_signals: list, side: str) -> dict:
     }
 
 
-def _daily_tradeability_mature_alpha_present(
+def _daily_tradeability_mature_alpha_records(
     adaptive_policy_state: list | None,
     side: str,
     control: dict,
-) -> bool:
+) -> list[dict]:
     if side not in {"long", "short"}:
-        return False
+        return []
     min_confidence = _safe_float(control.get("min_mature_alpha_confidence"), 0.60)
     min_samples = int(control.get("min_mature_alpha_samples", 5) or 5)
+    records: list[dict] = []
     for row in adaptive_policy_state or []:
         if not isinstance(row, dict):
             continue
@@ -9006,8 +9249,22 @@ def _daily_tradeability_mature_alpha_present(
             continue
         if _safe_policy_int(row.get("sample_count"), 0) < min_samples:
             continue
-        return True
-    return False
+        records.append(row)
+    return records
+
+
+def _daily_tradeability_mature_alpha_present(
+    adaptive_policy_state: list | None,
+    side: str,
+    control: dict,
+) -> bool:
+    return bool(
+        _daily_tradeability_mature_alpha_records(
+            adaptive_policy_state,
+            side,
+            control,
+        )
+    )
 
 
 def _daily_tradeability_gate_result(
@@ -9072,7 +9329,12 @@ def _daily_tradeability_gate_result(
         },
     )
     high_quality_news = _news_high_quality_override(news_payload, side, control)
-    mature_alpha = _daily_tradeability_mature_alpha_present(adaptive_policy_state, side, control)
+    mature_alpha_records = _daily_tradeability_mature_alpha_records(
+        adaptive_policy_state,
+        side,
+        control,
+    )
+    mature_alpha = bool(mature_alpha_records)
     strong_confirmation = confirmation_score >= _safe_float(control.get("strong_market_confirmation_score"), 0.68)
     has_tradeable_support = bool((state_summary or {}).get("has_tradeable_support"))
     detail.update({
@@ -9113,6 +9375,19 @@ def _daily_tradeability_gate_result(
             or not has_tradeable_support
         )
     )
+    non_policy_allowances = [
+        allowance
+        for allowance in detail["allowances"]
+        if allowance != "mature_alpha_with_invalidation"
+    ]
+    if (
+        risky_daily_mismatch
+        and "mature_alpha_with_invalidation" in detail["allowances"]
+        and not non_policy_allowances
+    ):
+        detail["policy_refs"] = [
+            _compact_policy_row(row) for row in mature_alpha_records[:5]
+        ]
     if risky_daily_mismatch and not detail["allowances"]:
         detail["decision"] = "watch_for_trigger"
         detail["reason"] = "daily_tradeability_requires_short_timing"
@@ -11248,6 +11523,10 @@ def _run_pm_six_step_decision(state: FundState):
             side: identity.get("setup_type")
             for side, identity in formal_learning_identity_by_side.items()
         },
+        formal_expected_horizon_days_by_side={
+            side: identity.get("expected_horizon_days")
+            for side, identity in formal_learning_identity_by_side.items()
+        },
         decision_date=trading_date,
         config=opportunity_scorecard_cfg,
     )
@@ -11396,6 +11675,10 @@ def _run_pm_six_step_decision(state: FundState):
         analyst_performance=forecast_calibration_performance,
         formal_setup_by_side={
             side: identity.get("setup_type")
+            for side, identity in formal_learning_identity_by_side.items()
+        },
+        formal_expected_horizon_days_by_side={
+            side: identity.get("expected_horizon_days")
             for side, identity in formal_learning_identity_by_side.items()
         },
         decision_date=trading_date,
@@ -11634,6 +11917,10 @@ def _run_pm_six_step_decision(state: FundState):
         analyst_performance=forecast_calibration_performance,
         formal_setup_by_side={
             side: identity.get("setup_type")
+            for side, identity in formal_learning_identity_by_side.items()
+        },
+        formal_expected_horizon_days_by_side={
+            side: identity.get("expected_horizon_days")
             for side, identity in formal_learning_identity_by_side.items()
         },
         decision_date=trading_date,
@@ -13126,6 +13413,14 @@ def _run_pm_six_step_decision(state: FundState):
         plan_snapshot["pm_risk_gate"] = pm_risk_gate_payload
     else:
         pm_risk_gate_payload = None
+    adaptive_policy_applied = _collect_applied_adaptive_policies(
+        analyst_signals=analyst_signals,
+        control_diagnostics=control_diagnostics,
+        control_reasons=control_reasons,
+        opportunity_scorecard=opportunity_scorecard,
+        adaptive_policy_state=adaptive_policy_state,
+        final_position_ratio=position_risk.optimal_position_ratio,
+    )
     plan_snapshot["loss_template_research_trace"] = {
         "adaptive_policy_scope": _adaptive_policy_trace(adaptive_policy_state),
         "adaptive_policy_safety": adaptive_policy_safety_trace,
@@ -13209,6 +13504,7 @@ def _run_pm_six_step_decision(state: FundState):
             "opportunity_scorecard": opportunity_scorecard,
             "market_confirmation": market_confirmation,
             "alpha_setup_action_values": alpha_setup_action_values,
+            "adaptive_policy_applied": adaptive_policy_applied,
             "opening_fac_context": dict(opening_fac_context or {}),
             "execution_contract_fields": dict(plan_snapshot),
         }

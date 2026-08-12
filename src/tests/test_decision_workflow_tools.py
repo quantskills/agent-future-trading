@@ -21,7 +21,10 @@ from agents.decision_team.portfolio_manager import (
     _formal_learning_identity_for_side,
     _policy_memory_route_for_lifecycle,
 )
-from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.pm_signal_fusion import (
+    build_forecast_calibration_summary,
+    build_opportunity_scorecard,
+)
 from tools.agent_tools.decision.pm_invalidation_policy import (
     _apply_pretrade_invalidation_control,
     _has_position_exit_boundary,
@@ -132,12 +135,14 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 "analyst": "technical",
                 "ticker": "BU",
                 "sector": "energy",
+                "horizon_class": "3d",
                 "signal_side": "long",
                 "sample_count": 8,
                 "confidence_score": 0.8,
                 "payload": {
                     "forecast_calibration_summary": {
                         "scope_level": "ticker",
+                        "horizon_days": 3,
                         "direction_hit_rate": 0.75,
                         "mean_brier_score": 0.16,
                         "mean_predicted_side_return_after_fee": 0.012,
@@ -169,6 +174,109 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             0.0,
         )
         self.assertGreater(calibrated_rank["rank_score"], cold_rank["rank_score"])
+
+    def test_forecast_calibration_uses_three_analysts_same_horizon_and_keeps_neutral_probability(self):
+        technical = _signal("technical", Signal.BULLISH, 0.72, expected_horizon_days=2)
+        fundamental = _signal("fundamental", Signal.NEUTRAL, 0.50)
+        commodity_news = _signal("commodity_news", Signal.BEARISH, 0.65)
+        neutral_forecasts = []
+        for horizon in (1, 3, 5, 10):
+            neutral_forecasts.append(
+                {
+                    "horizon_days": horizon,
+                    "up_probability": 0.50,
+                    "down_probability": 0.20,
+                    "range_probability": 0.30,
+                    "expected_return": 0.008,
+                    "expected_return_low": -0.01,
+                    "expected_return_high": 0.02,
+                    "key_drivers": ["neutral_distribution_evidence"],
+                    "forecast_invalidation": "neutral_distribution_invalidated",
+                }
+            )
+        fundamental.metadata["action_evidence_contract"]["forward_forecasts"] = neutral_forecasts
+
+        rows = []
+        signal_sides = {
+            "technical": "long",
+            "fundamental": "flat",
+            "commodity_news": "short",
+        }
+        regimes = {
+            "technical": "trend",
+            "fundamental": "unknown",
+            "commodity_news": "trend",
+        }
+        for analyst in ("technical", "fundamental", "commodity_news"):
+            rows.append(
+                {
+                    "analyst": analyst,
+                    "ticker": "BU",
+                    "sector": "test",
+                    "horizon_class": "3d",
+                    "signal_side": signal_sides[analyst],
+                    "sample_count": 8,
+                    "confidence_score": 0.8,
+                    "payload": {
+                        "forecast_calibration_summary": {
+                            "scope_level": "ticker",
+                            "horizon_days": 3,
+                            "direction_hit_rate": 0.8,
+                            "mean_brier_score": 0.10,
+                            "mean_predicted_side_return_after_fee": 0.01,
+                            "market_regime_performance": {
+                                regimes[analyst]: {
+                                    "sample_count": 6,
+                                    "direction_hit_rate": 0.8,
+                                    "mean_brier_score": 0.10,
+                                    "mean_predicted_side_return_after_fee": 0.01,
+                                }
+                            },
+                        }
+                    },
+                }
+            )
+            rows.append(
+                {
+                    "analyst": analyst,
+                    "ticker": "BU",
+                    "sector": "test",
+                    "horizon_class": "5d",
+                    "signal_side": signal_sides[analyst],
+                    "sample_count": 99,
+                    "confidence_score": 1.0,
+                    "payload": {
+                        "forecast_calibration_summary": {
+                            "scope_level": "ticker",
+                            "horizon_days": 5,
+                            "direction_hit_rate": 0.0,
+                            "mean_brier_score": 2.0 / 3.0,
+                            "mean_predicted_side_return_after_fee": -0.05,
+                        }
+                    },
+                }
+            )
+
+        summary = build_forecast_calibration_summary(
+            analyst_signals=[technical, fundamental, commodity_news],
+            analyst_performance=rows,
+            target_side="long",
+            expected_horizon_days=2,
+        )
+
+        self.assertEqual(summary["status"], "matured")
+        self.assertEqual(summary["candidate_expected_horizon_days"], 2)
+        self.assertEqual(summary["matched_horizon_days"], 3)
+        self.assertEqual(
+            [row["analyst"] for row in summary["source_rows"]],
+            ["technical", "fundamental", "commodity_news"],
+        )
+        self.assertTrue(all(row["horizon_days"] == 3 for row in summary["source_rows"]))
+        neutral_row = next(row for row in summary["source_rows"] if row["analyst"] == "fundamental")
+        self.assertEqual(neutral_row["signal_side"], "flat")
+        self.assertEqual(neutral_row["calibration_status"], "matured")
+        self.assertEqual(neutral_row["target_probability"], 0.50)
+        self.assertGreater(summary["rank_signal"], 0.0)
 
     def test_forecast_calibration_uses_specific_scope_and_matching_regime(self):
         signal = _signal("technical", Signal.BULLISH, 0.72)
@@ -306,6 +414,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
         self.assertEqual(new_opportunity_identity["setup_type"], "trend_breakout_setup")
         self.assertEqual(new_opportunity_identity["horizon_class"], "short")
+        self.assertEqual(new_opportunity_identity["expected_horizon_days"], 3)
         self.assertEqual(new_opportunity_identity["market_regime"], "volatile")
         self.assertEqual(new_opportunity_identity["source"], "current_signal_collection_contract")
 
@@ -902,6 +1011,85 @@ class DecisionWorkflowToolTest(unittest.TestCase):
 
         self.assertEqual(result["candidate_count"], 0)
         self.assertNotIn("capital_deployment", pm_state)
+
+    def test_step5_rank_scales_exploration_inside_existing_probe_band_without_dropping_low_rank(self):
+        def exploration_state(ticker, *, forecast_rank_signal, cold_quality):
+            state = _pm_state(ticker, 0, 2, with_scorecard=False)
+            state.update(
+                {
+                    "target_lots": 2,
+                    "lots_delta": 2,
+                    "lots_delta_abs": 2,
+                    "lots_to_trade": 2,
+                    "position_ratio": 0.08,
+                    "target_position_ratio": 0.08,
+                    "target_margin_ratio_estimate": 0.008,
+                    "margin_required": 8_000.0,
+                }
+            )
+            state["final_entry_authority"].update(
+                {
+                    "authority_type": "exploration_probe",
+                    "capital_layer": CAPITAL_LAYER_EXPLORATION,
+                    "target_margin_ratio": 0.008,
+                    "max_allowed_margin_ratio": 0.015,
+                }
+            )
+            state["opportunity_scorecard"] = {
+                "preferred_side": "long",
+                "long": {
+                    "side": "long",
+                    "final_state": "watch_for_trigger",
+                    "opportunity_score": max(0.1, cold_quality),
+                    "score": max(0.1, cold_quality),
+                    "rank_score_input_components": {
+                        "cold_start_evidence_quality": cold_quality,
+                        "forecast_calibration": {"rank_signal": forecast_rank_signal},
+                    },
+                    "opportunity_score_components": {},
+                },
+            }
+            return state
+
+        high = exploration_state("HIGH", forecast_rank_signal=1.0, cold_quality=1.0)
+        low = exploration_state("LOW", forecast_rank_signal=-1.0, cold_quality=0.0)
+        portfolio = SimpleNamespace(
+            account_equity=1_000_000.0,
+            cashflow=1_000_000.0,
+            margin_used=0.0,
+            positions={},
+        )
+
+        apply_full_market_capital_deployment(
+            generated=[("HIGH", high), ("LOW", low)],
+            config={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {
+                    "probe_margin_ratio": 0.008,
+                    "probe_margin_max_ratio": 0.015,
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "capital_utilization_control": {"target_margin_ratio_confirmed": 0.10},
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=portfolio,
+        )
+
+        self.assertTrue(high["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertTrue(low["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(high["capital_deployment"]["opportunity_rank"], 1)
+        self.assertEqual(low["capital_deployment"]["opportunity_rank"], 2)
+        self.assertGreater(high["target_lots"], low["target_lots"])
+        self.assertEqual(low["target_lots"], 2)
+        self.assertEqual(
+            low["capital_deployment"]["rank_scaled_exploration_planned_margin_ratio"],
+            0.008,
+        )
+        self.assertLessEqual(
+            high["capital_deployment"]["rank_scaled_exploration_planned_margin_ratio"],
+            0.015,
+        )
 
     def test_alpha_scale_queue_uses_existing_strong_opportunity_margin_target(self):
         scale = _pm_state("CU", 0, 1, with_scorecard=False)

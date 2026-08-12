@@ -1536,8 +1536,7 @@ def _upsert_action_values(
             reward_source = "unqualified"
         confidence = min(
             0.95,
-            _safe_float(action_profile_lifecycle.get("confidence_score"))
-            * min(1.0, max(0.25, sample_count / max(1, _profile_thresholds(cfg)["min_samples_deployable"]))),
+            _safe_float(action_profile_lifecycle.get("confidence_score")),
         )
         action_preference = _action_preference_from_stats(
             action_name=action_name,

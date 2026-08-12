@@ -111,11 +111,22 @@ def apply_technical_parameter_calibration(
                 continue
             adjusted = _apply_rule_value(original, rules.get(key), mode, lower, upper)
             _nested_set(params, section, param_key, adjusted)
+            if adjusted == original:
+                continue
             changed[f"{section}.{param_key}"] = {"from": original, "to": adjusted, "rule": key}
         if changed:
             applied.append(
                 {
                     "id": row.get("id"),
+                    "policy_type": row.get("policy_type"),
+                    "policy_action": row.get("policy_action"),
+                    "ticker": row.get("ticker"),
+                    "side": row.get("side"),
+                    "setup_type": row.get("setup_type"),
+                    "horizon_class": row.get("horizon_class"),
+                    "market_regime": row.get("market_regime"),
+                    "source_trading_date": row.get("source_trading_date"),
+                    "valid_until": row.get("valid_until"),
                     "confidence_score": _safe_float(row.get("confidence_score"), 0.0),
                     "sample_count": int(_safe_float(row.get("sample_count"), 0.0)),
                     "reason": row.get("reason"),

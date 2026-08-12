@@ -6326,6 +6326,7 @@ def _write_contextual_rule_calibration_state(
     min_counterfactual_pnl = _safe_float(calibration_cfg.get("min_counterfactual_pnl_for_relaxation"), 1200.0)
     min_counterfactual_loss = abs(_safe_float(calibration_cfg.get("min_counterfactual_loss_for_tightening"), 1200.0))
     max_rows = int(calibration_cfg.get("max_rows_per_day", 10) or 10)
+    technical_max_rows = max_rows
     inserted = 0
 
     cursor.execute(
@@ -6462,7 +6463,6 @@ def _write_contextual_rule_calibration_state(
         item = dict(row)
         hit_rate = _safe_float(item.get("hit_rate"), 0.0)
         net_pnl = _safe_float(item.get("net_pnl"), 0.0)
-        analyst = str(item.get("analyst") or "")
         horizon = str(item.get("horizon_class") or "*")
         side = str(item.get("signal_side") or "*")
         ticker = str(item.get("ticker") or "*").upper()
@@ -6517,39 +6517,78 @@ def _write_contextual_rule_calibration_state(
             )
         if inserted >= max_rows:
             break
-        if analyst in {"technical", "AgentKey.TECHNICAL"} and horizon == "short":
-            technical_rules = _technical_calibration_rules_from_performance(
-                horizon=horizon,
-                hit_rate=hit_rate,
-                net_pnl=net_pnl,
-                positive_hit_rate=float(calibration_cfg.get("technical_positive_hit_rate", calibration_cfg.get("analyst_positive_hit_rate", 0.60)) or 0.60),
-                weak_hit_rate=float(calibration_cfg.get("technical_weak_hit_rate", calibration_cfg.get("analyst_weak_hit_rate", 0.40)) or 0.40),
-            )
-            if technical_rules:
-                inserted += _insert_contextual_rule_calibration(
-                    cursor,
-                    config_id=config_id,
-                    trading_date=trading_date,
-                    scope={
-                        "ticker": ticker,
-                        "side": "*",
-                        "setup_type": "*",
-                        "horizon_class": "short",
-                        "market_regime": "*",
-                    },
-                    rule_group="technical_parameters",
-                    rules=technical_rules,
-                    reason=(
-                        "same-scope technical analyst performance suggests a bounded indicator-parameter "
-                        "calibration for future short-horizon analysis"
-                    ),
-                    evidence={"source": "technical_analyst_performance", **item},
-                    confidence_score=min(0.65, _safe_float(item.get("confidence_score"), 0.35)),
-                    sample_count=_safe_int(item.get("sample_count"), 1),
-                    valid_days=int(calibration_cfg.get("technical_valid_days", valid_days) or valid_days),
-                    maturity_state="technical_parameter_contextual_calibration",
+
+    cursor.execute(
+        '''
+        SELECT *
+        FROM analyst_performance
+        WHERE config_id = ?
+          AND lower(analyst) IN ('technical', 'agentkey.technical')
+          AND lower(horizon_class) = 'short'
+          AND upper(coalesce(ticker, '')) NOT IN ('', '*', 'UNKNOWN')
+          AND sample_count >= ?
+          AND confidence_score >= ?
+        ORDER BY last_updated DESC, confidence_score DESC
+        LIMIT ?
+        ''',
+        (
+            config_id,
+            int(calibration_cfg.get("min_analyst_samples", 3) or 3),
+            float(calibration_cfg.get("min_analyst_confidence", 0.35) or 0.35),
+            technical_max_rows,
+        ),
+    )
+    technical_inserted = 0
+    for row in cursor.fetchall():
+        item = dict(row)
+        hit_rate = _safe_float(item.get("hit_rate"), 0.0)
+        net_pnl = _safe_float(item.get("net_pnl"), 0.0)
+        technical_rules = _technical_calibration_rules_from_performance(
+            horizon="short",
+            hit_rate=hit_rate,
+            net_pnl=net_pnl,
+            positive_hit_rate=float(
+                calibration_cfg.get(
+                    "technical_positive_hit_rate",
+                    calibration_cfg.get("analyst_positive_hit_rate", 0.60),
                 )
-    return inserted
+                or 0.60
+            ),
+            weak_hit_rate=float(
+                calibration_cfg.get(
+                    "technical_weak_hit_rate",
+                    calibration_cfg.get("analyst_weak_hit_rate", 0.40),
+                )
+                or 0.40
+            ),
+        )
+        if not technical_rules:
+            continue
+        ticker = str(item.get("ticker") or "").upper()
+        technical_inserted += _insert_contextual_rule_calibration(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
+            scope={
+                "ticker": ticker,
+                "side": "*",
+                "setup_type": "*",
+                "horizon_class": "short",
+                "market_regime": "*",
+            },
+            rule_group="technical_parameters",
+            rules=technical_rules,
+            reason=(
+                "same-scope technical analyst performance suggests a bounded indicator-parameter "
+                "calibration for future short-horizon analysis"
+            ),
+            evidence={"source": "technical_analyst_performance", **item},
+            confidence_score=min(0.65, _safe_float(item.get("confidence_score"), 0.35)),
+            sample_count=_safe_int(item.get("sample_count"), 1),
+            valid_days=int(calibration_cfg.get("technical_valid_days", valid_days) or valid_days),
+            maturity_state="technical_parameter_contextual_calibration",
+        )
+    return inserted + technical_inserted
 
 def _write_config_overlay(
     cursor: sqlite3.Cursor,

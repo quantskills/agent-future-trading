@@ -9,6 +9,7 @@ decisions for step 6 signing. It must not sign or repair final_action_contract.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Tuple
 
 from apis.contract_info_cache import FuturesContractInfoCache
@@ -611,13 +612,19 @@ def _daily_capital_deployment_config(config: Dict[str, Any]) -> Dict[str, float]
         capital.get("strong_opportunity_target_margin_ratio_confirmed"),
         0.18,
     )
-    min_probe = _safe_positive_ratio(budget.get("min_real_trade_margin_ratio"), 0.008)
+    min_probe = _safe_positive_ratio(
+        budget.get("probe_margin_ratio", budget.get("min_real_trade_margin_ratio")),
+        0.008,
+    )
+    max_probe = _safe_positive_ratio(budget.get("probe_margin_max_ratio"), 0.015)
+    max_probe = max(min_probe, max_probe)
     max_single = _safe_positive_ratio(budget.get("max_single_ticker_margin_ratio"), 0.13)
     max_net = _safe_positive_ratio(net_control.get("max_net_exposure"), 0.50)
     return {
         "target_margin_ratio": min(target, hard_max),
         "strong_opportunity_target_margin_ratio": min(strong_target, hard_max),
         "min_probe_margin_ratio": min_probe,
+        "max_probe_margin_ratio": min(max_probe, hard_max),
         "max_single_ticker_margin_ratio": min(max_single, hard_max),
         "hard_max_total_margin_ratio": hard_max,
         "max_net_exposure": max_net,
@@ -729,6 +736,100 @@ def _recommended_margin_ratio(pm_state: Dict[str, Any], portfolio: Portfolio) ->
     return margin / max(equity, 1.0)
 
 
+def _apply_exploration_rank_sizing(
+    *,
+    pm_state: Dict[str, Any],
+    portfolio: Portfolio,
+    side: str,
+    rank_score: float,
+    min_probe_margin_ratio: float,
+    max_probe_margin_ratio: float,
+) -> Dict[str, Any]:
+    """Resize only the exploration layer after the sole final rank is known."""
+    authority = _final_entry_authority(pm_state)
+    row_layer = _clean_key(authority.get("capital_layer"))
+    if row_layer != CAPITAL_LAYER_EXPLORATION:
+        return {"applied": False}
+    current_lots = _contract_current_lots(pm_state)
+    original_target_lots = _contract_target_lots(pm_state)
+    if original_target_lots == 0:
+        return {"applied": False}
+    account_equity = _safe_float(
+        pm_state.get("account_equity"),
+        _safe_float(getattr(portfolio, "account_equity", 0.0), 0.0),
+    )
+    if account_equity <= 0:
+        return {"applied": False}
+
+    original_abs_lots = abs(original_target_lots)
+    original_margin_required = _safe_float(pm_state.get("margin_required"), 0.0)
+    if original_margin_required <= 0:
+        original_margin_required = (
+            _recommended_margin_ratio(pm_state, portfolio) * account_equity
+        )
+    one_lot_margin = original_margin_required / max(original_abs_lots, 1)
+    if one_lot_margin <= 0:
+        return {"applied": False}
+
+    original_position_ratio = _safe_float(pm_state.get("position_ratio"), 0.0)
+    if abs(original_position_ratio) <= 1e-12:
+        original_position_ratio = _contract_target_position_ratio(pm_state)
+    one_lot_position_ratio = abs(original_position_ratio) / max(original_abs_lots, 1)
+
+    lower = max(0.0, float(min_probe_margin_ratio or 0.0))
+    upper = max(lower, float(max_probe_margin_ratio or lower))
+    rank_strength = _bounded(rank_score, 0.0, 1.0)
+    planned_margin_ratio = lower + rank_strength * (upper - lower)
+    desired_abs_lots = max(
+        1,
+        int(math.ceil((planned_margin_ratio * account_equity) / one_lot_margin - 1e-12)),
+    )
+    max_abs_lots_inside_band = int(
+        math.floor((upper * account_equity) / one_lot_margin + 1e-12)
+    )
+    max_abs_lots_inside_band = max(original_abs_lots, max_abs_lots_inside_band)
+    desired_abs_lots = min(
+        max(original_abs_lots, abs(current_lots), desired_abs_lots),
+        max_abs_lots_inside_band,
+    )
+    side_sign = 1 if side == "long" else -1
+    target_lots = side_sign * desired_abs_lots
+    actual_margin_required = desired_abs_lots * one_lot_margin
+    actual_margin_ratio = actual_margin_required / account_equity
+    target_position_ratio = side_sign * desired_abs_lots * one_lot_position_ratio
+    target_value = target_position_ratio * account_equity
+    current_ticker_exposure = _safe_float(pm_state.get("current_ticker_exposure"), 0.0)
+    projected_net_exposure = (
+        _safe_float(pm_state.get("current_net_exposure"), 0.0)
+        - current_ticker_exposure
+        + target_position_ratio
+    )
+
+    pm_state["target_lots"] = target_lots
+    pm_state["lots_delta"] = target_lots - current_lots
+    pm_state["lots_delta_abs"] = abs(target_lots - current_lots)
+    pm_state["lots_to_trade"] = abs(target_lots - current_lots)
+    pm_state["position_ratio"] = target_position_ratio
+    pm_state["target_position_ratio"] = target_position_ratio
+    pm_state["target_value"] = target_value
+    pm_state["margin_required"] = actual_margin_required
+    pm_state["target_margin_ratio_estimate"] = actual_margin_ratio
+    pm_state["projected_net_exposure"] = projected_net_exposure
+    authority["target_margin_ratio"] = planned_margin_ratio
+    authority["max_allowed_margin_ratio"] = upper
+
+    return {
+        "applied": True,
+        "rank_scaled_exploration_strength": round(rank_strength, 6),
+        "rank_scaled_exploration_planned_margin_ratio": round(planned_margin_ratio, 6),
+        "rank_scaled_exploration_actual_margin_ratio": round(actual_margin_ratio, 6),
+        "rank_scaled_exploration_target_lots": int(target_lots),
+        "rank_scaled_exploration_min_margin_ratio": round(lower, 6),
+        "rank_scaled_exploration_max_margin_ratio": round(upper, 6),
+        "rank_scaled_exploration_lot_rounding": "ceil_inside_existing_probe_band",
+    }
+
+
 def _float_field(mapping: Dict[str, Any], field: str, default: float = 0.0) -> float:
     try:
         return float(mapping.get(field, default) if mapping.get(field, default) is not None else default)
@@ -793,7 +894,7 @@ def apply_full_market_capital_deployment(
     """Apply Step5 rank and capital deployment directly to PM memory states."""
     deployment_cfg = _daily_capital_deployment_config(config)
     candidates: List[
-        Tuple[float, str, Dict[str, Any], str, float, float, float, float, float]
+        Tuple[float, str, Dict[str, Any], str, float, float, float, float, float, Dict[str, Any]]
     ] = []
     has_alpha_scale_candidate = False
     for ticker, pm_state in generated:
@@ -870,6 +971,24 @@ def apply_full_market_capital_deployment(
             capital_efficiency_bonus=capital_efficiency_bonus,
         )
         rank_score = _float_field(row, "rank_score")
+        exploration_sizing = _apply_exploration_rank_sizing(
+            pm_state=pm_state,
+            portfolio=portfolio,
+            side=side,
+            rank_score=rank_score,
+            min_probe_margin_ratio=deployment_cfg["min_probe_margin_ratio"],
+            max_probe_margin_ratio=deployment_cfg["max_probe_margin_ratio"],
+        )
+        if exploration_sizing.get("applied"):
+            target_ticker_margin_ratio = _safe_float(
+                exploration_sizing.get("rank_scaled_exploration_actual_margin_ratio"),
+                target_ticker_margin_ratio,
+            )
+            incremental_margin_ratio, _ = project_margin_transition(
+                current_account_margin=_portfolio_margin_ratio(portfolio),
+                current_ticker_margin=current_ticker_margin_ratio,
+                target_ticker_margin=target_ticker_margin_ratio,
+            )
         target_position_ratio = _contract_target_position_ratio(pm_state)
         current_ticker_exposure = _portfolio_ticker_exposure(portfolio, str(ticker).upper())
         (rank_score,) = _capital_rank_sort_tuple(row)
@@ -884,6 +1003,7 @@ def apply_full_market_capital_deployment(
                 target_position_ratio,
                 current_ticker_exposure,
                 score,
+                exploration_sizing,
             )
         )
 
@@ -910,6 +1030,7 @@ def apply_full_market_capital_deployment(
         target_position_ratio,
         current_ticker_exposure,
         score,
+        exploration_sizing,
     ) in enumerate(candidates, start=1):
         priority_score = rank_score
         _set_daily_opportunity_rank(pm_state, side, rank)
@@ -940,6 +1061,8 @@ def apply_full_market_capital_deployment(
             "total_margin_budget_ok": bool(total_ok),
             "net_exposure_budget_ok": bool(net_ok),
         }
+        if exploration_sizing.get("applied"):
+            budget_detail.update(exploration_sizing)
         if single_ok and total_ok and net_ok:
             used_margin_ratio += incremental_margin
             running_net_exposure = projected_net_exposure

@@ -35,6 +35,9 @@ from tools.common.alpha_setup import (
 )
 from tools.agent_tools.analysis.analyst_data_usage import data_usage_from_snapshot
 from tools.agent_tools.research import research_memory_writers
+from tools.agent_tools.research.reviewer_phase4_review import (
+    _group_transactions_by_recommendation,
+)
 from tools.common.order_semantics import recommendation_intent_from_lots
 from tools.common.learning_identity import canonical_market_regime
 from util.futures_audit import categorize_no_trade_reason
@@ -1911,7 +1914,7 @@ def backfill_alpha_setup_profiles_from_history(
             config_id=config_id,
             trading_date=trading_date,
         )
-        grouped_transactions = _review_helpers._group_transactions_by_recommendation(transactions)
+        grouped_transactions = _group_transactions_by_recommendation(transactions)
         result = write_alpha_setup_profiles(
             cursor,
             cfg=cfg,

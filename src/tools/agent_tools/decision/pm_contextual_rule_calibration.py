@@ -196,13 +196,22 @@ def apply_pm_contextual_calibration(
         rules = (_row_rules(row).get("portfolio_manager") or {})
         if not isinstance(rules, Mapping):
             continue
+        changed: dict[str, dict[str, Any]] = {}
         for key, (path, kind, lower, upper) in PM_RULE_SPECS.items():
             if key not in rules:
                 continue
             default_section = control.get(path[0]) if isinstance(control.get(path[0]), dict) else {}
             default = default_section.get(path[1]) if isinstance(default_section, dict) else None
-            _set_nested_rule(control, path, _coerce_rule_value(rules.get(key), kind, lower, upper, default))
-        applied.append(_applied_summary(row, rules))
+            adjusted = _coerce_rule_value(rules.get(key), kind, lower, upper, default)
+            _set_nested_rule(control, path, adjusted)
+            if adjusted != default:
+                changed[f"{path[0]}.{path[1]}"] = {
+                    "from": default,
+                    "to": adjusted,
+                    "rule": key,
+                }
+        if changed:
+            applied.append(_applied_summary(row, rules, changed))
     diagnostics = {
         "enabled": True,
         "rule_group": "portfolio_manager",
@@ -217,12 +226,25 @@ def apply_pm_contextual_calibration(
     return control, diagnostics
 
 
-def _applied_summary(row: Mapping[str, Any], rules: Mapping[str, Any]) -> dict[str, Any]:
+def _applied_summary(
+    row: Mapping[str, Any],
+    rules: Mapping[str, Any],
+    changed: Mapping[str, Any],
+) -> dict[str, Any]:
     return {
         "id": row.get("id"),
+        "policy_type": row.get("policy_type"),
         "policy_action": row.get("policy_action"),
+        "ticker": row.get("ticker"),
+        "side": row.get("side"),
+        "setup_type": row.get("setup_type"),
+        "horizon_class": row.get("horizon_class"),
+        "market_regime": row.get("market_regime"),
+        "source_trading_date": row.get("source_trading_date"),
+        "valid_until": row.get("valid_until"),
         "confidence_score": _safe_float(row.get("confidence_score"), 0.0),
         "sample_count": _safe_int(row.get("sample_count"), 0),
         "reason": row.get("reason"),
         "rules": dict(rules),
+        "parameter_changes": dict(changed),
     }
