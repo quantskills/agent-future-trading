@@ -1,6 +1,6 @@
 # AgentQuant 工作日志
 
-本日志自 2026 年 08 月 08 日起重新记录。
+本日志自 2026 年 08 月 10 日起重新记录。
 
 只记录已经完成的 `.py`、`.yaml`、`.yml` 行为修改或运行配置修改。相关修改完成后再追加记录；纯讨论、方案、排查结论、仅运行测试、纯文档修改、数据或缓存处理、文件改名或删除均不记录。
 
@@ -8,18 +8,6 @@
 
 - 修改了什么。
 - 为什么修改。
-
-==========2026年08月08日==========
-
-（1）[完整撤销探索仓完整周期盈利回吐直接退出] 撤销8月7日第一项：`portfolio_manager.py`删除探索仓首次`profit_giveback_revalidation_failed`时直接全部退出的分支，并删除该分支新增的`opening_authority_type`读取及诊断记录，使持仓生命周期代码恢复至七八月复测版本；对应回归测试、机制契约、检查表和项目规则同步恢复减仓口径。原因：七八月复测中的SR样本在首次触发后的分批减仓比同价全部退出少亏约650元，该样本不支持将直接退出固化为全局收益优化规则。
-
-（2）[主LLM切回GPT-5.6 Sol中等推理] `dev.yaml`将唯一启用的主`llm`配置切回`CodexOpenAI / gpt-5.6-sol`并明确使用`reasoning_effort=medium`，完整保留停用的`DeepSeek / deepseek-v4-pro`思考模式配置；协议预检测试、README和智能体内部机制文档同步更新。原因：三类分析师和Researcher必须继续通过统一主配置共同切换模型，不改变其他智能体权限、AEC→SCC→PM FAC交易链或失败即抛错边界。
-
-（3）[多期限可检验预测契约] `schema.py`、`analyst_structured_output.py`、`analyst_quality.py`、`signal_evidence_collection.py`与`prompt.py`让三类分析师固定生成并校验1、3、5、10日方向概率、预期收益区间、驱动和预测失效条件，确定性数据缺失路径写入中性预测网格；预测字段沿AEC与SCC落地且不含手数、Rank和交易权限。原因：把未校准的单一置信度改成能被未来真实价格逐期限检验的预测事实。
-
-（4）[预测到期评价与分层研究闭环] `sqlite_setup.py`新增`analyst_forecast_evaluation`，`research_memory_writers.py`以AEC逻辑交易日为预测起点，仅在期限到达后按执行手续费事实表计算方向命中、Brier、标的收益和预测方向手续费后收益，并按品种、板块、市场状态和全局层级写入分析师绩效；完整episode绩效同步写入精确、去状态、跨品种和全局setup层级。原因：让真实成交与全市场预测结果形成足够密度的未来校准数据，解决细粒度分组令正式学习表长期为空的问题。
-
-（5）[手续费后预测校准进入唯一Rank] `sqlite_helper.py`新增到期预测校准检索，`pm_signal_fusion.py`按品种、板块、全局依次回退，并确定性融合匹配市场状态下的方向准确率、Brier和预测方向手续费后收益；`pm_full_market_capital_deployment.py`与`rank_score_policy.yaml`新增唯一`calibrated_forecast_value`分项，冷启动为0，负值只降低相对顺序。原因：阻止原始LLM置信度继续被解释为盈利概率，同时保留探索仓、负Rank候选和既有交易机会链。
 
 ==========2026年08月10日==========
 
@@ -42,3 +30,19 @@
 （2）[Real与Scale样本门槛分离] `portfolio_policy_catalog.yaml`明确`real_trade_min_action_value_samples=2`与`alpha_scale_min_action_value_samples=5`，`portfolio_manager.py`的Step4放大判断改读独立5样本门槛；对应回归证明4样本只能进入既有`real_budget_entry`，5样本才可在其他现有条件全部成立时进入`alpha_scale_entry`。原因：修复real与scale共用两样本门槛造成低成熟度正向学习直接跨层放大的问题，不改变资金比例、Rank、Trader触发、退出链和硬风险上限。
 
 （3）[Alpha学习重建入口恢复] `research_learning.py`让历史重建继续复用`reviewer_phase4_review.py`现有交易按recommendation分组函数，替换已不存在的helper属性引用；新增内存库真实路径回归验证分笔成交保持同一正式分组。原因：恢复既有`bootstrap_alpha_setup.py`重建入口，使更新后的action-value置信度能从已结算历史重建，同时仍只写`alpha_setup_sample/profile/action_value`三张学习表。
+
+==========2026年08月13日==========
+
+（1）[成熟预测反馈进入既有学习上下文] `analyst_learning_context.py`从现有已成熟的forecast calibration结果读取同一分析师、品种和预测期限的样本数、命中率、Brier、手续费后收益及市场状态，并以有界摘要注入下一次分析师LLM学习上下文；不新增交易权限、交易分支或数据库表。
+
+（2）[预测校准改为带符号的既有Rank分项] `pm_signal_fusion.py`保留概率分布合法性和原有候选生成链，在现有校准强度上使用历史方向技能的符号影响Rank：负技能降低或反转该分析师的Rank贡献，中性分析师仍参与概率分布；未增加一致性门槛、未减少自然交易机会。
+
+（3）[Action-value收益强度进入既有评分] 对已有手续费后`mean_return_on_notional`按配置单位归一化后参与现有action-value学习摘要与评分，增加同品种/方向/期限/`setup_type`跨市场状态优先检索；保留原有宽范围回退，不改变Step5、Trader触发、退出链、保证金上下限或真实交易路径。
+
+（4）[前向回测记录重新分界] 保留数据库中2025-07-01至2025-09-30的训练/基准事实与学习记录；删除本配置2025-10-01以后不完整的事实、派生学习记录及对应10—11月回测/审核运行目录，并在`D:\research\Workshop\agentquant_db_before_oct_reset_20260813.db`保存完整回滚副本。新版本前向验证从2025-10-01开始，7—9月不回填、不改写。
+
+此前未纳入数据库删除范围的10—11月文件型回测记录已补充清理：从`src/logs`删除全部文件名或路径包含2025-10-01至2025-11-30日期的4,875个回测/分析日志文件，并在`D:\research\Workshop\agentquant_oct_nov_logs_before_reset_20260813`保留原样归档；核验剩余匹配文件为0。数据库与文件型记录现在均从2025-10-01重新开始。
+
+（6）[7—9月训练基线核验] 未重跑、未改写7—9月原始推荐、成交、结算和收益事实；确认当前版本可直接读取该段已有`analyst_performance`（76条）、`alpha_setup_sample`（990条）、`alpha_setup_profile`（456条）、`alpha_setup_action_value`（505条）、`adaptive_policy_state`（47条）及`learning_event_log`（2344条）作为10月前向学习输入。旧版记录继续作为训练/基准，不被宣称为新版策略结果；历史重建入口因当前运行时异常退出未执行，避免在未验证时改写学习状态。
+
+（5）[验证] 目标回归、全量单元测试（1116项）、`compileall`、pre-backtest acceptance及system invariant audit全部通过；未改变现有数据库结构和零启动入口。

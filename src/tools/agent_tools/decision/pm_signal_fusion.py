@@ -146,7 +146,11 @@ def build_forecast_calibration_summary(
                 - 0.15 * max(0.0, min(1.0, mean_brier_score / (2.0 / 3.0))),
             ),
         )
+        # Keep the probability distribution valid and use signed calibration
+        # strength for the Rank contribution. A negative after-fee history
+        # must reverse the current Rank spread, not create negative probabilities.
         calibration_reliability = 0.5 * (historical_calibration_signal + 1.0)
+        calibration_strength = historical_calibration_signal
         target_probability = _safe_float(
             forecast.get("up_probability" if target == "long" else "down_probability"),
             1.0 / 3.0,
@@ -171,7 +175,9 @@ def build_forecast_calibration_summary(
         current_target_return = _safe_float(forecast.get("expected_return"), 0.0)
         if target == "short":
             current_target_return = -current_target_return
-        analyst_rank_signal = calibrated_target_probability - calibrated_opposite_probability
+        analyst_rank_signal = (
+            target_probability - opposite_probability
+        ) * calibration_strength
         candidate = {
             "analyst": analyst,
             "signal_side": current_signal_side,
@@ -190,6 +196,7 @@ def build_forecast_calibration_summary(
             "range_probability": range_probability,
             "historical_calibration_signal": historical_calibration_signal,
             "calibration_reliability": calibration_reliability,
+            "calibration_strength": calibration_strength,
             "calibrated_target_probability": calibrated_target_probability,
             "calibrated_opposite_probability": calibrated_opposite_probability,
             "calibrated_range_probability": calibrated_range_probability,
@@ -705,6 +712,10 @@ def _action_value_learning_summary(
         "unknown": 0.45,
     }
     execution_reward_unit = max(1.0, _safe_float(config.get("learning_reward_unit"), 4000.0))
+    learning_return_unit = max(
+        0.001,
+        _safe_float(config.get("learning_return_on_notional_unit"), 0.02),
+    )
     full_sample_count = max(1, _safe_int(config.get("learning_full_weight_sample_count"), 3))
     execution_tail_loss_threshold = _safe_float(
         config.get("tail_loss_reward_threshold"),
@@ -798,7 +809,11 @@ def _action_value_learning_summary(
             _row_value(row, payload, "amplification_scope_quality", "source_quality", "evidence_scope", default="unknown")
         )
         if (
-            retrieval_match_level in {"same_ticker_side_horizon", "same_ticker_side"}
+            retrieval_match_level in {
+                "same_ticker_side_horizon_setup",
+                "same_ticker_side_horizon",
+                "same_ticker_side",
+            }
             and scope == "exact_real_state"
         ):
             scope = "partial_real_state"
@@ -904,9 +919,12 @@ def _action_value_learning_summary(
             ),
             mean_return_on_notional,
         )
-        positive_return = max(mean_return_on_notional, 0.0)
-        negative_return = max(-mean_return_on_notional, 0.0)
-        tail_return = max(-worst_return_on_notional, 0.0)
+        # Episode returns are percentages. Normalize once against the existing
+        # two-percent learning unit so a sub-percent loss is not numerically
+        # invisible to the existing Rank weights.
+        positive_return = _bounded(max(mean_return_on_notional, 0.0) / learning_return_unit)
+        negative_return = _bounded(max(-mean_return_on_notional, 0.0) / learning_return_unit)
+        tail_return = _bounded(max(-worst_return_on_notional, 0.0) / learning_return_unit)
         positive_strength = quality_weight * positive_return
         negative_strength = quality_weight * negative_return
         tail_strength = quality_weight * tail_return
@@ -959,6 +977,10 @@ def _action_value_learning_summary(
             "sample_count": sample_count,
             "reward_mean": round(reward_mean, 4),
             "mean_return_on_notional": round(mean_return_on_notional, 8),
+            "normalized_return_strength": round(
+                positive_return if is_positive else negative_return,
+                8,
+            ),
             "worst_return_on_notional": round(worst_return_on_notional, 8),
             "weight": round(
                 positive_strength if is_positive else negative_strength,
@@ -1014,7 +1036,10 @@ def _action_value_learning_summary(
     if positive_amplification_suspended:
         latest_loss_strength = (
             latest_complete_episode_quality_weight
-            * abs(float(latest_complete_episode_return_on_notional or 0.0))
+            * _bounded(
+                abs(float(latest_complete_episode_return_on_notional or 0.0))
+                / learning_return_unit
+            )
         )
         positive_learning_signal = 0.0
         trigger_quality_positive_signal = 0.0

@@ -16,10 +16,11 @@ from tools.common.learning_identity import canonical_market_regime
 
 _MATCH_PRIORITY = {
     "exact_state": 0,
-    "same_ticker_side_horizon": 1,
-    "same_ticker_side": 2,
-    "similar": 3,
-    "weak_prior": 4,
+    "same_ticker_side_horizon_setup": 1,
+    "same_ticker_side_horizon": 2,
+    "same_ticker_side": 3,
+    "similar": 4,
+    "weak_prior": 5,
 }
 
 
@@ -125,7 +126,11 @@ def _normalize(row: Mapping[str, Any], *, match_level: str, match_reason: str) -
         or payload.get("amplification_scope_quality")
     ).lower()
     if (
-        match_level in {"same_ticker_side_horizon", "same_ticker_side"}
+        match_level in {
+            "same_ticker_side_horizon_setup",
+            "same_ticker_side_horizon",
+            "same_ticker_side",
+        }
         and stored_scope == "exact_real_state"
     ):
         normalized["evidence_scope"] = "partial_real_state"
@@ -134,7 +139,11 @@ def _normalize(row: Mapping[str, Any], *, match_level: str, match_reason: str) -
         payload["retrieval_match_level"] = match_level
         payload["retrieval_match_reason"] = match_reason
         if (
-            match_level in {"same_ticker_side_horizon", "same_ticker_side"}
+            match_level in {
+                "same_ticker_side_horizon_setup",
+                "same_ticker_side_horizon",
+                "same_ticker_side",
+            }
             and stored_scope == "exact_real_state"
         ):
             payload["evidence_scope"] = "partial_real_state"
@@ -237,6 +246,15 @@ def retrieve_pm_memory(
                 market_regime,
                 setup_type,
                 "ticker_side_horizon_regime_setup",
+            )
+        )
+        layers.append(
+            (
+                "same_ticker_side_horizon_setup",
+                horizon_class,
+                None,
+                setup_type,
+                "ticker_side_horizon_setup_cross_regime",
             )
         )
     layers.extend(

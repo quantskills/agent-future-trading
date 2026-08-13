@@ -4405,8 +4405,12 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertEqual(real_execution["retrieval_match_level"], "same_ticker_side")
         self.assertTrue(detail["empty_history_cannot_block_real_history"])
         self.assertGreaterEqual(detail["effective_row_count"], 2)
-        self.assertEqual(attempts[1]["row_count"], 2)
+        self.assertEqual(attempts[1]["match_level"], "same_ticker_side_horizon_setup")
+        self.assertEqual(attempts[1]["row_count"], 0)
+        self.assertEqual(attempts[2]["match_level"], "same_ticker_side_horizon")
         self.assertEqual(attempts[2]["row_count"], 2)
+        self.assertEqual(attempts[3]["match_level"], "same_ticker_side")
+        self.assertEqual(attempts[3]["row_count"], 2)
 
     def test_scorecard_ignores_non_pm_learning_scope(self):
         signal = self._tradeable_signal()

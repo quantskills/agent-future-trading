@@ -809,8 +809,8 @@ action-value 语义完整性复用现有共享校验：
 `retrieve_pm_memory` 按质量优先、匹配范围逐步放宽的顺序读取：
 
 1. 当前产品、方向、期限、市场状态和 setup 完全匹配的 `exact_state`。
-2. 当前产品、方向和期限匹配的 `same_ticker_side_horizon`。
-3. 当前产品和方向匹配的 `same_ticker_side`。
+2. 当前产品、方向、期限和 setup 匹配、但市场状态不同的 `same_ticker_side_horizon_setup`。
+3. 当前产品、方向和期限匹配但 setup 不同的较宽 fallback 保留 `retrieval_match_level`，按既有 partial scope 使用，不能冒充 exact 或单独支持 real/scale。
 4. 相似 setup 和同板块检索结果保留 `retrieval_match_level` 与来源范围，但只作为诊断材料；similar、weak 和 incomplete prior 均不得进入 Step4 正式候选学习池。
 
 真实完整历史优先于空壳历史。缺少 canonical 语义、奖励事实和动作偏好的空壳记录不得占用有效历史名额，也不得压住真实完整样本。

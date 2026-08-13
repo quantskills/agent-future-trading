@@ -128,6 +128,39 @@ def _signal(agent_name: str, signal: Signal, confidence: float, **contract_overr
 
 
 class DecisionWorkflowToolTest(unittest.TestCase):
+    def test_negative_forecast_skill_reverses_rank_signal_without_invalid_probabilities(self):
+        signal = _signal("technical", Signal.BULLISH, 0.72, expected_horizon_days=3)
+        summary = build_forecast_calibration_summary(
+            analyst_signals=[signal],
+            analyst_performance=[
+                {
+                    "analyst": "technical",
+                    "ticker": "BU",
+                    "horizon_class": "3d",
+                    "signal_side": "long",
+                    "sample_count": 8,
+                    "confidence_score": 0.8,
+                    "payload": {
+                        "forecast_calibration_summary": {
+                            "scope_level": "ticker",
+                            "horizon_days": 3,
+                            "direction_hit_rate": 0.0,
+                            "mean_brier_score": 2.0 / 3.0,
+                            "mean_predicted_side_return_after_fee": -0.02,
+                        }
+                    },
+                }
+            ],
+            target_side="long",
+            expected_horizon_days=3,
+        )
+
+        self.assertLess(summary["rank_signal"], 0.0)
+        source = summary["source_rows"][0]
+        self.assertLess(source["calibration_strength"], 0.0)
+        self.assertGreaterEqual(source["calibrated_target_probability"], 0.0)
+        self.assertLessEqual(source["calibrated_target_probability"], 1.0)
+
     def test_matured_forecast_calibration_changes_rank_without_blocking_candidate(self):
         signal = _signal("technical", Signal.BULLISH, 0.72)
         performance = [
@@ -370,6 +403,47 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertEqual(exact_attempt["match_level"], "exact_state")
         self.assertEqual(exact_attempt["row_count"], 0)
         self.assertNotIn("error", exact_attempt)
+
+    def test_pm_memory_uses_cross_regime_same_setup_before_broader_fallback(self):
+        class MemoryDB:
+            def get_alpha_setup_action_values(self, **kwargs):
+                if kwargs.get("setup_type") == "trend_breakout_setup":
+                    if kwargs.get("market_regime") is None:
+                        return [{
+                            "id": "cross-regime-same-setup",
+                            "setup_type": "trend_breakout_setup",
+                            "consumer_scope": "pm_learning",
+                            "canonical_action_value": True,
+                            "canonical_action_family": "open_add_new_risk",
+                            "action_value_lane": "open",
+                            "learning_lane": "open",
+                            "action_preference": "positive_candidate_open",
+                            "action_name": "open",
+                            "reward_source": "trade_episode",
+                            "evidence_scope": "partial_real_state",
+                        }]
+                    return []
+                return [
+                    {"id": "different-setup", "setup_type": "news_event_setup", "consumer_scope": "pm_learning"},
+                    {"id": "wildcard-setup", "setup_type": "*", "consumer_scope": "pm_learning"},
+                ]
+
+        result = retrieve_pm_memory(
+            db=MemoryDB(),
+            config_id="cfg",
+            ticker="BU",
+            side="long",
+            horizon_class="short",
+            market_regime="trend",
+            setup_type="trend_breakout_setup",
+            trading_date="2025-03-03",
+        )
+
+        self.assertIn("cross-regime-same-setup", {row["id"] for row in result["action_values"]})
+        self.assertIn(
+            "same_ticker_side_horizon_setup",
+            [item["match_level"] for item in result["retrieval_attempts"]],
+        )
 
     def test_pm_memory_exact_query_error_is_explicit_in_retrieval_attempt(self):
         class MemoryDB:

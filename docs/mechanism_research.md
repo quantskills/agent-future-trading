@@ -75,8 +75,8 @@ profile 与 action-value 的区别：profile 是“这个 setup 整体成绩如�
 
 ### 4. 消费边界的当前代码事实
 
-- 三类分析师会消费 `analyst_learning_digest`、相对化 episode、未交易摘要、仅限 `validated` 的探索假设、profile 摘要和显式授权的 action-value 安全投影；`candidate/monitoring` 探索假设不进入提示词，技术分析师还会消费技术参数校准 policy。学习同时进入 LLM 前提示词和 LLM 后确定性信号校对。
-- PM 的统一正式入口 `retrieve_pm_memory` 当前可返回 action-value、profile、strategy memory、adaptive policy 和 provisional policy。action-value 还按 exact、同品种同方向同周期 fallback、同品种同方向 fallback 分层；fallback 是低质量学习，不能冒充 exact 或单独支持 real/scale。
+- 三类分析师会消费 `analyst_learning_digest`、相对化 episode、未交易摘要、仅限 `validated` 的探索假设、profile 摘要、显式授权的 action-value 安全投影和已成熟的多期限 forecast calibration；`candidate/monitoring` 探索假设不进入提示词，技术分析师还会消费技术参数校准 policy。上述学习都只是可反驳先验，同时进入 LLM 前提示词和 LLM 后确定性信号校对，不创建交易权限。
+- PM 的统一正式入口 `retrieve_pm_memory` 当前可返回 action-value、profile、strategy memory、adaptive policy 和 provisional policy。action-value 先按 exact，再按同品种同方向同期限同 setup 的跨市场状态记录读取；setup 不匹配的既有 fallback 仍按 partial scope 使用，不能冒充 exact 或单独支持 real/scale。
 - Trader、Auditor、Accountant、Reviewer 和 Signal Collector 不直接读取研究表。Trader 只读取 PM 已写入 FAC 的执行字段；Auditor/Accountant 只审计 FAC、账户、风险和成交结算事实。
 - `learning_event_log`、`learning_context_budget`、`researcher_llm_notes`、`capital_deployment_state` 和多数因果/排名事件属于总账、诊断或研究输入，不能仅因“有记录”就声称已经影响分析、排名、资金或交易。
 

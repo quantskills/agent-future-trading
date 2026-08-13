@@ -740,6 +740,51 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(len(context["selected_ids"]), 1)
         self.assertEqual(context["text"].count("same mature digest"), 1)
 
+    def test_learning_context_feeds_matured_forecast_calibration_to_analyst_prompt(self):
+        class _ForecastLearningDB(_FakeLearningDB):
+            def get_forecast_calibration_performance(self, **kwargs):
+                return [{
+                    "id": "forecast-calibration-1",
+                    "analyst": "technical",
+                    "ticker": kwargs["ticker"],
+                    "horizon_class": "3d",
+                    "signal_side": "long",
+                    "sample_count": 6,
+                    "confidence_score": 0.8,
+                    "payload": {
+                        "forecast_calibration_summary": {
+                            "scope_level": "ticker",
+                            "direction_hit_rate": 0.33,
+                            "mean_brier_score": 0.52,
+                            "mean_predicted_side_return_after_fee": -0.006,
+                        }
+                    },
+                }]
+
+        context = build_learning_context(
+            db=_ForecastLearningDB(),
+            full_config={
+                "learning": {"enabled": True},
+                "learning_context": {
+                    "enabled": True,
+                    "max_items_per_prompt": 3,
+                    "max_chars_per_prompt": 1200,
+                    "exploratory_memory": {"enabled": False},
+                },
+            },
+            config_id="cfg",
+            trading_date="2025-03-12",
+            analyst="technical",
+            ticker="BU",
+            context={"sector": "energy", "market_regime": "trend"},
+            horizon_class="short",
+        )
+
+        self.assertEqual(len(context["forecast_calibration_items"]), 1)
+        self.assertIn("Matured forecast calibration", context["text"])
+        self.assertIn("hit_rate=33%", context["text"])
+        self.assertIn("after_fee_return=-0.60%", context["text"])
+
     def test_learning_context_falls_back_when_requested_horizon_is_missing(self):
         db = _FallbackLearningDB()
         context = build_learning_context(

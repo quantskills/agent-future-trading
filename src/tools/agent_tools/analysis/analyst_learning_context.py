@@ -361,6 +361,41 @@ def _memory_trace_ref(item: Dict[str, Any], memory_type: str) -> Dict[str, Any]:
     return ref
 
 
+def _forecast_calibration_prompt_line(
+    item: Mapping[str, Any],
+    *,
+    current_market_regime: str,
+) -> str:
+    """Render matured forecast performance as a bounded analyst prior."""
+    payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+    summary = (
+        payload.get("forecast_calibration_summary")
+        if isinstance(payload.get("forecast_calibration_summary"), Mapping)
+        else {}
+    )
+    regime_rows = summary.get("market_regime_performance")
+    regime_rows = regime_rows if isinstance(regime_rows, Mapping) else {}
+    metrics = regime_rows.get(current_market_regime)
+    metrics = metrics if isinstance(metrics, Mapping) else summary
+    sample_count = int(metrics.get("sample_count") or item.get("sample_count") or 0)
+    hit_rate = float(metrics.get("direction_hit_rate") or item.get("hit_rate") or 0.0)
+    brier = float(metrics.get("mean_brier_score") or 0.0)
+    after_fee = float(
+        metrics.get("mean_predicted_side_return_after_fee")
+        or summary.get("mean_predicted_side_return_after_fee")
+        or 0.0
+    )
+    regime_label = current_market_regime if current_market_regime in regime_rows else "other_regime"
+    evidence_label = "limited_sample" if sample_count < 4 else "mature_sample"
+    return (
+        f"- {item.get('analyst')}/{item.get('ticker') or '*'}/{item.get('horizon_class')}: "
+        f"scope={summary.get('scope_level') or 'unknown'}, n={sample_count}, "
+        f"hit_rate={hit_rate:.0%}, brier={brier:.4f}, after_fee_return={after_fee:.2%}, "
+        f"regime={regime_label}, evidence={evidence_label}. "
+        "Use as a rebuttable calibration prior; compare today's evidence and adjust probabilities rather than copying direction."
+    )
+
+
 def _scope_authority_boundary(selected_scopes: Iterable[str]) -> Dict[str, Any]:
     scopes = [str(scope or "") for scope in selected_scopes]
     cross_scope = any(
@@ -408,6 +443,7 @@ def _build_memory_trace(
     dropped: int,
     max_items: int,
     max_chars: int,
+    forecast_calibration_items: Optional[List[Dict[str, Any]]] = None,
     alpha_setup_items: Optional[List[Dict[str, Any]]] = None,
     analyst_calibration_items: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
@@ -419,6 +455,7 @@ def _build_memory_trace(
         ("trade_episode_memory", episode_items, 4),
         ("no_trade_opportunity_memory", no_trade_items, 4),
         ("exploratory_hypothesis", hypothesis_items, 4),
+        ("analyst_forecast_calibration", forecast_calibration_items or [], 6),
         ("alpha_setup_profile", alpha_setup_items or [], 4),
         ("alpha_setup_action_value", analyst_calibration_items or [], 4),
     ):
@@ -441,6 +478,7 @@ def _build_memory_trace(
             "exploratory_hypothesis": len(hypothesis_lines),
             "alpha_setup_profile": len(alpha_setup_items or []),
             "alpha_setup_action_value": len(analyst_calibration_items or []),
+            "analyst_forecast_calibration": len(forecast_calibration_items or []),
         },
         "hypothesis_status_counts": dict(hypothesis_status_counts),
         "candidate_hypothesis_count": int(hypothesis_status_counts.get("candidate", 0)),
@@ -471,6 +509,13 @@ def _finite_float(value: Any) -> Optional[float]:
     if number != number or number in {float("inf"), float("-inf")}:
         return None
     return number
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _strictly_past_action_value(row: Mapping[str, Any], trading_date: Any) -> bool:
@@ -930,6 +975,58 @@ def build_learning_context(
     alpha_setup_lines: List[str] = []
     analyst_calibration_items: List[Dict[str, Any]] = []
     analyst_calibration_lines: List[str] = []
+    forecast_calibration_items: List[Dict[str, Any]] = []
+    forecast_calibration_lines: List[str] = []
+
+    # Feed already-matured forecast evaluation through the existing analyst
+    # prompt path. This remains a rebuttable prior and never creates authority.
+    if hasattr(db, "get_forecast_calibration_performance"):
+        try:
+            forecast_rows = db.get_forecast_calibration_performance(
+                config_id=config_id,
+                ticker=str(ticker or "").upper(),
+                trading_date=trading_date,
+                limit=max(8, max_items * 4),
+            )
+        except Exception:
+            logger.warning("analyst_forecast_calibration_context_unavailable")
+            forecast_rows = []
+        seen_forecast_keys = set()
+        for row in forecast_rows or []:
+            if not isinstance(row, Mapping):
+                continue
+            if str(row.get("analyst") or "") != analyst_key:
+                continue
+            row_ticker = str(row.get("ticker") or "*").upper()
+            if row_ticker not in {str(ticker or "").upper(), "*"}:
+                continue
+            row_horizon = str(row.get("horizon_class") or "*").lower()
+            # The analyst context is requested by role horizon (short/medium/event_short),
+            # while persisted forecast evaluations are keyed by the exact forward
+            # horizon (1d/3d/5d/10d).  Keep all valid exact horizons visible here;
+            # PM performs the candidate-level exact-horizon match later.
+            if row_horizon not in {"1d", "3d", "5d", "10d", "*", horizon.lower()}:
+                continue
+            if _safe_int(row.get("sample_count"), 0) < 2:
+                continue
+            key = (row_ticker, row_horizon, str(row.get("signal_side") or "*"))
+            if key in seen_forecast_keys:
+                continue
+            seen_forecast_keys.add(key)
+            forecast_calibration_items.append(dict(row))
+            if len(forecast_calibration_items) >= 4:
+                break
+        raw_forecast_lines = [
+            _forecast_calibration_prompt_line(row, current_market_regime=market_regime)
+            for row in forecast_calibration_items
+        ]
+        forecast_calibration_lines, forecast_calibration_items, forecast_dropped = _budget_item_lines(
+            raw_forecast_lines,
+            forecast_calibration_items,
+            max_chars=max(320, min(720, max_chars // 2)),
+            max_items=4,
+        )
+        dropped += forecast_dropped
     if exploration_enabled:
         episode_limit = int(exploration_cfg.get("max_episode_items", 3))
         no_trade_limit = int(exploration_cfg.get("max_no_trade_items", 3))
@@ -1307,6 +1404,9 @@ def build_learning_context(
             analyst_calibration_chars_used = sum(
                 len(line) + 1 for line in analyst_calibration_lines
             )
+            forecast_calibration_chars_used = sum(
+                len(line) + 1 for line in forecast_calibration_lines
+            )
             db.save_learning_context_budget(
                 config_id=config_id,
                 trading_date=trading_date,
@@ -1324,6 +1424,7 @@ def build_learning_context(
                     + hypothesis_chars_used
                     + alpha_setup_chars_used
                     + analyst_calibration_chars_used
+                    + forecast_calibration_chars_used
                 ),
                 dropped_count=dropped,
                 max_items=max_items,
@@ -1340,6 +1441,8 @@ def build_learning_context(
         and not alpha_setup_lines
         and not analyst_calibration_lines
         and not analyst_calibration_items
+        and not forecast_calibration_lines
+        and not forecast_calibration_items
     ):
         memory_trace = _build_memory_trace(
             analyst=analyst_key,
@@ -1355,6 +1458,7 @@ def build_learning_context(
             hypothesis_items=[],
             alpha_setup_items=[],
             analyst_calibration_items=[],
+            forecast_calibration_items=[],
             lines=[],
             episode_lines=[],
             no_trade_lines=[],
@@ -1442,6 +1546,13 @@ def build_learning_context(
             "or historical absolute price, and cannot create direction, opportunity, trade authority, or execution."
         )
         text_parts.extend(analyst_calibration_lines)
+    if forecast_calibration_lines:
+        text_parts.append("Matured forecast calibration:")
+        text_parts.append(
+            "Use numeric hit-rate, Brier and after-fee results to recalibrate today's multi-horizon probabilities. "
+            "A limited sample is a warning, not a veto; current time-series evidence remains primary."
+        )
+        text_parts.extend(forecast_calibration_lines)
     text = "\n".join(text_parts) + "\n"
     hypothesis_status_counts = Counter(str(item.get("status") or "candidate") for item in hypothesis_items)
     memory_trace = _build_memory_trace(
@@ -1458,6 +1569,7 @@ def build_learning_context(
         hypothesis_items=hypothesis_items,
         alpha_setup_items=alpha_setup_items,
         analyst_calibration_items=analyst_calibration_items,
+        forecast_calibration_items=forecast_calibration_items,
         lines=lines,
         episode_lines=episode_lines,
         no_trade_lines=no_trade_lines,
@@ -1481,6 +1593,7 @@ def build_learning_context(
             for item in alpha_setup_items
         ],
         "analyst_calibration_items": analyst_calibration_items,
+        "forecast_calibration_items": forecast_calibration_items,
         "selected_ids": selected_ids,
         "prompt_learning_record_ids": list(dict.fromkeys(
             item_id
@@ -1494,6 +1607,7 @@ def build_learning_context(
                     str(item.get("source_learning_record_id") or "")
                     for item in analyst_calibration_items
                 ]
+                + [str(item.get("id") or "") for item in forecast_calibration_items]
             )
             if item_id
         )),

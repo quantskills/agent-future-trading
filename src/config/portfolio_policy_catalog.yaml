@@ -384,6 +384,9 @@ portfolio_manager:
         observation_only: 0.25
         unknown: 0.45
       learning_reward_unit: 4000.0
+      # Fee-adjusted return_on_notional learning unit.  Two percentage points
+      # keeps sub-percent episode outcomes visible to the existing Rank weights.
+      learning_return_on_notional_unit: 0.02
       learning_full_weight_sample_count: 3
       learning_recency_half_life_days: 12
       learning_recency_floor: 0.20
