@@ -6445,26 +6445,28 @@ def _write_contextual_rule_calibration_state(
         SELECT *
         FROM analyst_performance
         WHERE config_id = ?
+          AND lower(horizon_class) IN ('short', 'medium', 'long', 'event_short')
           AND sample_count >= ?
           AND confidence_score >= ?
-        ORDER BY last_updated DESC, confidence_score DESC
+        ORDER BY last_updated DESC, confidence_score DESC, sample_count DESC, id
         LIMIT ?
         ''',
         (
             config_id,
             int(calibration_cfg.get("min_analyst_samples", 3) or 3),
             float(calibration_cfg.get("min_analyst_confidence", 0.35) or 0.35),
-            max_rows,
+            max_rows * 3,
         ),
     )
+    seen_contextual_policy_scopes: set[Tuple[str, str, str, str, str, str]] = set()
     for row in cursor.fetchall():
         if inserted >= max_rows:
             break
         item = dict(row)
         hit_rate = _safe_float(item.get("hit_rate"), 0.0)
         net_pnl = _safe_float(item.get("net_pnl"), 0.0)
-        horizon = str(item.get("horizon_class") or "*")
-        side = str(item.get("signal_side") or "*")
+        horizon = str(item.get("horizon_class") or "").strip().lower()
+        side = str(item.get("signal_side") or "*").strip().lower()
         ticker = str(item.get("ticker") or "*").upper()
         scope = {
             "ticker": ticker,
@@ -6473,51 +6475,54 @@ def _write_contextual_rule_calibration_state(
             "horizon_class": horizon,
             "market_regime": "*",
         }
+        rules: Dict[str, Any] = {}
+        reason = ""
         if hit_rate >= float(calibration_cfg.get("analyst_positive_hit_rate", 0.60) or 0.60) and net_pnl > 0:
-            rules = {}
             if horizon in {"medium", "long"}:
                 rules["min_short_timing_confidence"] = float(calibration_cfg.get("positive_medium_short_timing_confidence", 0.42))
                 rules["min_confirmation_score"] = float(calibration_cfg.get("positive_medium_confirm_score", 0.52))
             else:
                 rules["probe_min_confirmation_score"] = float(calibration_cfg.get("positive_probe_confirm_score", 0.50))
-            inserted += _insert_contextual_rule_calibration(
-                cursor,
-                config_id=config_id,
-                trading_date=trading_date,
-                scope=scope,
-                rule_group="portfolio_manager",
-                rules=rules,
-                reason="same-scope analyst performance supports modestly less restrictive PM validation",
-                evidence={"source": "analyst_performance", **item},
-                confidence_score=min(0.70, _safe_float(item.get("confidence_score"), 0.35)),
-                sample_count=_safe_int(item.get("sample_count"), 1),
-                valid_days=valid_days,
-                maturity_state="analyst_performance_contextual_calibration",
-            )
+            reason = "same-scope analyst performance supports modestly less restrictive PM validation"
         elif hit_rate <= float(calibration_cfg.get("analyst_weak_hit_rate", 0.40) or 0.40) or net_pnl < 0:
-            rules = {}
             if horizon in {"medium", "long"}:
                 rules["min_short_timing_confidence"] = float(calibration_cfg.get("weak_medium_short_timing_confidence", 0.50))
                 rules["min_confirmation_score"] = float(calibration_cfg.get("weak_medium_confirm_score", 0.60))
             else:
                 rules["probe_min_confirmation_score"] = float(calibration_cfg.get("weak_probe_confirm_score", 0.58))
-            inserted += _insert_contextual_rule_calibration(
-                cursor,
-                config_id=config_id,
-                trading_date=trading_date,
-                scope=scope,
-                rule_group="portfolio_manager",
-                rules=rules,
-                reason="same-scope analyst performance is weak; PM validation stays tighter until evidence improves",
-                evidence={"source": "analyst_performance", **item},
-                confidence_score=min(0.70, _safe_float(item.get("confidence_score"), 0.35)),
-                sample_count=_safe_int(item.get("sample_count"), 1),
-                valid_days=valid_days,
-                maturity_state="analyst_performance_contextual_calibration",
-            )
+            reason = "same-scope analyst performance is weak; PM validation stays tighter until evidence improves"
+        if not rules:
+            continue
+        policy_scope_key = (
+            ticker,
+            side,
+            "*",
+            horizon,
+            "*",
+            "contextual_rule_calibration:portfolio_manager",
+        )
+        if policy_scope_key in seen_contextual_policy_scopes:
+            continue
+        seen_contextual_policy_scopes.add(policy_scope_key)
+        inserted += _insert_contextual_rule_calibration(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
+            scope=scope,
+            rule_group="portfolio_manager",
+            rules=rules,
+            reason=reason,
+            evidence={"source": "analyst_performance", **item},
+            confidence_score=min(0.70, _safe_float(item.get("confidence_score"), 0.35)),
+            sample_count=_safe_int(item.get("sample_count"), 1),
+            valid_days=valid_days,
+            maturity_state="analyst_performance_contextual_calibration",
+        )
         if inserted >= max_rows:
             break
 
+    min_analyst_samples = int(calibration_cfg.get("min_analyst_samples", 3) or 3)
+    min_analyst_confidence = float(calibration_cfg.get("min_analyst_confidence", 0.35) or 0.35)
     cursor.execute(
         '''
         SELECT *
@@ -6526,21 +6531,73 @@ def _write_contextual_rule_calibration_state(
           AND lower(analyst) IN ('technical', 'agentkey.technical')
           AND lower(horizon_class) = 'short'
           AND upper(coalesce(ticker, '')) NOT IN ('', '*', 'UNKNOWN')
-          AND sample_count >= ?
-          AND confidence_score >= ?
-        ORDER BY last_updated DESC, confidence_score DESC
-        LIMIT ?
+        ORDER BY last_updated DESC, confidence_score DESC, sample_count DESC, id
         ''',
-        (
-            config_id,
-            int(calibration_cfg.get("min_analyst_samples", 3) or 3),
-            float(calibration_cfg.get("min_analyst_confidence", 0.35) or 0.35),
-            technical_max_rows,
-        ),
+        (config_id,),
     )
-    technical_inserted = 0
+    technical_rows_by_ticker: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for row in cursor.fetchall():
         item = dict(row)
+        ticker = str(item.get("ticker") or "").upper()
+        if ticker:
+            technical_rows_by_ticker[ticker].append(item)
+
+    technical_performance: List[Dict[str, Any]] = []
+    for ticker, source_rows in technical_rows_by_ticker.items():
+        sample_count = sum(max(0, _safe_int(item.get("sample_count"), 0)) for item in source_rows)
+        if sample_count < min_analyst_samples:
+            continue
+        weighted_hit_rate = sum(
+            _safe_float(item.get("hit_rate"), 0.0) * max(0, _safe_int(item.get("sample_count"), 0))
+            for item in source_rows
+        ) / sample_count
+        weighted_confidence = sum(
+            _safe_float(item.get("confidence_score"), 0.0) * max(0, _safe_int(item.get("sample_count"), 0))
+            for item in source_rows
+        ) / sample_count
+        if weighted_confidence < min_analyst_confidence:
+            continue
+        technical_performance.append(
+            {
+                "ticker": ticker,
+                "horizon_class": "short",
+                "signal_side": "*",
+                "sample_count": sample_count,
+                "hit_rate": weighted_hit_rate,
+                "avg_pnl": sum(_safe_float(item.get("net_pnl"), 0.0) for item in source_rows) / sample_count,
+                "net_pnl": sum(_safe_float(item.get("net_pnl"), 0.0) for item in source_rows),
+                "confidence_score": weighted_confidence,
+                "last_sample_date": max(str(item.get("last_sample_date") or "") for item in source_rows),
+                "last_updated": max(str(item.get("last_updated") or "") for item in source_rows),
+                "aggregation": "exact_ticker_short_all_signal_sides",
+                "source_performance_ids": [str(item.get("id") or "") for item in source_rows if item.get("id")],
+                "source_signal_sides": sorted({str(item.get("signal_side") or "*") for item in source_rows}),
+                "source_rows": [
+                    {
+                        "id": item.get("id"),
+                        "signal_side": item.get("signal_side"),
+                        "sample_count": _safe_int(item.get("sample_count"), 0),
+                        "hit_rate": _safe_float(item.get("hit_rate"), 0.0),
+                        "net_pnl": _safe_float(item.get("net_pnl"), 0.0),
+                        "confidence_score": _safe_float(item.get("confidence_score"), 0.0),
+                        "last_sample_date": item.get("last_sample_date"),
+                    }
+                    for item in source_rows
+                ],
+            }
+        )
+    technical_performance.sort(
+        key=lambda item: (
+            str(item.get("last_updated") or ""),
+            _safe_float(item.get("confidence_score"), 0.0),
+            _safe_int(item.get("sample_count"), 0),
+            str(item.get("ticker") or ""),
+        ),
+        reverse=True,
+    )
+
+    technical_inserted = 0
+    for item in technical_performance[:technical_max_rows]:
         hit_rate = _safe_float(item.get("hit_rate"), 0.0)
         net_pnl = _safe_float(item.get("net_pnl"), 0.0)
         technical_rules = _technical_calibration_rules_from_performance(

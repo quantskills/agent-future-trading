@@ -46,3 +46,9 @@
 （6）[7—9月训练基线核验] 未重跑、未改写7—9月原始推荐、成交、结算和收益事实；确认当前版本可直接读取该段已有`analyst_performance`（76条）、`alpha_setup_sample`（990条）、`alpha_setup_profile`（456条）、`alpha_setup_action_value`（505条）、`adaptive_policy_state`（47条）及`learning_event_log`（2344条）作为10月前向学习输入。旧版记录继续作为训练/基准，不被宣称为新版策略结果；历史重建入口因当前运行时异常退出未执行，避免在未验证时改写学习状态。
 
 （5）[验证] 目标回归、全量单元测试（1116项）、`compileall`、pre-backtest acceptance及system invariant audit全部通过；未改变现有数据库结构和零启动入口。
+
+==========2026年08月14日==========
+
+（1）[预测评价与PM policy作用域分离] `research_memory_writers.py`取消将`analyst_performance`中的`1d/3d/5d/10d`预测评价期限改写为`short/medium/event_short` policy作用域；现有PM contextual policy只读取原本就以`short/medium/long/event_short`记录的控制绩效，并按最终唯一作用域确定性地只写一条完整policy。原因：数字期限预测评价属于分析师校准和Step5 Rank证据，不能在没有同一语义证据时转换成PM控制policy；同时避免同一唯一键被多名分析师依次覆盖后混合不同记录的样本数、置信度与规则。FAC归因、研究反馈、Rank、Step5、Trader、目标手数和交易路径均未修改。
+
+（2）[技术参数policy精确品种聚合] `research_memory_writers.py`继续由现有`_write_contextual_rule_calibration_state()`独立读取technical、exact-ticker、`short`绩效，不占用PM contextual policy配额；同品种long/short绩效按样本数聚合后只生成一条`side=*`的`technical_parameters` policy，并保留来源绩效ID、方向、样本和收益证据。原因：技术指标参数由品种和期限决定，不能任取单一交易方向的绩效，也不能让同一side-neutral唯一键在循环中被后续行覆盖。目标及相关链测试（584项）、全量单元测试（1120项）、`compileall`、pre-backtest acceptance、system invariant audit和contract coverage audit全部通过。

@@ -78,6 +78,7 @@ from tools.common.alpha_setup import (
 )
 from tools.common.execution_trigger_semantics import canonical_entry_trigger
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
+from tools.agent_tools.decision.pm_contextual_rule_calibration import apply_pm_contextual_calibration
 from tools.agent_tools.research.reviewer_phase4_review import (
     _final_action_semantic_summary,
     _horizon_class,
@@ -11042,6 +11043,290 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(len(technical), 1)
             self.assertEqual(technical[0]["ticker"], "CF")
             self.assertEqual(technical[0]["horizon_class"], "short")
+        finally:
+            conn.close()
+
+    def test_forecast_grid_is_not_published_as_contextual_policy(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            for row_id, analyst, horizon in (
+                ("ap-technical-1d", "technical", "1d"),
+                ("ap-fundamental-10d", "fundamental", "10d"),
+            ):
+                cursor.execute(
+                    """
+                    INSERT INTO analyst_performance (
+                        id, config_id, analyst, ticker, sector, horizon_class, signal_side,
+                        sample_count, hit_rate, avg_pnl, net_pnl, confidence_score,
+                        last_updated, valid_until, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row_id,
+                        "cfg",
+                        analyst,
+                        "BU",
+                        "energy",
+                        horizon,
+                        "long",
+                        6,
+                        0.75,
+                        700.0,
+                        4200.0,
+                        0.60,
+                        "2025-03-10T12:00:00",
+                        "2025-03-30",
+                        json.dumps({"forecast_calibration_summary": {"horizon_days": int(horizon[:-1])}}),
+                    ),
+                )
+
+            written = _write_contextual_rule_calibration_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-10",
+                cfg={
+                    "learning": {
+                        "contextual_rule_calibration": {
+                            "enabled": True,
+                            "valid_days": 5,
+                            "max_rows_per_day": 10,
+                            "min_analyst_samples": 3,
+                            "min_analyst_confidence": 0.35,
+                        }
+                    }
+                },
+                strategy_recommendations=[],
+                no_trade_reason_counter=Counter(),
+            )
+
+            self.assertEqual(written, 0)
+            self.assertEqual(
+                cursor.execute("SELECT COUNT(*) FROM adaptive_policy_state").fetchone()[0],
+                0,
+            )
+        finally:
+            conn.close()
+
+    def test_semantic_contextual_policy_is_retrieved_and_applied_next_day(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "contextual-policy.db"
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            _ensure_reviewer_learning_schema(cursor)
+            cursor.execute(
+                """
+                INSERT INTO analyst_performance (
+                    id, config_id, analyst, ticker, sector, horizon_class, signal_side,
+                    sample_count, hit_rate, avg_pnl, net_pnl, confidence_score,
+                    last_updated, valid_until, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ap-fundamental-medium",
+                    "cfg",
+                    "fundamental",
+                    "BU",
+                    "energy",
+                    "medium",
+                    "long",
+                    6,
+                    0.75,
+                    700.0,
+                    4200.0,
+                    0.60,
+                    "2025-03-10T12:00:00",
+                    "2025-03-30",
+                    json.dumps({"sample_count": 6}),
+                ),
+            )
+
+            written = _write_contextual_rule_calibration_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-10",
+                cfg={
+                    "learning": {
+                        "contextual_rule_calibration": {
+                            "enabled": True,
+                            "valid_days": 5,
+                            "max_rows_per_day": 10,
+                            "min_analyst_samples": 3,
+                            "min_analyst_confidence": 0.35,
+                        }
+                    }
+                },
+                strategy_recommendations=[],
+                no_trade_reason_counter=Counter(),
+            )
+            conn.commit()
+            conn.close()
+
+            self.assertEqual(written, 1)
+            db = SQLiteDB()
+            db.db_path = str(db_path)
+            db._runtime_schema_ready = True
+            policy_rows = db.get_adaptive_policy_state(
+                config_id="cfg",
+                ticker="BU",
+                side="long",
+                setup_type="trend_breakout_setup",
+                horizon_class="medium",
+                market_regime="trend",
+                trading_date="2025-03-11",
+            )
+            self.assertEqual(len(policy_rows), 1)
+            self.assertEqual(policy_rows[0]["horizon_class"], "medium")
+            self.assertEqual(policy_rows[0]["payload"]["evidence"]["horizon_class"], "medium")
+
+            control = {
+                "position_lifecycle": {"probe_min_confirmation_score": 0.55},
+                "horizon_consistency": {
+                    "min_short_timing_confidence": 0.45,
+                    "min_confirmation_score": 0.55,
+                },
+            }
+            adjusted, diagnostics = apply_pm_contextual_calibration(
+                control,
+                policy_rows,
+                ticker="BU",
+                side="long",
+                horizon_class="medium",
+                market_regime="trend",
+            )
+            self.assertEqual(adjusted["horizon_consistency"]["min_short_timing_confidence"], 0.42)
+            self.assertEqual(adjusted["horizon_consistency"]["min_confirmation_score"], 0.52)
+            self.assertEqual(len(diagnostics["applied"]), 1)
+
+    def test_contextual_policy_keeps_one_coherent_row_per_final_scope(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            rows = [
+                ("older-positive", "fundamental", 6, 0.75, 4200.0, 0.60, "2025-03-10T11:00:00"),
+                ("newer-weak", "technical", 5, 0.20, -3000.0, 0.55, "2025-03-10T12:00:00"),
+            ]
+            for row_id, analyst, samples, hit_rate, net_pnl, confidence, updated in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO analyst_performance (
+                        id, config_id, analyst, ticker, sector, horizon_class, signal_side,
+                        sample_count, hit_rate, avg_pnl, net_pnl, confidence_score,
+                        last_updated, valid_until, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row_id, "cfg", analyst, "BU", "energy", "medium", "long",
+                        samples, hit_rate, net_pnl / samples, net_pnl, confidence,
+                        updated, "2025-03-30", json.dumps({"source_id": row_id}),
+                    ),
+                )
+
+            written = _write_contextual_rule_calibration_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-10",
+                cfg={
+                    "learning": {
+                        "contextual_rule_calibration": {
+                            "enabled": True,
+                            "valid_days": 5,
+                            "max_rows_per_day": 10,
+                            "min_analyst_samples": 3,
+                            "min_analyst_confidence": 0.35,
+                        }
+                    }
+                },
+                strategy_recommendations=[],
+                no_trade_reason_counter=Counter(),
+            )
+
+            self.assertEqual(written, 1)
+            row = cursor.execute(
+                """
+                SELECT sample_count, confidence_score, reason, payload_json
+                FROM adaptive_policy_state
+                WHERE policy_type = 'contextual_rule_calibration:portfolio_manager'
+                """
+            ).fetchone()
+            payload = load_externalized_json(row["payload_json"])
+            self.assertEqual(row["sample_count"], 5)
+            self.assertAlmostEqual(row["confidence_score"], 0.55)
+            self.assertIn("stays tighter", row["reason"])
+            self.assertEqual(payload["evidence"]["id"], "newer-weak")
+            self.assertEqual(payload["evidence"]["sample_count"], 5)
+        finally:
+            conn.close()
+
+    def test_technical_parameter_policy_aggregates_exact_ticker_short_sides(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            rows = [
+                ("technical-long", "long", 4, 0.75, 4800.0, 0.60),
+                ("technical-short", "short", 6, 0.25, -6000.0, 0.50),
+            ]
+            for row_id, side, samples, hit_rate, net_pnl, confidence in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO analyst_performance (
+                        id, config_id, analyst, ticker, sector, horizon_class, signal_side,
+                        sample_count, hit_rate, avg_pnl, net_pnl, confidence_score,
+                        last_sample_date, last_updated, valid_until, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row_id, "cfg", "technical", "BU", "energy", "short", side,
+                        samples, hit_rate, net_pnl / samples, net_pnl, confidence,
+                        "2025-03-09", "2025-03-10T12:00:00", "2025-03-30",
+                        json.dumps({"source_id": row_id}),
+                    ),
+                )
+
+            written = _write_contextual_rule_calibration_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-10",
+                cfg={
+                    "learning": {
+                        "contextual_rule_calibration": {
+                            "enabled": True,
+                            "valid_days": 5,
+                            "max_rows_per_day": 10,
+                            "min_analyst_samples": 3,
+                            "min_analyst_confidence": 0.35,
+                            "technical_positive_hit_rate": 0.60,
+                            "technical_weak_hit_rate": 0.40,
+                        }
+                    }
+                },
+                strategy_recommendations=[],
+                no_trade_reason_counter=Counter(),
+            )
+
+            self.assertEqual(written, 3)
+            rows = cursor.execute(
+                """
+                SELECT ticker, side, horizon_class, sample_count, confidence_score, payload_json
+                FROM adaptive_policy_state
+                WHERE policy_type = 'contextual_rule_calibration:technical_parameters'
+                """
+            ).fetchall()
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            payload = load_externalized_json(row["payload_json"])
+            evidence = payload["evidence"]
+            self.assertEqual((row["ticker"], row["side"], row["horizon_class"]), ("BU", "*", "short"))
+            self.assertEqual(row["sample_count"], 10)
+            self.assertAlmostEqual(row["confidence_score"], 0.54)
+            self.assertAlmostEqual(evidence["hit_rate"], 0.45)
+            self.assertEqual(evidence["net_pnl"], -1200.0)
+            self.assertEqual(set(evidence["source_performance_ids"]), {"technical-long", "technical-short"})
+            self.assertEqual(
+                payload["rule_adjustments"]["technical_parameters"]["trend_short_multiplier"],
+                1.05,
+            )
         finally:
             conn.close()
 
