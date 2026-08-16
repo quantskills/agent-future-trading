@@ -528,6 +528,45 @@ def _update_exploratory_hypothesis_validation(
     )
 
 
+def _merge_exploratory_hypothesis_support(
+    cursor: sqlite3.Cursor,
+    *,
+    hypothesis_id: str,
+    config_id: str,
+    confidence_score: float,
+    sample_count: int,
+    evidence_summary: str,
+    valid_until: str,
+    payload_json: str,
+    payload_artifact_path: Optional[str],
+    payload_sha256: Optional[str],
+    payload_size: Optional[int],
+    payload_summary_json: Optional[str],
+) -> None:
+    cursor.execute(
+        """
+        UPDATE exploratory_hypothesis
+        SET confidence_score = ?, sample_count = ?, evidence_summary = ?,
+            valid_until = ?, payload_json = ?, payload_artifact_path = ?,
+            payload_sha256 = ?, payload_size = ?, payload_summary_json = ?
+        WHERE id = ? AND config_id = ?
+        """,
+        (
+            float(confidence_score),
+            int(sample_count),
+            evidence_summary,
+            valid_until,
+            payload_json,
+            payload_artifact_path,
+            payload_sha256,
+            payload_size,
+            payload_summary_json,
+            hypothesis_id,
+            config_id,
+        ),
+    )
+
+
 def _upsert_alpha_setup_sample(cursor: sqlite3.Cursor, *, record: Mapping[str, Any]) -> None:
     cursor.execute(
         """
@@ -1604,14 +1643,36 @@ def _write_forecast_calibration_performance(
 
     def summarize(rows: List[Dict[str, Any]]) -> Dict[str, float]:
         sample_count = len(rows)
+        payloads = [
+            _review_helpers._json_loads(row.get("payload_json")) or {}
+            for row in rows
+        ]
         hit_rate = sum(_safe_int(row.get("direction_hit"), 0) for row in rows) / sample_count
         mean_after_fee_return = sum(
             _safe_float(row.get("predicted_side_return_after_fee"), 0.0)
             for row in rows
         ) / sample_count
+        mean_round_trip_fee_rate = sum(
+            _safe_float(
+                payload.get("round_trip_fee_rate"),
+                0.0,
+            )
+            for payload in payloads
+        ) / sample_count
         mean_brier = sum(_safe_float(row.get("brier_score"), 0.0) for row in rows) / sample_count
         expected_mean = sum(_safe_float(row.get("expected_return"), 0.0) for row in rows) / sample_count
         realized_mean = sum(_safe_float(row.get("realized_return"), 0.0) for row in rows) / sample_count
+        predicted_side_expected_mean = sum(
+            (
+                _safe_float(row.get("expected_return"), 0.0)
+                if str(payload.get("predicted_side") or "flat") == "long"
+                else -_safe_float(row.get("expected_return"), 0.0)
+                if str(payload.get("predicted_side") or "flat") == "short"
+                else 0.0
+            )
+            for row, payload in zip(rows, payloads)
+        ) / sample_count
+        predicted_side_realized_mean = mean_after_fee_return + mean_round_trip_fee_rate
         return {
             "sample_count": float(sample_count),
             "direction_hit_rate": hit_rate,
@@ -1620,6 +1681,9 @@ def _write_forecast_calibration_performance(
             "mean_realized_return": realized_mean,
             "expected_return_calibration_error": abs(expected_mean - realized_mean),
             "mean_predicted_side_return_after_fee": mean_after_fee_return,
+            "mean_round_trip_fee_rate": mean_round_trip_fee_rate,
+            "mean_predicted_side_expected_return": predicted_side_expected_mean,
+            "mean_predicted_side_realized_return": predicted_side_realized_mean,
         }
 
     cursor.execute(
@@ -7388,6 +7452,7 @@ insert_researcher_learning_completion_event = _insert_researcher_learning_comple
 insert_causal_review_candidate = _insert_causal_review_candidate
 insert_exploratory_hypothesis = _insert_exploratory_hypothesis
 update_exploratory_hypothesis_validation = _update_exploratory_hypothesis_validation
+merge_exploratory_hypothesis_support = _merge_exploratory_hypothesis_support
 upsert_alpha_setup_sample = _upsert_alpha_setup_sample
 upsert_alpha_setup_profile = _upsert_alpha_setup_profile
 upsert_alpha_setup_action_value = _upsert_alpha_setup_action_value

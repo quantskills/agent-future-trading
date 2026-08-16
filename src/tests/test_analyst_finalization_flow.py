@@ -49,6 +49,7 @@ from tools.common.execution_trigger_semantics import (
 from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
     build_signal_collection_contract,
+    validate_action_evidence_contract,
 )
 from tests.contract_test_fixtures import build_test_aec, build_test_data_usage
 
@@ -370,6 +371,8 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             "15分钟收盘价向下突破开盘区间下沿且低于VWAP",
         )
         self.assertEqual(contract["setup_type"], "range_reversal_setup")
+        self.assertEqual(contract["opportunity_type"], "short_timing")
+        self.assertEqual(contract["entry_timing_signal"], "breakout")
         self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
         self.assertEqual(
             contract["invalidation_condition"],
@@ -377,6 +380,56 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         )
         self.assertEqual(contract["invalidation_level"], 102.0)
         self.assertEqual(contract["position_invalidation_level"], 104.0)
+
+    def test_direction_watchlist_remains_internal_and_cannot_replace_formal_setup(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.62,
+            setup_type="trend_breakout_setup",
+            opportunity_type="long_timing",
+            opportunity_state="watch_for_trigger",
+            evidence_role="entry_timing",
+            entry_timing_signal="breakout",
+            entry_trigger="",
+            exit_hint="15m close below 98 invalidates the setup",
+            invalidation_level=98.0,
+            position_invalidation_level=97.0,
+            factor_focus=["trend", "volume"],
+            metadata={
+                "data_usage_summary": build_test_data_usage("technical", "BU"),
+                "invalidation_condition": "15m close below 98 invalidates the setup",
+            },
+        )
+
+        finalized = self._finalize_directional(
+            signal,
+            analyst="technical",
+            ticker="BU",
+            context={
+                "tradeability": "medium",
+                "setup_type": "direction_watchlist",
+                "setup_quality_ok": True,
+                "market_regime": "trend",
+                "risk_flags": [],
+                "learning_scope": {"setup_family": "direction_watchlist"},
+            },
+        )
+        contract = finalized.metadata["action_evidence_contract"]
+        self.assertEqual(finalized.setup_type, "trend_breakout_setup")
+        self.assertEqual(contract["setup_type"], "trend_breakout_setup")
+        self.assertEqual(
+            contract["learning_scope"]["setup_family"],
+            "trend_breakout_setup",
+        )
+        validate_action_evidence_contract(contract, analyst="technical")
+
+        invalid = {**contract, "setup_type": "direction_watchlist"}
+        with self.assertRaisesRegex(
+            ValueError,
+            "action_evidence_contract_technical_setup_type_invalid",
+        ):
+            validate_action_evidence_contract(invalid, analyst="technical")
 
     def test_technical_profile_generates_canonical_trigger_before_prose_presence_check(self):
         signal = AnalystSignal(
@@ -567,7 +620,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
                         agent_name="technical",
                         signal=signal_value,
                         confidence=0.62,
-                        setup_type="technical_setup",
+                        setup_type="trend_breakout_setup",
                         opportunity_type=f"{side}_timing",
                         opportunity_state="watch_for_trigger",
                         evidence_role="entry_timing",
@@ -590,7 +643,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
                         ticker="BU",
                         context={
                             "tradeability": "medium",
-                            "setup_type": "technical_setup",
+                            "setup_type": "trend_breakout_setup",
                             "setup_quality_ok": True,
                             "market_regime": "trend",
                             "risk_flags": [],

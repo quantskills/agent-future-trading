@@ -217,7 +217,7 @@
 | `expected_return` / `expected_return_low` / `expected_return_high` | `forward_forecasts` | 对应期限标的收益率中心估计及上下界；必须满足下界不高于中心且中心不高于上界。 |
 | `key_drivers` / `forecast_invalidation` | `forward_forecasts` | 形成该期限预测的结构化驱动及使预测论点失效的可复核条件；不作为 Trader 的入场触发或持仓退出指令。 |
 | `analyst_forecast_evaluation` | 数据库表名 / Researcher | 只在预测期限到达后写入的评价事实，记录预测分布、标的实际收益、按执行手续费事实表估算的预测方向手续费后收益、方向命中和 Brier 分数；PM 与分析师不得直接读取未到期预测。 |
-| `forecast_calibration_summary` | `analyst_performance.payload_json` / PM scorecard | Researcher 按精确、品种、板块、策略/状态及全局层级汇总的到期预测表现，包含样本数、方向命中率、Brier 分数、手续费后平均收益和状态匹配。PM 按候选 `expected_horizon_days` 映射到 1/3/5/10 日网格，读取三名分析师当日该期限完整概率分布，并只用同分析师、期限和当前信号侧的成熟摘要校准；中性分析师按概率分布参与。只校准预测与资金排序，不创建交易权限。 |
+| `forecast_calibration_summary` | `analyst_performance.payload_json` / PM scorecard | Researcher 按精确、品种、板块、策略/状态及全局层级汇总到期预测的样本数、方向命中率、Brier、预测方向手续费后收益、预期/实际收益偏差和往返手续费。PM 按候选 `expected_horizon_days` 映射到 1/3/5/10 日网格，读取三名分析师当日该期限完整概率分布及当日预期收益，形成多空两侧 `current_expected_return_after_fee`；只在SCC已有的合法候选侧之间比较，单侧候选和冷启动不改写方向，中性分析师按概率分布参与。只校准预测、合法侧优先级、Rank和期限复评，不创建交易权限。 |
 | `market_regime` | 分析师 / FAC / 正式学习 state_key | 市场状态，如趋势、震荡、高波动；FAC 生产、正式学习落库和正式查询统一为小写、空格与斜杠转下划线的 canonical 文本，不合并语义不同的状态。 |
 | `trend_stage` | 技术证据 | 趋势阶段。 |
 | `trend_direction` | 技术证据 | 技术趋势方向背景。 |
@@ -225,7 +225,7 @@
 | `price_location` | 分析师证据 | 当前价格位置。 |
 | `price_percentile` | 分析师证据 | 当前价格分位。 |
 | `direction_anchor` | 分析师证据 | 中期方向锚。 |
-| `setup_type` | 分析师 / 研究 state | 交易逻辑类型。 |
+| `setup_type` | 分析师 / 研究 state | 规范化交易形态身份；与 `opportunity_type`、`execution_profile` 独立，禁止用机会类型或执行画像覆盖。 |
 | `setup_quality_ok` | 分析师证据 | 形态值得关注；不代表当前已触发。 |
 | `setup_quality_score` | 分析师 / 研究样本 | setup 质量评分。 |
 | `setup_quality_notes` | 分析师证据 | setup 质量说明。 |
@@ -833,8 +833,8 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `analyst_learning_context.analyst_calibration_items` | 分析师内部提示词上下文 | 同品种、T+1、canonical完整且内嵌`analyst_calibration`作用域的正式action-value安全投影；technical可额外读取去绝对价格后的canonical触发键、入场/触发质量结论及有界确认调整，非technical不取得这些入场字段。提示词不含原始学习ID、reward、rank、手数或保证金；该内部对象不得进入AEC、SCC或PM，也不能重选方向、创建机会或直接授权交易。 |
 | `trade_episode_memory.payload_json.position_lifecycle_trace -> analyst_learning_context.text` | 分析师内部提示词上下文 | 对严格过去、已完成且命中既有检索范围的episode，只投影相对结构失效距离、原始ATR距离、预期/实际持有期、最终退出原因和净结果；历史绝对价格及原始episode payload不得进入提示词。 |
 | `trade_episode_memory.payload_json.position_lifecycle_trace -> researcher exploratory prompt` | Researcher 探索研究输入 | 对 Phase4 后已完成 episode，按每日顺序压缩 SCC/FAC 动作、成交、结算、证据/失效变化、累计峰值和利润回吐；保留完整日轨迹但不把自由文本变成交易权限。 |
-| `exploratory_hypothesis.payload_json.support_episode_ids` / `setup_type` | Researcher 探索研究 | LLM 生成假设时必须引用本次实际提供且与 ticker/sector/side/horizon/regime/setup 生成作用域匹配的完整 episode ID；无有效支持 ID 的输出拒绝落库。该生成支持作用域不改变后续未来验证固定忽略horizon硬匹配的规则。 |
-| `exploratory_hypothesis.status` / `payload_json.research_validation` | Researcher 探索研究 | 状态固定为 `candidate/monitoring/validated/rejected`。只使用假设生成日之后的完整真实 episode 和手续费后 `return_on_notional`；品种级按ticker/side/setup/标准化market_regime匹配，板块级按sector/side/setup/标准化market_regime匹配，horizon不作为硬验证键。无样本为candidate；已有但不足为monitoring；样本达标后均值不为正为rejected，均值为正但最新亏损为monitoring，均值为正且最新非负才为validated；到期不足为rejected，后续合格样本允许恢复。candidate/monitoring 不进入分析师提示词，验证过程不写 Profile、action-value、policy、Rank、仓位或 Trader 权限。 |
+| `exploratory_hypothesis.payload_json.support_episode_ids` / `setup_type` | Researcher 探索研究 | LLM 生成假设时必须引用本次实际提供且与 ticker/sector、side、setup、horizon、标准化regime生成作用域匹配的完整 episode ID；无有效支持 ID 的输出拒绝落库。同一规范作用域只保留一个活动假设，后续支持 episode 合并到该记录。 |
+| `exploratory_hypothesis.status` / `payload_json.research_validation` | Researcher 探索研究 | 状态固定为 `candidate/monitoring/validated/rejected`。只使用假设生成日之后、同一ticker或sector/side/setup/horizon/标准化market_regime的完整真实 episode 和手续费后 `return_on_notional`；无样本为candidate，已有但不足为monitoring，样本达标后均值不为正为rejected，均值为正但最新亏损为monitoring，均值为正且最新非负才为validated。未交易反事实不能改变正式状态；candidate/monitoring 不进入分析师提示词，验证过程不写 Profile、action-value、policy、Rank、仓位或 Trader 权限。 |
 | `learning_scope.setup_family` / `learning_scope.sector_setup_alignment` / `learning_scope.sector_preferred_setups` / `learning_scope.sector_caution_setups` | technical 学习范围 | 技术 setup 家族、板块匹配及优先/谨慎 setup。 |
 | `learning_scope.primary_confirmation` / `learning_scope.execution_focus` / `learning_scope.market_regime` | technical 学习范围 | 技术主确认、执行关注点和当日市场状态。 |
 | `learning_scope.factor_tree` / `learning_scope.primary_driver_groups` / `learning_scope.short_trigger_groups` / `learning_scope.conflict_groups` | fundamental 学习范围 | 基本面因子树、主驱动组、短期触发组和冲突组。 |

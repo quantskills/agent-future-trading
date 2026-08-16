@@ -10169,8 +10169,43 @@ def _apply_holding_rebalance_control(
         and held_days is not None
         and held_days >= expected_horizon_days
     )
+    current_scorecard = (
+        fusion_context.get("opportunity_scorecard")
+        if isinstance(fusion_context, dict)
+        else {}
+    )
+    current_scorecard_side = (
+        current_scorecard.get(current_side)
+        if isinstance(current_scorecard, dict)
+        and isinstance(current_scorecard.get(current_side), dict)
+        else {}
+    )
+    current_forecast_calibration = (
+        current_scorecard_side.get("forecast_calibration_summary")
+        if isinstance(current_scorecard_side, dict)
+        and isinstance(
+            current_scorecard_side.get("forecast_calibration_summary"),
+            dict,
+        )
+        else {}
+    )
+    horizon_economic_revalidation_available = bool(
+        opening_horizon_due
+        and str(current_forecast_calibration.get("status") or "").lower()
+        == "matured"
+    )
+    horizon_current_expected_return_after_fee = _safe_float(
+        current_forecast_calibration.get("current_expected_return_after_fee"),
+        0.0,
+    )
+    horizon_economic_revalidation_failed = bool(
+        horizon_economic_revalidation_available
+        and horizon_current_expected_return_after_fee < 0.0
+    )
     explicit_lifecycle_break = bool(
-        technical_invalidation_confirmed or fundamental_medium_opposition
+        technical_invalidation_confirmed
+        or fundamental_medium_opposition
+        or horizon_economic_revalidation_failed
     )
     current_horizon_consistency = _horizon_consistency_result(
         side=current_side,
@@ -10442,6 +10477,15 @@ def _apply_holding_rebalance_control(
         "technical_invalidation_confirmed": bool(technical_invalidation_confirmed),
         "fundamental_medium_opposition": bool(fundamental_medium_opposition),
         "opening_horizon_due": bool(opening_horizon_due),
+        "horizon_economic_revalidation_available": bool(
+            horizon_economic_revalidation_available
+        ),
+        "horizon_current_expected_return_after_fee": float(
+            horizon_current_expected_return_after_fee
+        ),
+        "horizon_economic_revalidation_failed": bool(
+            horizon_economic_revalidation_failed
+        ),
         "explicit_lifecycle_break": bool(explicit_lifecycle_break),
         "news_supports_current": bool(news_supports_current),
         "news_hold_anchor_current": bool(news_hold_anchor_current),
@@ -11509,6 +11553,32 @@ def _run_pm_six_step_decision(state: FundState):
         (_get_portfolio_manager_config(full_config).get("quality_aware_fusion") or {}).get("opportunity_scorecard") or {}
     )
     scorecard_alpha_setup_action_values = []
+    for candidate_side in ("long", "short"):
+        identity = formal_learning_identity_by_side[candidate_side]
+        candidate_setup = str(identity.get("setup_type") or "").strip()
+        if not candidate_setup or not db or not config_id:
+            continue
+        try:
+            candidate_profiles = pm_memory_db.get_alpha_setup_profiles(
+                config_id=config_id,
+                ticker=ticker,
+                side=candidate_side,
+                horizon_class=str(identity.get("horizon_class") or ""),
+                market_regime=str(identity.get("market_regime") or ""),
+                setup_type=candidate_setup,
+                trading_date=trading_date,
+                limit=6,
+            )
+        except Exception:
+            candidate_profiles = []
+        alpha_setup_profiles.extend(
+            row
+            for row in candidate_profiles
+            if str(row.get("id") or row.get("scope_key") or "") not in {
+                str(existing.get("id") or existing.get("scope_key") or "")
+                for existing in alpha_setup_profiles
+            }
+        )
     opportunity_scorecard = build_opportunity_scorecard(
         ticker=ticker,
         analyst_signals=analyst_signals,

@@ -199,6 +199,7 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         )
         contract = result[0][1].signal_snapshot["final_action_contract"]
         mutations = (
+            ({"setup_type": "direction_watchlist"}, "new_risk_setup_type_not_formal"),
             ({"execution_profile": "unknown"}, "execution_profile_not_canonical"),
             ({"trigger_source": ""}, "trigger_source_missing"),
             ({"trigger_source": "position_lifecycle"}, "execution_profile_trigger_source_mismatch"),
@@ -355,7 +356,7 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         )
         contract = result[0][1].signal_snapshot["final_action_contract"]
         self.assertEqual(contract["contract_code"], "BU2505")
-        self.assertEqual(contract["setup_type"], "trend_continuation")
+        self.assertEqual(contract["setup_type"], "trend_breakout_setup")
         self.assertEqual(contract["horizon_class"], "short")
         self.assertEqual(contract["expected_horizon_days"], 3)
         self.assertEqual(contract["market_regime"], "trend")

@@ -25,7 +25,7 @@ from tools.common.final_action_semantics import (
     validate_action_preference_family_consistency,
 )
 from tools.common.execution_trigger_semantics import CANONICAL_ENTRY_TRIGGERS
-from tools.common.learning_identity import canonical_market_regime
+from tools.common.learning_identity import canonical_market_regime, canonical_setup_type
 from tools.agent_tools.research import research_memory_writers
 
 
@@ -97,17 +97,18 @@ def build_scope_key(
     market_regime: str,
     setup_type: str,
     data_combo: str,
+    source_type: str = "trade_episode",
 ) -> str:
-    return "|".join(
-        [
-            _clean_token(ticker, "*").upper(),
-            _clean_token(side, "*"),
-            _clean_token(horizon_class, "unknown"),
-            canonical_market_regime(market_regime, "unknown"),
-            _clean_token(setup_type, "unknown"),
-            _clean_token(data_combo, "unknown")[:160],
-        ]
-    )
+    identity = [
+        _clean_token(ticker, "*").upper(),
+        _clean_token(side, "*"),
+        canonical_setup_type(setup_type, "unknown"),
+        _clean_token(horizon_class, "unknown"),
+        canonical_market_regime(market_regime, "unknown"),
+    ]
+    if str(source_type or "").strip().lower() in {"trade_episode", "episode_trade"}:
+        return "|".join(identity)
+    return "|".join(identity + [_clean_token(data_combo, "unknown")[:160]])
 
 
 def _analyst_entry_trigger(evidence: Mapping[str, Any]) -> str:
@@ -311,7 +312,7 @@ def build_product_learning_performance_key(
     )
     ticker = str(sample.get("ticker") or "*").upper()
     side = _clean_token(sample.get("side"), "*")
-    setup_type = _clean_token(sample.get("setup_type"), "unknown")
+    setup_type = canonical_setup_type(sample.get("setup_type"), "unknown")
     performance_scope_key = "|".join(
         [
             _clean_token(ticker, "*").upper(),
@@ -1091,8 +1092,9 @@ def upsert_alpha_setup_sample_and_profile(
     sector = str(sample.get("sector") or "unknown")
     horizon = _clean_token(sample.get("horizon_class"), "unknown")
     regime = canonical_market_regime(sample.get("market_regime"), "unknown")
-    setup_type = _clean_token(sample.get("setup_type"), "unknown")
+    setup_type = canonical_setup_type(sample.get("setup_type"), "unknown")
     data_combo = _clean_token(sample.get("data_combo"), "unknown")[:180]
+    source_type = str(sample.get("source_type") or "trade")
     scope_key = str(sample.get("scope_key") or build_scope_key(
         ticker=ticker,
         side=side,
@@ -1100,10 +1102,10 @@ def upsert_alpha_setup_sample_and_profile(
         market_regime=regime,
         setup_type=setup_type,
         data_combo=data_combo,
+        source_type=source_type,
     ))
     recommendation_id = str(sample.get("recommendation_id") or "")
     sample_id = str(uuid.uuid4())
-    source_type = str(sample.get("source_type") or "trade")
     action_name = classify_action(
         sample.get("action_taken"),
         target_lots=_safe_int(sample.get("target_lots")),

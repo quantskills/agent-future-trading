@@ -27,6 +27,7 @@ from tools.common.evidence_fusion_semantics import (
     classify_evidence_horizon,
 )
 from tools.common.final_action_semantics import FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS
+from tools.common.learning_identity import is_formal_technical_setup_type
 
 
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
@@ -741,6 +742,10 @@ def validate_action_evidence_contract(
                 )
         elif contract_analyst == "technical":
             if executable_state:
+                if not is_formal_technical_setup_type(contract.get("setup_type")):
+                    raise ValueError(
+                        "action_evidence_contract_technical_setup_type_invalid"
+                    )
                 if entry_timing_signal not in TECHNICAL_ENTRY_PROFILES:
                     raise ValueError(
                         "action_evidence_contract_technical_profile_missing"

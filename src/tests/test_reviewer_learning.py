@@ -2967,6 +2967,85 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(recovered["sample_count"], 5)
         conn.close()
 
+    def test_sector_hypothesis_scope_does_not_merge_distinct_sectors(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+        cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+        _ensure_reviewer_learning_schema(cursor)
+        cursor.execute(
+            """
+            INSERT INTO trade_episode_memory (
+                id, config_id, trading_date, ticker, side, sector, setup_type,
+                signal_combo, horizon_class, market_regime, open_date, close_date,
+                holding_days, net_pnl, return_on_notional, outcome_label,
+                lesson_text, payload_json, created_at
+            ) VALUES
+                ('energy-1', 'cfg', '2025-03-11', 'BU', 'long', 'energy',
+                 'trend_breakout_setup', '[]', 'short', 'trend', '2025-03-10',
+                 '2025-03-11', 1, 1000, 0.01, 'winner', '', '{}', 'now'),
+                ('metal-1', 'cfg', '2025-03-12', 'CU', 'long', 'metal',
+                 'trend_breakout_setup', '[]', 'short', 'trend', '2025-03-11',
+                 '2025-03-12', 1, 1000, 0.01, 'winner', '', '{}', 'now')
+            """
+        )
+
+        def fake_agent_call(**_kwargs):
+            return ExploratoryHypothesisLLMOutput(
+                hypotheses=[
+                    ExploratoryHypothesisItem(
+                        ticker="*", sector="energy", side="long",
+                        horizon_class="short", market_regime="trend",
+                        setup_type="trend_breakout_setup",
+                        support_episode_ids=["energy-1"],
+                        hypothesis_text="Energy breakout hypothesis.",
+                        evidence_summary="energy support", validation_plan="future energy",
+                        confidence_score=0.5,
+                    ),
+                    ExploratoryHypothesisItem(
+                        ticker="*", sector="metal", side="long",
+                        horizon_class="short", market_regime="trend",
+                        setup_type="trend_breakout_setup",
+                        support_episode_ids=["metal-1"],
+                        hypothesis_text="Metal breakout hypothesis.",
+                        evidence_summary="metal support", validation_plan="future metal",
+                        confidence_score=0.5,
+                    ),
+                ]
+            )
+
+        with patch("llm.inference.agent_call", side_effect=fake_agent_call):
+            summary = write_exploratory_hypotheses(
+                cursor,
+                cfg={
+                    "llm": {"model": "unit-test"},
+                    "learning": {
+                        "exploratory_research": {
+                            "enabled": True,
+                            "use_llm": True,
+                            "min_episode_samples": 2,
+                            "max_episode_samples": 4,
+                            "max_hypotheses_per_day": 3,
+                        }
+                    },
+                },
+                config_id="cfg",
+                trading_date="2025-03-12",
+            )
+
+        self.assertEqual(summary["rows"], 2)
+        rows = [
+            dict(row)
+            for row in cursor.execute(
+                "SELECT ticker, sector, scope_key FROM exploratory_hypothesis ORDER BY sector"
+            ).fetchall()
+        ]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["scope_key"], "energy:long:trend_breakout_setup:short:trend")
+        self.assertEqual(rows[1]["scope_key"], "metal:long:trend_breakout_setup:short:trend")
+        conn.close()
+
     def test_researcher_causal_review_prompt_requires_trade_contract(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

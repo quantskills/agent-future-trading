@@ -43,9 +43,9 @@
 
 | 概念 | 当前代码中的准确含义 | 主要生产者 | 正式消费者 | 固定边界 |
 |---|---|---|---|---|
-| `setup_type` | 一笔机会采用的交易形态身份，不是收益、动作或记忆表。技术分析师正式枚举为 `trend_breakout_setup`、`trend_pullback_setup`、`range_reversal_setup`、`volatility_breakout_setup`、`failed_rebound_setup`、`unknown`；PM 将选中的 canonical setup 冻结进 FAC | 技术分析师产生当日值；PM 冻结最终值；Researcher 继承 | SCC、PM 识别当日机会；后续所有正式记忆用它隔离作用域 | 不是独立表；不得从成交结果或次日 SCC 重建 |
+| `setup_type` | 一笔机会采用的交易形态身份，不是收益、动作或记忆表。技术分析师正式枚举为 `trend_breakout_setup`、`trend_pullback_setup`、`range_reversal_setup`、`volatility_breakout_setup`、`failed_rebound_setup`、`unknown`；PM 将选中的 canonical setup 冻结进 FAC | 技术分析师产生当日值；PM 冻结最终值；Researcher 继承 | SCC、PM 识别当日机会；后续所有正式记忆用它隔离作用域 | 与 `opportunity_type`、`execution_profile` 独立；AEC finalization 只规范化既有 setup，不得用机会类型或执行画像覆盖 |
 | `alpha_setup_sample` | 一条最小学习观察，记录某个 setup 在某日发生的交易、未交易、持仓动作或执行结果 | Researcher 的 `write_alpha_setup_profiles`/`upsert_alpha_setup_sample_and_profile` | Researcher 聚合；其他智能体不直接消费原始 sample | 原始 sample 不是交易授权 |
-| `alpha_setup_profile` | 同一 `ticker/side/horizon/regime/setup/data_combo` 下多条 sample 的“成绩单”，包括样本数、胜率、盈亏因子、净盈亏、置信度和生命周期状态 | Researcher 确定性聚合 sample | 分析师读取安全摘要；PM 经 `decision_memory_retrieval` 读取同 setup profile | PM 正式消费必须匹配 setup；candidate/watchlist 不具备成熟放大权 |
+| `alpha_setup_profile` | 完整真实 episode 按同一 `ticker/side/setup/horizon/regime` 聚合成熟成绩单；未交易、日级审计和执行学习仍保留各自 `data_combo` 细节，包括样本数、胜率、盈亏因子、净盈亏、置信度和生命周期状态 | Researcher 确定性聚合 sample | 分析师读取安全摘要；PM 经 `decision_memory_retrieval` 读取同 setup profile | `data_combo` 保留证据与执行审计，但不得再次切碎完整 episode 的 Alpha 成熟样本；candidate/watchlist 不具备成熟放大权 |
 | `alpha_setup_action_value` | 同一学习身份下，对某个动作 lane 的历史结果总结；回答“历史上 open/hold/reduce/exit/execution 等动作表现如何”，不是明日指令 | Researcher 在 profile 刷新时按动作分账聚合 | PM 经 `decision_memory_retrieval` 用于评分、排名、生命周期和执行偏好；分析师只读显式授权的安全校准投影 | 只有 canonical family/lane/preference 和 consumer_scope 完整的记录具备正式消费资格；置信度直接采用已包含样本量的对应动作生命周期置信度，不再二次乘样本比例 |
 | `adaptive_policy_state` | 从合格历史事实导出的有时效、置信度和样本门槛的未来软规则，如参数校准、cap、probe；不是订单 | Researcher 的多个 policy writer | PM 经 `decision_memory_retrieval` 消费交易决策类 policy；技术分析师只消费 `contextual_rule_calibration:technical_parameters` | `fast_candidate_alpha` 仅来自合格 `missed_alpha_accountability`，只授予下一交易日同作用域 probe 权限 |
 | `provisional_policy_state` | 低成熟度、可回滚的临时政策，仅允许进入 PM risk gate 的低权限校准 | Researcher | PM risk gate 经 `decision_memory_retrieval` 消费 | 不得直接授权 real/scale、方向或手数 |
@@ -66,7 +66,7 @@ profile 与 action-value 的区别：profile 是“这个 setup 整体成绩如�
 | `research_position_feedback` | 记录 PM 是否实际声明消费学习，以及后续动作、成交和结算 | Researcher 闭环和开发验收，不直接控制交易 | 只有最终 FAC 实际消费的正式学习才可形成反馈 |
 | `signal_context_history` | 每日 SCC/FAC 等上下文事实快照 | Researcher 后续归因和聚合 | 只记录已落地正式事实 |
 | `capital_deployment_state` | 每日资金利用和部署诊断 | Researcher、Reviewer 报告和开发评估；不是 PM 次日直接记忆 | 不生成次日资金权限 |
-| `exploratory_hypothesis` | Researcher LLM 基于完整持仓日轨迹和明确支持 episode ID 生成的结构化探索假设 | `candidate/monitoring` 只做影子验证；只有 `validated` 可进入分析师提示词作为可反驳先验，任何状态都不能直接授权交易 | 未来验证作用域为ticker或sector、side、setup、标准化market_regime；horizon不作为硬验证键 |
+| `exploratory_hypothesis` | Researcher LLM 基于完整持仓日轨迹和明确支持 episode ID 生成的结构化探索假设 | `candidate/monitoring` 只做影子验证；只有 `validated` 可进入分析师提示词作为可反驳先验，任何状态都不能直接授权交易 | 同一 `ticker或sector/side/setup/horizon/标准化market_regime` 只保留一个活动假设并合并支持 episode；正式验证只使用生成日之后的完整真实 episode |
 | `causal_review_candidate` | Researcher LLM 形成的因果候选及确定性验证状态 | Researcher 和开发评估；未验证前无正式交易消费权 | 不直接进入交易链 |
 | `researcher_llm_notes` | 保存经正式ID链验证的结构化 evidence pack、验证结果及外置 payload 元数据 | Research writer；仅结构化、验证后的候选进入后续研究链 | prompt、原始response、内部推理和未验证工具结果固定不保存 |
 | `config_learning_overlay` | 研究参数覆盖层；PM 代码通过 `apply_config_learning_overlay` 读取 | PM 配置层 | 无合格参数生产者时不得复制原配置冒充学习覆盖 |
@@ -121,7 +121,7 @@ Phase1 投资组合经理 final_action_contract
 1. 分析师消费本专业校准类结构化研究，输出更干净的 `action_evidence_contract`。
 2. 投资组合经理经 `decision_memory_retrieval` 消费交易决策类结构化研究，再按 PM 六步机制通过生命周期路由、仅新增风险 Step5 全市场资金部署和唯一 `final_action_contract` 落地。
 
-多期限预测评价属于第二条路径中的只读校准输入：Researcher 以 AEC 的逻辑交易日为预测起点，在 1、3、5、10 个结算交易日分别成熟预测，按执行手续费事实表计算预测方向手续费后收益，并按品种、板块、市场状态和全局层级汇总方向准确率与 Brier。PM 先按候选 `expected_horizon_days` 映射到同一预测网格，再读取三名分析师当日该期限的完整概率分布；历史摘要只校准对应分析师、期限和信号侧的当日概率与预期收益。中性分析师仍按上涨、下跌、震荡概率参与；结果只进入 Step5 有符号 `calibrated_forecast_value`，不新增一致性门槛，冷启动为 0，负值保留交易候选且只降低相对资金顺序。
+多期限预测评价属于第二条路径中的只读校准输入：Researcher 以 AEC 的逻辑交易日为预测起点，在 1、3、5、10 个结算交易日分别成熟预测，按执行手续费事实表计算预测方向手续费后收益，并按品种、板块、市场状态和全局层级汇总方向准确率、Brier、预测偏差及往返手续费。PM 先按候选 `expected_horizon_days` 映射到同一预测网格，再读取三名分析师当日该期限的完整概率分布和当日预期收益；历史摘要校准对应分析师、期限和信号侧的概率与收益偏差，形成多空两侧当日手续费后净预期收益。两侧都已由SCC形成合法候选且校准成熟时，PM才在两侧中优先选择净预期收益较高的一侧；只有一个合法候选时原方向不变，冲突SCC保持flat，冷启动仍沿原SCC方向。中性分析师继续按上涨、下跌、震荡概率参与；结果进入既有 `calibrated_forecast_value`，不新增一致性门槛、不创建方向、不删除合法候选。
 
 信号收集员、审计员、交易员、会计师、复盘员都不能直接读取研究库来生成或改变交易权限。
 
@@ -295,7 +295,7 @@ Adaptive policy 的实际应用只由 `final_action_contract.learning_used.adapt
 
 投资组合经理可以消费 execution action-value，但只能把它转成未来最终合约里的合约化执行字段。对入场学习，只有同品种、同方向、同 setup、同 canonical trigger 的正式 canonical open/add `entry_quality_outcome.trigger_confirmation_adjustment`，或当日结构化 weak-conflict 权限，才允许形成最终合约的 `trigger_confirmation_adjustment`；开仓episode的正负、`support_weight/penalty_weight`和确认等级只按手续费后`return_on_notional`生成，人民币盈亏只保留审计与生命周期统计。reason 文本、similar/weak/incomplete prior 不得产生该字段。交易员对`stronger_confirmation_required`在现有 FAC 路径内追加一根完整15分钟线，对`strict_confirmation_required`追加连续两根完整15分钟线，并逐根验证价格延续及整段相对量能；`standard_confirmation_supported`保持原触发。交易员仍只读 `final_action_contract` 中的 `execution_profile/entry_trigger/trigger_confirmation_adjustment/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`，也不新增方向、手数或退出权限。
 
-探索研究固定为单一路径：Researcher 将完整 episode 的每日 SCC/FAC、成交、结算、证据变化、累计峰值和利润回吐压缩进一次 LLM 输入，LLM 必须引用实际提供且与生成假设作用域匹配的 `support_episode_ids`。新假设先写为 `candidate`；未来验证只使用生成日之后的完整真实 episode，品种级按ticker、side、setup和标准化market_regime匹配，板块级按sector、side、setup和标准化market_regime匹配，horizon只保留适用性描述而不作为硬验证键。无未来样本保持`candidate`，样本不足但已有未来样本为`monitoring`；样本达到下限后，均值不为正则`rejected`，均值为正但最新完整周期亏损则`monitoring`，均值为正且最新非负才`validated`；到期仍不足为`rejected`，后续合格样本允许恢复。验证过程只更新 `exploratory_hypothesis`，不得写 Profile、action-value、policy、Rank、仓位或 Trader 权限；`validated` 只进入下一交易日分析师先验，再经原有 AEC→SCC→PM FAC→Auditor→Trader 链路产生作用。
+探索研究固定为单一路径：Researcher 将完整 episode 的每日 SCC/FAC、成交、结算、证据变化、累计峰值和利润回吐压缩进一次 LLM 输入，LLM 必须引用实际提供且与生成假设作用域匹配的 `support_episode_ids`。同一 `ticker或sector/side/setup/horizon/标准化market_regime` 只保留一个活动假设；后续同作用域研究合并支持 episode，不重复新建假设。新假设先写为 `candidate`；未来验证只使用生成日之后、同一完整作用域的真实 episode。无未来样本保持`candidate`，样本不足但已有未来样本为`monitoring`；样本达到下限后，均值不为正则`rejected`，均值为正但最新完整周期亏损则`monitoring`，均值为正且最新非负才`validated`；到期仍不足为`rejected`，后续合格样本允许恢复。未交易反事实只进入既有错失机会和 `fast_candidate_alpha` 候选路径，不能改变假设正式状态。验证过程只更新 `exploratory_hypothesis`，不得写 Profile、action-value、policy、Rank、仓位或 Trader 权限；`validated` 只进入下一交易日分析师先验，再经原有 AEC→SCC→PM FAC→Auditor→Trader 链路产生作用。
 
 ## 七、交易员、会计师、复盘员与研究边界
 

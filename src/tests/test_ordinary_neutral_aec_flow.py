@@ -320,6 +320,7 @@ class OpportunityFinalizationTest(unittest.TestCase):
                 signal.neutral_trigger_condition = signal.entry_trigger
                 if analyst == "technical":
                     signal.entry_timing_signal = "breakout"
+                    signal.setup_type = "trend_breakout_setup"
                 finalized = _finalize(
                     analyst,
                     signal,

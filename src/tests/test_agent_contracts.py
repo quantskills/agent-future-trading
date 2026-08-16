@@ -519,7 +519,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertNotIn("technical_derived_specific_entry_condition", result.setup_quality_notes)
         contract = result.metadata["action_evidence_contract"]
         self.assertEqual(contract["analyst"], "technical")
-        self.assertEqual(contract["learning_scope"]["setup_family"], "trend_breakout")
+        self.assertEqual(contract["learning_scope"]["setup_family"], "trend_breakout_setup")
         self.assertEqual(contract["learning_scope"]["sector_setup_alignment"], "preferred")
         self.assertIn("primary_confirmation", contract["learning_scope"])
 

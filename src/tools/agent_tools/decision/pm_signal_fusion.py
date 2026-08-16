@@ -70,6 +70,7 @@ def build_forecast_calibration_summary(
         "direction_accuracy": 0.5,
         "mean_brier_score": 1.0 / 3.0,
         "expected_return_after_fee": 0.0,
+        "current_expected_return_after_fee": 0.0,
         "market_regime_match": 0.5,
         "rank_signal": 0.0,
         "source_rows": [],
@@ -136,6 +137,29 @@ def build_forecast_calibration_summary(
             regime_metrics.get("mean_predicted_side_return_after_fee"),
             0.0,
         )
+        mean_expected_return = _safe_float(
+            regime_metrics.get("mean_predicted_side_expected_return"),
+            _safe_float(regime_metrics.get("mean_expected_return"), 0.0),
+        )
+        underlying_return_bias = 0.0
+        if (
+            "mean_realized_return" in regime_metrics
+            and "mean_expected_return" in regime_metrics
+        ):
+            underlying_return_bias = (
+                _safe_float(regime_metrics.get("mean_realized_return"), 0.0)
+                - mean_expected_return
+            )
+        round_trip_fee_rate = _safe_float(
+            regime_metrics.get("mean_round_trip_fee_rate"),
+            0.0,
+        )
+        if round_trip_fee_rate <= 0.0:
+            round_trip_fee_rate = max(
+                0.0,
+                _safe_float(regime_metrics.get("mean_realized_return"), 0.0)
+                - historical_after_fee,
+            )
         historical_calibration_signal = max(
             -1.0,
             min(
@@ -175,9 +199,21 @@ def build_forecast_calibration_summary(
         current_target_return = _safe_float(forecast.get("expected_return"), 0.0)
         if target == "short":
             current_target_return = -current_target_return
-        analyst_rank_signal = (
-            target_probability - opposite_probability
-        ) * calibration_strength
+        target_return_bias = (
+            underlying_return_bias if target == "long" else -underlying_return_bias
+        )
+        current_expected_return_after_fee = (
+            current_target_return + target_return_bias - round_trip_fee_rate
+        )
+        forecast_spread = calibrated_target_probability - calibrated_opposite_probability
+        analyst_rank_signal = max(
+            -1.0,
+            min(
+                1.0,
+                0.65 * max(-1.0, min(1.0, current_expected_return_after_fee / 0.02))
+                + 0.35 * forecast_spread * calibration_strength,
+            ),
+        )
         candidate = {
             "analyst": analyst,
             "signal_side": current_signal_side,
@@ -189,6 +225,8 @@ def build_forecast_calibration_summary(
             "direction_hit_rate": direction_hit_rate,
             "mean_brier_score": mean_brier_score,
             "mean_predicted_side_return_after_fee": historical_after_fee,
+            "mean_expected_return": mean_expected_return,
+            "estimated_round_trip_fee_rate": round_trip_fee_rate,
             "market_regime": current_regime,
             "market_regime_match": regime_match,
             "target_probability": target_probability,
@@ -201,7 +239,8 @@ def build_forecast_calibration_summary(
             "calibrated_opposite_probability": calibrated_opposite_probability,
             "calibrated_range_probability": calibrated_range_probability,
             "current_target_expected_return": current_target_return,
-            "calibrated_expected_return_after_fee": historical_after_fee,
+            "current_expected_return_after_fee": current_expected_return_after_fee,
+            "calibrated_expected_return_after_fee": current_expected_return_after_fee,
             "rank_signal": analyst_rank_signal,
             "calibration_status": "matured",
         }
@@ -269,6 +308,7 @@ def build_forecast_calibration_summary(
         "direction_accuracy": round(accuracy, 6),
         "mean_brier_score": round(brier, 6),
         "expected_return_after_fee": round(expected_after_fee, 8),
+        "current_expected_return_after_fee": round(expected_after_fee, 8),
         "market_regime_match": round(regime_match, 6),
         "rank_signal": round(max(-1.0, min(1.0, rank_signal)), 6),
         "source_rows": source_rows,

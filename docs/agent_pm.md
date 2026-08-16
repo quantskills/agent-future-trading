@@ -576,7 +576,7 @@ PM 按以下顺序判断方向：
 1. 读取 SCC 的 `dominant_side`，确认其属于 `long`、`short`、`flat`、`mixed`。
 2. 使用 `side_consensus`、`evidence_alignment_state` 和 `multi_evidence_consensus_score` 核对主方向的一致性。
 3. 使用 `supporting_analysts`、`opposing_analysts`、`cross_analyst_conflicts` 和 `dominant_opposing_evidence` 保留主方向的支持与反对事实。
-4. 当 `dominant_side` 为唯一、无真实冲突的 `long` 或 `short` 时，只把该方向写成 `side_priority=1/ticker_side_priority=1` 并同步为 `preferred_side`；反方向优先级为 null。
+4. 当 `dominant_side` 为唯一、无真实冲突的 `long` 或 `short` 时，以它作为默认 `preferred_side`。若SCC已同时形成多空两个合法结构化候选，且两侧预测校准都已成熟，则只在这两个既有合法侧之间比较当日手续费后净预期收益，净值更高的一侧写成 `side_priority=1/ticker_side_priority=1`；单侧候选或冷启动仍保持原SCC方向。
 5. `dominant_side` 为 `flat`、`mixed`、`side_consensus/evidence_alignment_state=conflicted`、方向证据缺失或两侧无法区分时，方向选择结果保持 `flat`，两侧优先级均为 null。
 
 冲突、缺失和待确认项不会被删除。它们继续保留在候选状态中，供第 3 步判断交易状态和候选质量。
@@ -898,7 +898,7 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 
 Step4 还必须在 Step5 之前确定新增风险候选的最终资金层。冷启动或未验证机会保持 `exploration_probe`；正式 canonical open/add 正向学习达到2个精确完整周期，并与当日完整证据、technical 触发和失效边界同时成立时才可升为 `real_budget_entry`，中期基本面明确反向时仍只能保留 probe；达到5个精确完整周期的成熟重复正收益、强确认、失效边界和合格同向基本面支持同时成立时才可升为 `alpha_scale_entry`。单样本无论置信度数值均只保留 candidate/probe；2至4样本不得直接进入 scale。Step4 给探索层固定 `0.008` 下限并保留 `0.015` 上限，最终探索比例由 Step5 唯一 `rank_score` 在该区间内确定；real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130` 仍由最终 `candidate_quality` 连续映射。Step5 完成后只允许可用保证金、单品种保证金硬线、总保证金硬线、净敞口、市场最小手数和手数取整收缩，不得再用日盈亏或名义仓位软比例二次改写。`risk_control.max_single_position_ratio`保留为Step4前的名义风险锚，不是第二资金所有者。Step4 不读取或等待尚未生成的 `opportunity_rank`。
 
-现有持仓通过真实 transaction 的 `recommendation_id` 追溯原开仓 FAC，并按已结算交易日计算持有天数。持仓期间正式学习检索以及 hold/reduce/exit FAC 的 `setup_type/horizon_class/expected_horizon_days/market_regime` 始终继承原开仓 FAC；当天 SCC 继续提供最新行情、确认分、结构失效和退出证据。没有新的入场 trigger 只表示不增加风险，不等于持仓失效；PM只读取原 FAC 的 `position_invalidation_level`、原始ATR14、期限和持仓依据，绝不复用入场`invalidation_level`。结构位、初始 ATR 及移动保护任一触发均形成唯一exit；`position_pnl_ratio`有原开仓上下文时优先等于完整周期手续费后`cycle_return_on_notional`，普通持仓达到-2%且当日同向证据再验证失败则减仓50%，达到-4%则退出，同向证据通过则继续持仓。原开仓 FAC 完整周期收益峰值为正、当前手续费后 `cycle_return_on_notional<=0` 且当日同向证据再验证失败时，所有仓位类型均保持既有减仓复核路径。明确技术反转形成exit，基本面中期反向按既有规则形成reduce，期限到达只用当日技术与基本面强制复评，不自动退出。
+现有持仓通过真实 transaction 的 `recommendation_id` 追溯原开仓 FAC，并按已结算交易日计算持有天数。持仓期间正式学习检索以及 hold/reduce/exit FAC 的 `setup_type/horizon_class/expected_horizon_days/market_regime` 始终继承原开仓 FAC；当天 SCC 继续提供最新行情、确认分、结构失效和退出证据。没有新的入场 trigger 只表示不增加风险，不等于持仓失效；PM只读取原 FAC 的 `position_invalidation_level`、原始ATR14、期限和持仓依据，绝不复用入场`invalidation_level`。结构位、初始 ATR 及移动保护任一触发均形成唯一exit；`position_pnl_ratio`有原开仓上下文时优先等于完整周期手续费后`cycle_return_on_notional`，普通持仓达到-2%且当日同向证据再验证失败则减仓50%，达到-4%则退出，同向证据通过则继续持仓。原开仓 FAC 完整周期收益峰值为正、当前手续费后 `cycle_return_on_notional<=0` 且当日同向证据再验证失败时，所有仓位类型均保持既有减仓复核路径。明确技术反转形成exit，基本面中期反向按既有规则形成reduce；期限到达时读取与开仓Rank同口径、当前侧已成熟的 `current_expected_return_after_fee`，非负则不形成期限失效，转负才作为现有减仓/退出链的复评失效证据，不设置机械时间止损。
 
 当最终生命周期结论为 hold、目标比例与当前比例相同且没有硬风险或真实 reduce/exit 覆盖时，PM直接保留 `current_lots`。不得把旧价格下的持仓比例按新价格重新换算并向零取整，从而制造没有策略依据的减仓。
 
@@ -1093,7 +1093,7 @@ rank_score =
 
 `product_setup_trigger_history`、当前 trigger 质量、市场冲突、关键数据缺口、基本面缺口和失效风险继续按 catalog 中对应权重计入。所有积分必须保留组成项，不能只保存一个无法解释的总分。
 
-`rank_score_policy.rank_score` 下八个参数组与 `rank_score_components` 固定同名；`calibrated_forecast_value` 按候选 `expected_horizon_days` 映射到 1/3/5/10 日网格，读取三名分析师该期限的上涨、下跌、震荡概率及预期收益，再用已到期历史的方向准确率、Brier、市场状态和预测方向手续费后收益校准。中性分析师按概率分布参与，不新增一致性门槛；没有成熟历史时对应分析师为冷启动且不产生 rank 增量。每个组内的权重键与 Python 消费的输入字段同名。调参时禁止新增 `_weight`、`_bonus` 别名或只改 YAML 不改消费端。
+`rank_score_policy.rank_score` 下既有八个参数组与 `rank_score_components` 固定同名，层级基分和积分权重保持不变；本轮只修正输入证据，不重新设计积分制。`calibrated_forecast_value` 按候选 `expected_horizon_days` 映射到 1/3/5/10 日网格，读取三名分析师该期限的上涨、下跌、震荡概率及当日预期收益，再用已到期历史的方向准确率、Brier、市场状态、收益预测偏差和往返手续费形成当日手续费后净预期收益。`product_setup_trigger_history`继续读取精确setup的历史经济表现；结构完整度只证明可执行性，不覆盖负预测经济值。中性分析师按概率分布参与，不新增一致性门槛；没有成熟历史时对应分析师为冷启动且不产生 rank 增量。每个组内的权重键与 Python 消费的输入字段同名。调参时禁止新增 `_weight`、`_bonus` 别名或只改 YAML 不改消费端。
 
 `execution_profile_learning_weight` 不属于排名配置，catalog 不得保留该入口。按第 4 步已经确定的学习边界，execution/profile 学习只能进入执行画像，不得直接或通过 `opportunity_score` 间接增加或扣减 `rank_score`，不能借 trigger 质量名义重新进入决策层。
 

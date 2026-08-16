@@ -151,6 +151,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             "trigger_profile_learning_direct_to_rank": False,
         }
         return self._complete_contract(
+            setup_type="trend_breakout_setup",
             final_action="open_probe",
             current_lots=0,
             target_lots=1,

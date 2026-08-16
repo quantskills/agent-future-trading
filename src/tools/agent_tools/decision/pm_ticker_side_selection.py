@@ -118,6 +118,78 @@ def _resolved_scc_direction(contract: Mapping[str, Any] | None) -> str:
     return dominant_side
 
 
+def _legal_scc_candidate_sides(
+    contract: Mapping[str, Any] | None,
+    scorecard: Mapping[str, Any],
+) -> list[str]:
+    """Return only sides already represented by legal structured SCC evidence."""
+
+    scc = contract if isinstance(contract, Mapping) else {}
+    side_consensus = str(scc.get("side_consensus") or "").strip().lower()
+    fusion = (
+        scc.get("evidence_fusion")
+        if isinstance(scc.get("evidence_fusion"), Mapping)
+        else {}
+    )
+    alignment = str(fusion.get("evidence_alignment_state") or "").strip().lower()
+    if side_consensus == "conflicted" or alignment == "conflicted":
+        return []
+    legal: set[str] = set()
+    dominant_side = str(scc.get("dominant_side") or "flat").strip().lower()
+    if dominant_side in {"long", "short"} and _candidate_eligible(
+        _side_row(scorecard, dominant_side)
+    ):
+        legal.add(dominant_side)
+    for item in scc.get("evidence_items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        side = str(item.get("side") or "flat").strip().lower()
+        if side in {"long", "short"} and _candidate_eligible(
+            _side_row(scorecard, side)
+        ):
+            legal.add(side)
+    return sorted(legal)
+
+
+def _economic_preferred_side(
+    contract: Mapping[str, Any] | None,
+    scorecard: Mapping[str, Any],
+) -> str:
+    legal = _legal_scc_candidate_sides(contract, scorecard)
+    if len(legal) == 1:
+        return legal[0]
+    if len(legal) > 1:
+        matured_economic_sides = [
+            side
+            for side in legal
+            if str(
+                (
+                    _side_row(scorecard, side).get("forecast_calibration_summary")
+                    or {}
+                ).get("status")
+                or ""
+            ).lower()
+            == "matured"
+        ]
+        if len(matured_economic_sides) != len(legal):
+            return _resolved_scc_direction(contract)
+        ranked = sorted(
+            legal,
+            key=lambda side: (
+                -_safe_float(
+                    (_side_row(scorecard, side).get("forecast_calibration_summary") or {}).get(
+                        "current_expected_return_after_fee"
+                    ),
+                    0.0,
+                ),
+                -_candidate_quality(_side_row(scorecard, side)),
+                side,
+            ),
+        )
+        return ranked[0]
+    return _resolved_scc_direction(contract)
+
+
 def select_ticker_side(
     *,
     ticker: str,
@@ -178,7 +250,10 @@ def select_ticker_side(
             row["side"],
         )
     )
-    preferred_side = _resolved_scc_direction(signal_collection_contract)
+    preferred_side = _economic_preferred_side(
+        signal_collection_contract,
+        scorecard,
+    )
     priority_by_side: dict[str, int | None] = {
         "long": 1 if preferred_side == "long" else None,
         "short": 1 if preferred_side == "short" else None,

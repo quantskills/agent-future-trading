@@ -39,7 +39,7 @@ from tools.agent_tools.research.reviewer_phase4_review import (
     _group_transactions_by_recommendation,
 )
 from tools.common.order_semantics import recommendation_intent_from_lots
-from tools.common.learning_identity import canonical_market_regime
+from tools.common.learning_identity import canonical_market_regime, canonical_setup_type
 from util.futures_audit import categorize_no_trade_reason
 from util.logger import logger
 
@@ -322,7 +322,7 @@ def _episode_matches_hypothesis_scope(
     hypothesis_ticker = str(hypothesis.get("ticker") or "*").strip().upper()
     identity_keys = (
         ("ticker",) if hypothesis_ticker not in {"", "*"} else ("sector",)
-    ) + ("side", "setup_type", "market_regime")
+    ) + ("side", "setup_type", "horizon_class", "market_regime")
     for key in identity_keys:
         if key == "ticker":
             expected = hypothesis_ticker
@@ -330,6 +330,9 @@ def _episode_matches_hypothesis_scope(
         elif key == "market_regime":
             expected = canonical_market_regime(hypothesis.get(key), "*")
             actual = canonical_market_regime(episode.get(key), "unknown")
+        elif key == "setup_type":
+            expected = canonical_setup_type(hypothesis.get(key), "*")
+            actual = canonical_setup_type(episode.get(key), "unknown")
         else:
             expected = str(hypothesis.get(key) or "*").strip().lower()
             actual = str(episode.get(key) or "").strip().lower()
@@ -880,6 +883,7 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
             market_regime=regime,
             setup_type=setup_type,
             data_combo=data_combo,
+            source_type=source_type,
         )
         action_taken = "open_long" if side == "long" else "open_short"
         sample = {
@@ -1139,6 +1143,7 @@ def write_alpha_setup_profiles(
             market_regime=regime,
             setup_type=setup_type,
             data_combo=data_combo,
+            source_type=source_type,
         )
         sample = {
             "ticker": ticker,
@@ -1229,6 +1234,7 @@ def write_alpha_setup_profiles(
                 market_regime=regime,
                 setup_type=setup_type,
                 data_combo=execution_data_combo,
+                source_type="execution",
             )
             execution_sample = {
                 **sample,
@@ -1521,6 +1527,7 @@ def _episode_alpha_setup_samples(
             market_regime=row.get("market_regime") or "unknown",
             setup_type=setup_type,
             data_combo=data_combo,
+            source_type="trade_episode",
         )
         net_pnl = float(row.get("net_pnl") or 0.0)
         close_date = str(row.get("close_date") or row.get("episode_date") or trading_date)[:10]
@@ -2420,10 +2427,11 @@ def write_exploratory_hypotheses(
         sector = str(payload.get("sector") or "*")
         side = str(payload.get("side") or "*").lower()
         horizon = str(payload.get("horizon_class") or "*")
-        regime = str(payload.get("market_regime") or "*")
-        setup_type = str(payload.get("setup_type") or "*").strip().lower()
+        regime = canonical_market_regime(payload.get("market_regime"), "*")
+        setup_type = canonical_setup_type(payload.get("setup_type"), "*")
+        scope_anchor = ticker if ticker not in {"", "*"} else sector
         hypothesis_scope_key = (
-            f"{ticker}:{sector}:{side}:{horizon}:{regime}:{setup_type}"
+            f"{scope_anchor}:{side}:{setup_type}:{horizon}:{regime}"
         )
         support_episode_ids = list(payload.get("support_episode_ids") or [])
         support_episodes = [
@@ -2436,17 +2444,17 @@ def write_exploratory_hypotheses(
         support_sample_count = len(support_episodes)
         cursor.execute(
             """
-            SELECT id
+            SELECT *
             FROM exploratory_hypothesis
             WHERE config_id = ?
               AND lower(scope_key) = lower(?)
-              AND lower(hypothesis_text) = lower(?)
+              AND status IN ('candidate', 'monitoring', 'validated')
+            ORDER BY trading_date, created_at, id
             LIMIT 1
             """,
-            (config_id, hypothesis_scope_key, text),
+            (config_id, hypothesis_scope_key),
         )
-        if cursor.fetchone() is not None:
-            continue
+        existing_hypothesis = cursor.fetchone()
         suggested_use = str(
             payload.get("suggested_use")
             or "structured research hypothesis only; validate with future samples"
@@ -2522,6 +2530,71 @@ def write_exploratory_hypotheses(
             },
             CONTRACT_KEY: hypothesis_contract,
         }
+        if existing_hypothesis is not None:
+            existing = dict(existing_hypothesis)
+            existing_payload = load_externalized_json(
+                existing.get("payload_json"),
+                existing.get("payload_artifact_path"),
+                existing.get("payload_sha256"),
+            )
+            existing_payload = (
+                dict(existing_payload)
+                if isinstance(existing_payload, Mapping)
+                else {}
+            )
+            merged_episode_ids = list(
+                dict.fromkeys(
+                    [
+                        str(item or "").strip()
+                        for item in (
+                            list(existing_payload.get("support_episode_ids") or [])
+                            + support_episode_ids
+                        )
+                        if str(item or "").strip()
+                    ]
+                )
+            )
+            merged_payload = {
+                **existing_payload,
+                "support_episode_ids": merged_episode_ids,
+                "support_episode_count": len(merged_episode_ids),
+                "latest_support_note_id": note_id,
+                "latest_support_event_id": event_id,
+                "latest_support_hypothesis_text": text,
+                "validation_mode": "research_only_same_scope_future_complete_episode",
+            }
+            merged_contract = merged_payload.get(CONTRACT_KEY)
+            if isinstance(merged_contract, Mapping):
+                merged_contract = dict(merged_contract)
+                merged_contract["sample_count"] = len(merged_episode_ids)
+                merged_payload[CONTRACT_KEY] = merged_contract
+            merged_ext = externalize_json_for_db(
+                merged_payload,
+                category="exploratory_hypothesis",
+                record_id=str(existing.get("id") or "unknown"),
+                field_name="payload",
+                config_id=config_id,
+                trading_date=str(existing.get("trading_date") or trading_date),
+            )
+            research_memory_writers.merge_exploratory_hypothesis_support(
+                cursor,
+                hypothesis_id=str(existing.get("id") or ""),
+                config_id=config_id,
+                confidence_score=max(
+                    _review_helpers._safe_float(existing.get("confidence_score"), 0.0),
+                    confidence,
+                ),
+                sample_count=len(merged_episode_ids),
+                evidence_summary=str(existing.get("evidence_summary") or payload.get("evidence_summary") or ""),
+                valid_until=max(str(existing.get("valid_until") or ""), valid_until),
+                payload_json=merged_ext.inline_value,
+                payload_artifact_path=merged_ext.artifact_path,
+                payload_sha256=merged_ext.sha256,
+                payload_size=merged_ext.size_bytes,
+                payload_summary_json=merged_ext.summary_json,
+            )
+            rows += 1
+            continue
         hypothesis_id = str(uuid.uuid4())
         hypothesis_ext = externalize_json_for_db(
             hypothesis_payload,

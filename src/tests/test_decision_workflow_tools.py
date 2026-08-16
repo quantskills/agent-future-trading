@@ -161,6 +161,89 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertGreaterEqual(source["calibrated_target_probability"], 0.0)
         self.assertLessEqual(source["calibrated_target_probability"], 1.0)
 
+    def test_current_forecast_return_enters_after_fee_rank_economics(self):
+        signal = _signal("technical", Signal.BULLISH, 0.72, expected_horizon_days=3)
+        forecasts = signal.metadata["action_evidence_contract"]["forward_forecasts"]
+        next(item for item in forecasts if item["horizon_days"] == 3)["expected_return"] = 0.018
+        summary = build_forecast_calibration_summary(
+            analyst_signals=[signal],
+            analyst_performance=[
+                {
+                    "analyst": "technical",
+                    "ticker": "BU",
+                    "horizon_class": "3d",
+                    "signal_side": "long",
+                    "sample_count": 8,
+                    "confidence_score": 0.8,
+                    "payload": {
+                        "forecast_calibration_summary": {
+                            "scope_level": "ticker",
+                            "horizon_days": 3,
+                            "direction_hit_rate": 0.75,
+                            "mean_brier_score": 0.16,
+                            "mean_expected_return": 0.010,
+                            "mean_realized_return": 0.008,
+                            "mean_predicted_side_expected_return": 0.010,
+                            "mean_predicted_side_realized_return": 0.008,
+                            "mean_predicted_side_return_after_fee": 0.007,
+                            "mean_round_trip_fee_rate": 0.001,
+                        }
+                    },
+                }
+            ],
+            target_side="long",
+            expected_horizon_days=3,
+        )
+
+        self.assertAlmostEqual(summary["current_expected_return_after_fee"], 0.015)
+        self.assertAlmostEqual(summary["expected_return_after_fee"], 0.015)
+        self.assertGreater(summary["rank_signal"], 0.0)
+
+    def test_forecast_return_bias_is_converted_from_underlying_to_target_side(self):
+        signal = _signal("technical", Signal.BULLISH, 0.72, expected_horizon_days=3)
+        forecasts = signal.metadata["action_evidence_contract"]["forward_forecasts"]
+        next(item for item in forecasts if item["horizon_days"] == 3)["expected_return"] = 0.020
+        performance = [
+            {
+                "analyst": "technical",
+                "ticker": "BU",
+                "horizon_class": "3d",
+                "signal_side": "long",
+                "sample_count": 8,
+                "confidence_score": 0.8,
+                "payload": {
+                    "forecast_calibration_summary": {
+                        "scope_level": "ticker",
+                        "horizon_days": 3,
+                        "direction_hit_rate": 0.75,
+                        "mean_brier_score": 0.16,
+                        "mean_expected_return": 0.010,
+                        "mean_realized_return": 0.006,
+                        "mean_predicted_side_expected_return": 0.010,
+                        "mean_predicted_side_realized_return": 0.006,
+                        "mean_predicted_side_return_after_fee": 0.005,
+                        "mean_round_trip_fee_rate": 0.001,
+                    }
+                },
+            }
+        ]
+
+        long_summary = build_forecast_calibration_summary(
+            analyst_signals=[signal],
+            analyst_performance=performance,
+            target_side="long",
+            expected_horizon_days=3,
+        )
+        short_summary = build_forecast_calibration_summary(
+            analyst_signals=[signal],
+            analyst_performance=performance,
+            target_side="short",
+            expected_horizon_days=3,
+        )
+
+        self.assertAlmostEqual(long_summary["current_expected_return_after_fee"], 0.015)
+        self.assertAlmostEqual(short_summary["current_expected_return_after_fee"], -0.017)
+
     def test_matured_forecast_calibration_changes_rank_without_blocking_candidate(self):
         signal = _signal("technical", Signal.BULLISH, 0.72)
         performance = [
@@ -1477,6 +1560,90 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             scorecard["short"]["candidate_quality"],
         )
         self.assertEqual(result["capital_allocation_reason"]["preferred_candidate_layer_hint"], "tradeable_candidate")
+
+    def test_ticker_side_selection_compares_economics_only_across_legal_scc_sides(self):
+        scorecard = {
+            "long": {
+                "side": "long", "candidate_quality": 0.70,
+                "final_state": "probe_candidate",
+                "forecast_calibration_summary": {
+                    "status": "matured",
+                    "current_expected_return_after_fee": -0.004,
+                },
+            },
+            "short": {
+                "side": "short", "candidate_quality": 0.65,
+                "final_state": "probe_candidate",
+                "forecast_calibration_summary": {
+                    "status": "matured",
+                    "current_expected_return_after_fee": 0.009,
+                },
+            },
+        }
+        result = select_ticker_side(
+            ticker="BU",
+            analyst_signals=[],
+            signal_collection_contract={
+                "dominant_side": "long",
+                "side_consensus": "mixed",
+                "evidence_items": [{"side": "long"}, {"side": "short"}],
+            },
+            market_confirmation={}, data_quality_summary={},
+            decision_date="2025-03-05", config={}, prebuilt_scorecard=scorecard,
+        )
+        self.assertEqual(result["opportunity_scorecard"]["preferred_side"], "short")
+        self.assertEqual(result["ticker_side_priority"]["short"], 1)
+
+        single = select_ticker_side(
+            ticker="BU",
+            analyst_signals=[],
+            signal_collection_contract={
+                "dominant_side": "long",
+                "side_consensus": "single_side",
+                "evidence_items": [{"side": "long"}],
+            },
+            market_confirmation={}, data_quality_summary={},
+            decision_date="2025-03-05", config={}, prebuilt_scorecard=scorecard,
+        )
+        self.assertEqual(single["opportunity_scorecard"]["preferred_side"], "long")
+
+        cold_scorecard = copy.deepcopy(scorecard)
+        cold_scorecard["long"]["forecast_calibration_summary"]["status"] = "cold_start"
+        cold_scorecard["short"]["forecast_calibration_summary"]["status"] = "cold_start"
+        cold = select_ticker_side(
+            ticker="BU",
+            analyst_signals=[],
+            signal_collection_contract={
+                "dominant_side": "long",
+                "side_consensus": "mixed",
+                "evidence_items": [{"side": "long"}, {"side": "short"}],
+            },
+            market_confirmation={}, data_quality_summary={},
+            decision_date="2025-03-05", config={}, prebuilt_scorecard=cold_scorecard,
+        )
+        self.assertEqual(cold["opportunity_scorecard"]["preferred_side"], "long")
+
+        partially_matured_scorecard = copy.deepcopy(scorecard)
+        partially_matured_scorecard["short"]["forecast_calibration_summary"] = {
+            "status": "cold_start",
+            "current_expected_return_after_fee": 0.0,
+        }
+        partially_matured = select_ticker_side(
+            ticker="BU",
+            analyst_signals=[],
+            signal_collection_contract={
+                "dominant_side": "long",
+                "side_consensus": "mixed",
+                "evidence_items": [{"side": "long"}, {"side": "short"}],
+            },
+            market_confirmation={}, data_quality_summary={},
+            decision_date="2025-03-05", config={},
+            prebuilt_scorecard=partially_matured_scorecard,
+        )
+        self.assertEqual(
+            partially_matured["opportunity_scorecard"]["preferred_side"],
+            "long",
+        )
 
     def test_all_watch_for_trigger_sides_rank_by_ticker_side_priority(self):
         result = select_ticker_side(

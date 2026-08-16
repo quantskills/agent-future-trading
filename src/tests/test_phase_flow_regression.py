@@ -4694,7 +4694,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             return []
 
         def get_alpha_setup_action_values(self, **kwargs):
-            if str(kwargs.get("setup_type") or "") != "breakdown_setup":
+            if str(kwargs.get("setup_type") or "") != "trend_breakout_setup":
                 return []
             return [
                 {
@@ -4703,7 +4703,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                     "side": "short",
                     "horizon_class": kwargs.get("horizon_class") or "short",
                     "market_regime": kwargs.get("market_regime") or "trend",
-                    "setup_type": "breakdown_setup",
+                    "setup_type": "trend_breakout_setup",
                     "action_name": "open",
                     "canonical_action_value": True,
                     "canonical_action_family": "open_add_new_risk",
@@ -4785,7 +4785,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 side="short" if directional else "flat",
                 confidence=0.72 if directional else 0.35,
                 opportunity_state="watch_for_trigger" if directional else "no_opportunity",
-                setup_type="breakdown_setup" if directional else "no_trade",
+                setup_type="trend_breakout_setup" if directional else "no_trade",
                 setup_quality_ok=directional,
                 trigger_valid=False,
                 current_trigger_confirmed=False,
@@ -4807,7 +4807,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                     signal=Signal.BEARISH if directional else Signal.NEUTRAL,
                     confidence=0.72 if directional else 0.35,
                     opportunity_state="watch_for_trigger" if directional else "no_opportunity",
-                    setup_type="breakdown_setup" if directional else "no_trade",
+                    setup_type="trend_breakout_setup" if directional else "no_trade",
                     entry_trigger=aec["entry_trigger"],
                     trigger_valid=False,
                     invalidation_present=directional,
@@ -4894,7 +4894,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 side="short" if directional else "flat",
                 confidence=0.72 if directional else 0.35,
                 opportunity_state="watch_for_trigger" if directional else "no_opportunity",
-                setup_type="breakdown_setup" if directional else "no_trade",
+                setup_type="trend_breakout_setup" if directional else "no_trade",
                 setup_quality_ok=directional,
                 trigger_valid=False,
                 current_trigger_confirmed=False,
@@ -4922,7 +4922,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                     opportunity_state=(
                         "watch_for_trigger" if directional else "no_opportunity"
                     ),
-                    setup_type="breakdown_setup" if directional else "no_trade",
+                    setup_type="trend_breakout_setup" if directional else "no_trade",
                     entry_trigger=aec["entry_trigger"],
                     trigger_valid=False,
                     invalidation_present=directional,
@@ -9065,7 +9065,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(technical.entry_timing_signal, "breakout")
         self.assertNotIn("generic_trade_setup", json.dumps(technical.metadata, ensure_ascii=False))
         learning_scope = technical.metadata["action_evidence_contract"]["learning_scope"]
-        self.assertEqual(learning_scope["setup_family"], "trend_breakout")
+        self.assertEqual(learning_scope["setup_family"], "trend_breakout_setup")
         self.assertEqual(learning_scope["market_regime"], "trend")
 
         open_action_value = {
@@ -14924,6 +14924,90 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         detail = diagnostics["holding_rebalance_control"]
         self.assertFalse(detail["explicit_lifecycle_break"])
         self.assertEqual(detail["decision"], "exit_failed_loss_revalidation")
+
+    def test_horizon_revalidation_uses_current_net_economics_without_time_stop(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=0.0,
+        )
+        common = {
+            "ticker": "ZZ",
+            "trading_date": "2025-03-10",
+            "current_ratio": 0.10,
+            "current_position": position,
+            "analyst_signals": [
+                AnalystSignal(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    confidence=0.65,
+                ),
+                AnalystSignal(
+                    agent_name="fundamental",
+                    signal=Signal.BULLISH,
+                    confidence=0.60,
+                ),
+                AnalystSignal(
+                    agent_name="commodity_news",
+                    signal=Signal.NEUTRAL,
+                    confidence=0.35,
+                ),
+            ],
+            "long_scores": {"score": 0.55, "confidence": 0.60},
+            "short_scores": {"score": 0.05, "confidence": 0.20},
+            "market_confirmation": {"confirmation_score": 0.60},
+            "full_config": {},
+            "risk_level": RiskLevel.SAFE,
+            "opening_fac_context": {
+                "held_trading_days": 5,
+                "expected_horizon_days": 5,
+            },
+        }
+
+        negative_ratio, negative_reasons, _notes, negative_diagnostics = (
+            _apply_holding_rebalance_control(
+                position_ratio=0.05,
+                fusion_context={
+                    "opportunity_scorecard": {
+                        "long": {
+                            "forecast_calibration_summary": {
+                                "status": "matured",
+                                "current_expected_return_after_fee": -0.003,
+                            }
+                        }
+                    }
+                },
+                **common,
+            )
+        )
+        self.assertEqual(negative_ratio, 0.05)
+        negative_detail = negative_diagnostics["holding_rebalance_control"]
+        self.assertTrue(negative_detail["horizon_economic_revalidation_failed"])
+        self.assertTrue(negative_detail["explicit_lifecycle_break"])
+        self.assertNotIn("position_lifecycle_probe_expired", negative_reasons)
+
+        positive_ratio, positive_reasons, _notes, positive_diagnostics = (
+            _apply_holding_rebalance_control(
+                position_ratio=0.05,
+                fusion_context={
+                    "opportunity_scorecard": {
+                        "long": {
+                            "forecast_calibration_summary": {
+                                "status": "matured",
+                                "current_expected_return_after_fee": 0.003,
+                            }
+                        }
+                    }
+                },
+                **common,
+            )
+        )
+        self.assertEqual(positive_ratio, 0.10)
+        positive_detail = positive_diagnostics["holding_rebalance_control"]
+        self.assertFalse(positive_detail["horizon_economic_revalidation_failed"])
+        self.assertFalse(positive_detail["explicit_lifecycle_break"])
+        self.assertIn("holding_lifecycle_not_invalidated", positive_reasons)
 
     def test_new_losing_position_reduces_without_same_day_reconfirmation(self):
         position = SimpleNamespace(

@@ -72,7 +72,12 @@ def build_test_aec(
         "confidence": confidence,
         "opportunity_type": opportunity_type or ("trend_continuation" if directional else "no_trade"),
         "opportunity_state": state,
-        "setup_type": setup_type or ("trend_continuation" if directional else "no_trade"),
+        "setup_type": setup_type or (
+            "trend_breakout_setup"
+            if analyst == "technical"
+            and state in {"watch_for_trigger", "probe_candidate", "tradeable_candidate"}
+            else "no_trade"
+        ),
         "setup_quality_ok": directional if setup_quality_ok is None else setup_quality_ok,
         "trigger_valid": trigger_valid,
         "current_trigger_confirmed": current_trigger_confirmed,

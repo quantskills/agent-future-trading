@@ -24,6 +24,7 @@ from tools.common.execution_trigger_semantics import (
     entry_invalidation_contract_error,
     execution_trigger_contract_error,
 )
+from tools.common.learning_identity import is_formal_executable_setup_type
 
 
 FINAL_ACTION_CONTRACT_REQUIRED_FIELDS = (
@@ -366,6 +367,8 @@ def _execution_contract_errors(contract: Mapping[str, Any]) -> List[str]:
     final_action = str(contract.get("final_action") or "").strip().lower()
     if final_action not in {"open_probe", "open_real", "scale"}:
         return errors
+    if not is_formal_executable_setup_type(contract.get("setup_type")):
+        errors.append("new_risk_setup_type_not_formal")
     if not str(contract.get("entry_trigger") or "").strip():
         errors.append("new_risk_execution_missing_entry_trigger")
     elif execution_trigger_contract_error(

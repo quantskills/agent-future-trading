@@ -29,6 +29,10 @@ from tools.common.signal_evidence_collection import (
     has_concrete_entry_trigger,
     validate_action_evidence_contract,
 )
+from tools.common.learning_identity import (
+    canonical_setup_type,
+    is_formal_technical_setup_type,
+)
 from tools.agent_tools.analysis.analyst_market_confirmation import score_pandaai_extra_records
 from tools.agent_tools.analysis.analyst_output_landing import apply_analyst_output_landing_check
 from util.logger import logger
@@ -711,6 +715,25 @@ def _technical_setup_scope(quality_context: Dict[str, Any], opportunity_type: st
     }
 
 
+def _canonical_final_setup_type(
+    signal: AnalystSignal,
+    quality_context: Dict[str, Any],
+    analyst: str,
+) -> str:
+    """Finalize setup identity independently from opportunity and execution profile."""
+
+    declared = canonical_setup_type(getattr(signal, "setup_type", ""), "")
+    context_setup = canonical_setup_type(quality_context.get("setup_type"), "")
+    technical_scope = _technical_setup_scope(quality_context)
+    scope_setup = canonical_setup_type(technical_scope.get("setup_family"), "")
+    if analyst == "technical":
+        for candidate in (context_setup, scope_setup, declared):
+            if is_formal_technical_setup_type(candidate):
+                return canonical_setup_type(candidate)
+        return "unknown"
+    return declared or context_setup or scope_setup or "unknown"
+
+
 def _sync_signal_fields_to_action_evidence_contract(
     contract: Dict[str, Any],
     signal: AnalystSignal,
@@ -758,8 +781,9 @@ def _build_action_evidence_contract(
             "side": side,
             "opportunity_type": opportunity_type,
             "opportunity_state": str(opportunity_state or "watch_for_trigger"),
-            "setup_type": str(
-                getattr(signal, "setup_type", "") or opportunity_type or "unknown"
+            "setup_type": canonical_setup_type(
+                getattr(signal, "setup_type", ""),
+                "unknown",
             ),
             "setup_quality_ok": bool(quality_context.get("setup_quality_ok")),
             "trigger_valid": bool(getattr(signal, "trigger_valid", False)),
@@ -776,7 +800,10 @@ def _build_action_evidence_contract(
         setup = _technical_setup_scope(quality_context, opportunity_type)
         learning_scope.update(
             {
-                "setup_family": setup.get("setup_family") or opportunity_type,
+                "setup_family": canonical_setup_type(
+                    getattr(signal, "setup_type", ""),
+                    "unknown",
+                ),
                 "sector_setup_alignment": setup.get("sector_setup_alignment"),
                 "market_regime": quality_context.get("market_regime"),
             }
@@ -1454,6 +1481,12 @@ def apply_trade_research_contract(
     opportunity_type = getattr(signal, "opportunity_type", "unknown")
     if not opportunity_type or opportunity_type == "unknown":
         opportunity_type = infer_opportunity_type(signal, quality_context, analyst)
+    final_setup_type = _canonical_final_setup_type(
+        signal,
+        quality_context,
+        analyst,
+    )
+    signal.setup_type = final_setup_type
 
     setup_quality = _setup_quality_assessment(
         signal,
@@ -1688,7 +1721,7 @@ def apply_trade_research_contract(
         action_evidence_contract.get("setup_quality_ok")
         or signal.setup_quality_score >= 0.42
     )
-    action_evidence_contract["setup_type"] = str(opportunity_type or action_evidence_contract.get("setup_type") or "unknown")
+    action_evidence_contract["setup_type"] = final_setup_type
     fusion_evidence = build_analyst_fusion_evidence(
         signal,
         {**dict(quality_context or {}), "action_evidence_contract": action_evidence_contract},
@@ -1732,12 +1765,7 @@ def apply_trade_research_contract(
     research_contract = build_trade_research_contract(
         opportunity_type=opportunity_type,
         opportunity_state=opportunity_state,
-        setup_type=str(
-            getattr(signal, "setup_type", "")
-            or action_evidence_contract.get("setup_type")
-            or opportunity_type
-            or "unknown"
-        ),
+        setup_type=final_setup_type,
         setup_quality_ok=bool(action_evidence_contract.get("setup_quality_ok") or setup_quality.get("score", 0.0) >= 0.42),
         trigger_valid=bool(action_evidence_contract.get("trigger_valid")),
         invalidation_present=bool(has_invalidation),
@@ -1783,9 +1811,7 @@ def apply_trade_research_contract(
         signal,
         metadata,
     )
-    action_evidence_contract["setup_type"] = str(
-        getattr(signal, "setup_type", "") or opportunity_type or "unknown"
-    )
+    action_evidence_contract["setup_type"] = final_setup_type
     validation_errors = list(getattr(signal, "validation_errors", []) or [])
     for error in research_errors + message_errors:
         if error not in validation_errors:
