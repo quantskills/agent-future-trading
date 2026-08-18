@@ -440,9 +440,99 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
         summary = scorecard["long"]["forecast_calibration_summary"]
         self.assertEqual(len(summary["source_rows"]), 1)
-        self.assertEqual(summary["source_rows"][0]["scope_level"], "ticker")
+        self.assertEqual(summary["source_rows"][0]["scope_level"], "reliability_blend")
+        self.assertEqual(
+            [item["scope_level"] for item in summary["source_rows"][0]["source_scopes"]],
+            ["ticker", "sector", "global"],
+        )
         self.assertEqual(summary["market_regime_match"], 1.0)
         self.assertEqual(summary["direction_accuracy"], 0.8)
+
+    def test_forecast_calibration_blends_sparse_ticker_with_reliable_broader_scopes(self):
+        signal = _signal("technical", Signal.BULLISH, 0.72)
+
+        def row(scope, ticker, sector, sample_count, brier, after_fee):
+            return {
+                "analyst": "technical",
+                "ticker": ticker,
+                "sector": sector,
+                "horizon_class": "3d",
+                "signal_side": "long",
+                "sample_count": sample_count,
+                "confidence_score": 0.8,
+                "payload": {"forecast_calibration_summary": {
+                    "scope_level": scope,
+                    "horizon_days": 3,
+                    "direction_hit_rate": 0.75 if after_fee > 0 else 0.25,
+                    "mean_brier_score": brier,
+                    "mean_expected_return": 0.01,
+                    "mean_realized_return": 0.01,
+                    "mean_predicted_side_return_after_fee": after_fee,
+                    "mean_round_trip_fee_rate": 0.001,
+                    "market_regime_match": 1.0,
+                }},
+            }
+
+        summary = build_forecast_calibration_summary(
+            analyst_signals=[signal],
+            analyst_performance=[
+                row("ticker", "BU", "energy", 2, 0.60, -0.02),
+                row("sector", "*", "test", 60, 0.12, 0.01),
+                row("global", "*", "*", 120, 0.14, 0.008),
+            ],
+            target_side="long",
+            expected_horizon_days=3,
+        )
+
+        source = summary["source_rows"][0]
+        self.assertEqual(source["scope_level"], "reliability_blend")
+        weights = {
+            item["scope_level"]: item["normalized_weight"]
+            for item in source["source_scopes"]
+        }
+        self.assertGreater(weights["sector"], weights["ticker"])
+        self.assertGreater(weights["global"], weights["ticker"])
+        self.assertGreater(source["mean_predicted_side_return_after_fee"], 0.0)
+
+    def test_forecast_rank_expected_return_is_shrunk_by_calibration_reliability(self):
+        signal = _signal("technical", Signal.BULLISH, 0.72, expected_horizon_days=3)
+        forecasts = signal.metadata["action_evidence_contract"]["forward_forecasts"]
+        next(item for item in forecasts if item["horizon_days"] == 3)["expected_return"] = 0.02
+
+        def summary_with_skill(hit_rate, brier, after_fee):
+            return build_forecast_calibration_summary(
+                analyst_signals=[signal],
+                analyst_performance=[{
+                    "analyst": "technical",
+                    "ticker": "BU",
+                    "sector": "energy",
+                    "horizon_class": "3d",
+                    "signal_side": "long",
+                    "sample_count": 20,
+                    "confidence_score": 0.8,
+                    "payload": {"forecast_calibration_summary": {
+                        "scope_level": "ticker",
+                        "horizon_days": 3,
+                        "direction_hit_rate": hit_rate,
+                        "mean_brier_score": brier,
+                        "mean_expected_return": 0.01,
+                        "mean_realized_return": 0.01,
+                        "mean_predicted_side_return_after_fee": after_fee,
+                        "mean_round_trip_fee_rate": 0.001,
+                        "market_regime_match": 1.0,
+                    }},
+                }],
+                target_side="long",
+                expected_horizon_days=3,
+            )
+
+        reliable = summary_with_skill(0.80, 0.10, 0.015)
+        unreliable = summary_with_skill(0.20, 0.60, -0.015)
+        self.assertEqual(
+            reliable["current_expected_return_after_fee"],
+            unreliable["current_expected_return_after_fee"],
+        )
+        self.assertGreater(reliable["rank_signal"], unreliable["rank_signal"])
 
     def test_pm_memory_without_current_setup_starts_at_fallback_not_exact(self):
         class MemoryDB:

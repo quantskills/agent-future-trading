@@ -62,3 +62,7 @@
 （7）[板块探索假设作用域锚点修正] `research_learning.py`生成探索假设作用域键时使用具体ticker，否则使用sector，再拼接side/setup/horizon/regime。原因：修复`ticker=*`时不同板块假设被错误合并，保持同作用域合并与未来完整真实episode验证机制不变。
 
 （8）[Direction watchlist语义边界与新风险契约硬门] `analyst_quality.py`和`learning_identity.py`规定`direction_watchlist`只表示机会观察状态，不能写成技术`setup_type`；技术AEC在`signal_evidence_collection.py`进入watch/probe/tradeable前必须具备正式技术setup，`pm_contract_self_check.py`要求新增风险FAC使用正式可执行setup。原因：阻止观察标签污染setup学习身份或穿过新风险契约，同时不修改Rank积分、资金分配、Trader触发和退出链。
+
+==========2026年08月18日==========
+
+（1）[预测校准作用域可靠性融合] `pm_signal_fusion.py`不再让最具体的ticker预测绩效无条件覆盖sector/global绩效，改按各层样本量、Brier、置信权重和既有作用域权重融合校准结果；当日手续费后预期收益进入既有Rank前同时按融合后的历史可靠性收缩。原因：10—11月前向结果中Rank 1—2净亏而低Rank盈利，且代码允许少量ticker样本覆盖更可靠的上层样本、未对Rank主导的当日预期收益做可靠性约束；本项仅修正现有`calibrated_forecast_value`输入，未修改Rank积分结构、资金层、交易机会、Trader和退出链。

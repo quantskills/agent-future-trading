@@ -79,7 +79,7 @@ def build_forecast_calibration_summary(
     if target not in {"long", "short"} or not forecasts_by_analyst:
         return cold_summary
 
-    best_candidates: dict[str, dict[str, Any]] = {}
+    candidates_by_analyst: dict[str, list[dict[str, Any]]] = {}
     for raw in analyst_performance or []:
         if not isinstance(raw, Mapping):
             continue
@@ -210,7 +210,9 @@ def build_forecast_calibration_summary(
             -1.0,
             min(
                 1.0,
-                0.65 * max(-1.0, min(1.0, current_expected_return_after_fee / 0.02))
+                0.65
+                * calibration_reliability
+                * max(-1.0, min(1.0, current_expected_return_after_fee / 0.02))
                 + 0.35 * forecast_spread * calibration_strength,
             ),
         )
@@ -244,15 +246,11 @@ def build_forecast_calibration_summary(
             "rank_signal": analyst_rank_signal,
             "calibration_status": "matured",
         }
-        previous = best_candidates.get(analyst)
-        specificity = {"ticker": 3, "sector": 2, "global": 1}.get(scope_level, 0)
-        previous_specificity = {
-            "ticker": 3,
-            "sector": 2,
-            "global": 1,
-        }.get(str((previous or {}).get("scope_level") or ""), -1)
-        if previous is None or specificity > previous_specificity:
-            best_candidates[analyst] = candidate
+        candidates_by_analyst.setdefault(analyst, []).append(candidate)
+
+    best_candidates: dict[str, dict[str, Any]] = {}
+    for analyst, scope_candidates in candidates_by_analyst.items():
+        best_candidates[analyst] = _blend_forecast_calibration_scopes(scope_candidates)
 
     source_rows: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
@@ -327,6 +325,96 @@ def _forecast_horizon_days(expected_horizon_days: Any) -> int:
     if expected <= 5:
         return 5
     return 10
+
+
+def _blend_forecast_calibration_scopes(
+    candidates: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Reliability-blend ticker, sector, and global calibration evidence."""
+    rows = [dict(item) for item in candidates if isinstance(item, Mapping)]
+    if not rows:
+        return {}
+    if len(rows) == 1:
+        return rows[0]
+
+    scope_specificity = {"ticker": 3, "sector": 2, "global": 1}
+    weighted_rows: list[tuple[dict[str, Any], float]] = []
+    for item in rows:
+        sample_count = max(0, _safe_int(item.get("sample_count"), 0))
+        source_weight = max(0.0, _safe_float(item.get("weight"), 0.0))
+        brier = max(
+            0.0,
+            min(2.0 / 3.0, _safe_float(item.get("mean_brier_score"), 1.0 / 3.0)),
+        )
+        brier_reliability = max(
+            0.05,
+            1.0 - brier / (2.0 / 3.0),
+        )
+        sample_reliability = sample_count / float(sample_count + 8)
+        reliability_weight = source_weight * brier_reliability * sample_reliability
+        weighted_rows.append((item, max(0.000001, reliability_weight)))
+
+    total_weight = sum(weight for _, weight in weighted_rows)
+    blend_keys = (
+        "direction_hit_rate",
+        "mean_brier_score",
+        "mean_predicted_side_return_after_fee",
+        "mean_expected_return",
+        "estimated_round_trip_fee_rate",
+        "market_regime_match",
+        "target_probability",
+        "opposite_probability",
+        "range_probability",
+        "historical_calibration_signal",
+        "calibration_reliability",
+        "calibration_strength",
+        "calibrated_target_probability",
+        "calibrated_opposite_probability",
+        "calibrated_range_probability",
+        "current_target_expected_return",
+        "current_expected_return_after_fee",
+        "calibrated_expected_return_after_fee",
+        "rank_signal",
+    )
+    anchor = max(
+        rows,
+        key=lambda item: (
+            scope_specificity.get(str(item.get("scope_level") or ""), 0),
+            _safe_int(item.get("sample_count"), 0),
+        ),
+    )
+    blended = dict(anchor)
+    for key in blend_keys:
+        blended[key] = sum(
+            _safe_float(item.get(key), 0.0) * weight
+            for item, weight in weighted_rows
+        ) / total_weight
+    blended["scope_level"] = "reliability_blend"
+    blended["sample_count"] = sum(
+        max(0, _safe_int(item.get("sample_count"), 0)) for item in rows
+    )
+    blended["weight"] = sum(
+        max(0.01, _safe_float(item.get("weight"), 0.01)) * weight
+        for item, weight in weighted_rows
+    ) / total_weight
+    blended["source_scopes"] = [
+        {
+            "scope_level": str(item.get("scope_level") or "global"),
+            "sample_count": max(0, _safe_int(item.get("sample_count"), 0)),
+            "mean_brier_score": _safe_float(item.get("mean_brier_score"), 1.0 / 3.0),
+            "calibration_reliability": _safe_float(item.get("calibration_reliability"), 0.0),
+            "normalized_weight": round(weight / total_weight, 8),
+        }
+        for item, weight in sorted(
+            weighted_rows,
+            key=lambda pair: scope_specificity.get(
+                str(pair[0].get("scope_level") or ""),
+                0,
+            ),
+            reverse=True,
+        )
+    ]
+    return blended
 
 
 def _forecast_for_horizon(signal: Any, horizon_days: int) -> dict[str, Any]:
