@@ -1,5 +1,7 @@
 # agent-future-trading
 
+> QUANTSKILLS Community Project：面向研究与教育用途的多智能体期货策略工作流。未经社区审核，本项目不代表 QUANTSKILLS 官方认证，也不构成投资建议。
+
 agent-future-trading 是一个面向中国期货主力合约的多智能体交易策略系统。系统核心目标是在回测、模拟盘和后续实盘迁移中发现并扩大手续费后 alpha，形成可持续的正净收益；风险、审计和学习机制用于保证这条收益链路真实、可追溯，而不是通过少交易或机械保守伪造稳定性。当前代码重点服务两个核心功能：
 
 1. **期货策略回测**：按历史交易日复刻“盘前策略、盘中执行、日终结算、复盘研究”的完整运行链路。
@@ -184,6 +186,8 @@ python database\build_check_db.py
 ```
 
 ## 七、运行方式
+
+> 发布说明：公开仓库不包含本地 Feather 行情/基本面数据、新闻、数据库、日志、账户记录或 API 凭证。请按 `.env.example` 配置自己的数据源，并使用合成 fixture 或自行授权的数据进行测试。
 
 以下命令默认已激活 `deepfund` 环境，并从 `D:\research\agent-future-trading\src` 目录执行；自动化开发与验收固定使用 `C:\ProgramData\miniconda3\envs\deepfund\python.exe`。
 

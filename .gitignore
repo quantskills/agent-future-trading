@@ -49,3 +49,14 @@ uv.lock
 logs/
 assets/
 .claude/settings.local.json
+
+# Private/local market data and generated reports
+data/
+image/
+*.feather
+*.parquet
+*.csv
+*.jsonl
+*.db
+*.sqlite
+*.sqlite3

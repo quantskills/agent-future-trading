@@ -1,5 +1,17 @@
 # agent-future-trading AI 开发协作手册
 
+## QUANTSKILLS 发布元数据
+
+```yaml
+metadata:
+  organization: QuantSkills
+  organization_url: https://github.com/quantskills
+  repository: agent-future-trading
+  project_type: agent
+```
+
+本项目是社区项目，不代表 QUANTSKILLS 官方认证、验证或投资建议。
+
 本文件是 AI 协助开发 agent-future-trading 时必须遵守的最高工作手册。它只服务于项目开发、排错、回测验收和机制对齐，不保存普通讨论内容。
 
 除非用户明确要求修改本文件，AI 不主动改动 `AGENTS.md`。发现本文件与代码、机制文档、测试结果不一致时，先说明冲突，再按用户指令处理。
