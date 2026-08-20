@@ -310,6 +310,7 @@ def _rank_input_components_for_row(row: Dict[str, Any]) -> dict[str, Any]:
     components = row.get("opportunity_score_components") if isinstance(row.get("opportunity_score_components"), dict) else {}
     rank_score_components = row.get("rank_score_components") if isinstance(row.get("rank_score_components"), dict) else {}
     rank_score_inputs = row.get("rank_score_input_components") if isinstance(row.get("rank_score_input_components"), dict) else {}
+    forecast_calibration = _forecast_calibration_trace_for_rank_input(rank_score_inputs)
     return {
         "final_state": str(row.get("final_state") or row.get("opportunity_state") or ""),
         "capital_priority_tier": _safe_int(row.get("capital_priority_tier"), 0),
@@ -322,6 +323,7 @@ def _rank_input_components_for_row(row: Dict[str, Any]) -> dict[str, Any]:
         "watch_priority_score": round(_safe_float(row.get("watch_priority_score"), 0.0), 6),
         "opportunity_score": round(_safe_float(row.get("opportunity_score", row.get("score")), 0.0), 6),
         "cold_start_evidence_quality": round(_safe_float(rank_score_inputs.get("cold_start_evidence_quality"), 0.0), 6),
+        "forecast_calibration": forecast_calibration,
         "setup_quality_score": round(_safe_float(row.get("setup_quality_score", row.get("max_setup_quality")), 0.0), 6),
         "trigger_quality_score": round(_safe_float(row.get("trigger_quality_score"), 0.0), 6),
         "positive_learning": round(_safe_float(components.get("positive_learning"), 0.0), 6),
@@ -329,6 +331,76 @@ def _rank_input_components_for_row(row: Dict[str, Any]) -> dict[str, Any]:
         "entry_quality_loss_penalty": round(_safe_float(components.get("entry_quality_loss_penalty"), 0.0), 6),
         "trigger_quality_positive_bonus": round(_safe_float(components.get("trigger_quality_positive_bonus"), 0.0), 6),
         "trigger_quality_loss_penalty": round(_safe_float(components.get("trigger_quality_loss_penalty"), 0.0), 6),
+    }
+
+
+def _forecast_calibration_trace_for_rank_input(
+    rank_score_inputs: Dict[str, Any],
+) -> dict[str, Any]:
+    calibration = (
+        rank_score_inputs.get("forecast_calibration")
+        if isinstance(rank_score_inputs.get("forecast_calibration"), dict)
+        else {}
+    )
+    if not calibration:
+        return {}
+
+    source_rows: list[dict[str, Any]] = []
+    for raw_row in calibration.get("source_rows") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        scope_level = str(raw_row.get("scope_level") or "none").strip().lower()
+        source_scopes: list[dict[str, Any]] = []
+        for raw_scope in raw_row.get("source_scopes") or []:
+            if not isinstance(raw_scope, dict):
+                continue
+            source_scopes.append(
+                {
+                    "scope_level": str(raw_scope.get("scope_level") or "").strip().lower(),
+                    "sample_count": max(0, _safe_int(raw_scope.get("sample_count"), 0)),
+                    "mean_brier_score": round(
+                        _safe_float(raw_scope.get("mean_brier_score"), 1.0 / 3.0),
+                        8,
+                    ),
+                    "calibration_reliability": round(
+                        _safe_float(raw_scope.get("calibration_reliability"), 0.0),
+                        8,
+                    ),
+                    "normalized_weight": round(
+                        _safe_float(raw_scope.get("normalized_weight"), 0.0),
+                        8,
+                    ),
+                }
+            )
+        if scope_level == "reliability_blend" and len(source_scopes) < 2:
+            raise ValueError(
+                "rank_forecast_calibration_reliability_blend_missing_source_scopes"
+            )
+        source_rows.append(
+            {
+                "analyst": str(raw_row.get("analyst") or "").strip().lower(),
+                "calibration_status": str(
+                    raw_row.get("calibration_status") or "cold_start"
+                ).strip().lower(),
+                "scope_level": scope_level,
+                "sample_count": max(0, _safe_int(raw_row.get("sample_count"), 0)),
+                "rank_signal": round(_safe_float(raw_row.get("rank_signal"), 0.0), 8),
+                "source_scopes": source_scopes,
+            }
+        )
+
+    return {
+        "status": str(calibration.get("status") or "cold_start").strip().lower(),
+        "candidate_expected_horizon_days": max(
+            0,
+            _safe_int(calibration.get("candidate_expected_horizon_days"), 0),
+        ),
+        "matched_horizon_days": max(
+            0,
+            _safe_int(calibration.get("matched_horizon_days"), 0),
+        ),
+        "rank_signal": round(_safe_float(calibration.get("rank_signal"), 0.0), 8),
+        "source_rows": source_rows,
     }
 
 

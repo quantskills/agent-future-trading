@@ -1233,6 +1233,8 @@ PM 再依次施加可用保证金、单品种保证金硬上限、组合保证�
 
 本步不创建第二个候选对象，不输出独立 rank、预算或 sizing artifact。更新后的同一候选状态进入第 6 步。
 
+`rank_input_components.forecast_calibration`只保存实际进入现有`calibrated_forecast_value`的精简审计快照：校准状态、候选/匹配期限、最终`rank_signal`，以及三名分析师各自的`scope_level`、样本数和`source_scopes`。它不保存PM早期状态，也不形成第二个Rank；声明`reliability_blend`却缺少至少两层来源时，第5步必须停止签约，第6步最终合约自检不得放行。
+
 第 5 步只执行新增风险候选集合和资金测算输入的契约校验，不执行最终合约自检。预算拒绝、手数被约束为不增加风险、新增风险候选还原为当前持仓，都属于正常状态演化。
 
 第 6 步只根据最终候选状态形成 `capital_deployment`、`evidence_used.position_sizing_result`、最终 `lifecycle_learning_trace`、最终 `learning_impact_delta` 和最终交易字段，并只检查最终 `final_action_contract` 自身一致性。禁止比较第 5 步约束前目标与第 6 步最终动作，禁止要求 Step4 排名预期、Step5 初始手数和 Step6 最终合约保持不变。

@@ -516,6 +516,130 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         self.assertTrue(contract["capital_deployment"]["selected_for_capital_deployment"])
         self.assertEqual(contract["evidence_used"]["position_sizing_result"]["target_lots"], 1)
 
+    def test_reliability_blend_rank_trace_lands_in_final_action_contract(self):
+        state = _pm_state("BU", 0, 1, with_scorecard=True)
+        state["opportunity_scorecard"]["long"]["rank_score_input_components"] = {
+            "cold_start_evidence_quality": 0.8,
+            "forecast_calibration": {
+                "status": "matured",
+                "candidate_expected_horizon_days": 3,
+                "matched_horizon_days": 3,
+                "rank_signal": 0.24,
+                "source_rows": [
+                    {
+                        "analyst": "technical",
+                        "calibration_status": "matured",
+                        "scope_level": "reliability_blend",
+                        "sample_count": 18,
+                        "rank_signal": 0.30,
+                        "source_scopes": [
+                            {
+                                "scope_level": "ticker",
+                                "sample_count": 5,
+                                "mean_brier_score": 0.24,
+                                "calibration_reliability": 0.64,
+                                "normalized_weight": 0.38,
+                            },
+                            {
+                                "scope_level": "sector",
+                                "sample_count": 13,
+                                "mean_brier_score": 0.20,
+                                "calibration_reliability": 0.75,
+                                "normalized_weight": 0.62,
+                            },
+                        ],
+                    },
+                    {
+                        "analyst": "fundamental",
+                        "calibration_status": "cold_start",
+                        "scope_level": "none",
+                        "sample_count": 0,
+                        "rank_signal": 0.0,
+                    },
+                ],
+            },
+        }
+
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={"max_total_margin_ratio": 0.2},
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=1_000_000.0,
+                account_equity=1_000_000.0,
+                positions={},
+            ),
+        )
+
+        contract = result[0][1].signal_snapshot["final_action_contract"]
+        calibration = contract["capital_deployment"]["rank_input_components"][
+            "forecast_calibration"
+        ]
+        self.assertEqual(calibration["status"], "matured")
+        self.assertEqual(calibration["matched_horizon_days"], 3)
+        self.assertEqual(calibration["rank_signal"], 0.24)
+        technical = calibration["source_rows"][0]
+        self.assertEqual(technical["scope_level"], "reliability_blend")
+        self.assertEqual(
+            [row["scope_level"] for row in technical["source_scopes"]],
+            ["ticker", "sector"],
+        )
+        self.assertTrue(check_final_action_contract(contract)["ok"])
+        incomplete = dict(contract)
+        incomplete["capital_deployment"] = dict(contract["capital_deployment"])
+        incomplete["capital_deployment"]["rank_input_components"] = dict(
+            contract["capital_deployment"]["rank_input_components"]
+        )
+        incomplete_calibration = dict(calibration)
+        incomplete_calibration["source_rows"] = [
+            {**technical, "source_scopes": []},
+            *calibration["source_rows"][1:],
+        ]
+        incomplete["capital_deployment"]["rank_input_components"][
+            "forecast_calibration"
+        ] = incomplete_calibration
+        self.assertIn(
+            "rank_trace.reliability_blend_source_scopes_missing",
+            check_final_action_contract(incomplete)["errors"],
+        )
+
+    def test_reliability_blend_without_source_scopes_fails_before_signing(self):
+        state = _pm_state("BU", 0, 1, with_scorecard=True)
+        state["opportunity_scorecard"]["long"]["rank_score_input_components"] = {
+            "cold_start_evidence_quality": 0.8,
+            "forecast_calibration": {
+                "status": "matured",
+                "candidate_expected_horizon_days": 3,
+                "matched_horizon_days": 3,
+                "rank_signal": 0.24,
+                "source_rows": [
+                    {
+                        "analyst": "technical",
+                        "calibration_status": "matured",
+                        "scope_level": "reliability_blend",
+                        "sample_count": 18,
+                        "rank_signal": 0.30,
+                        "source_scopes": [],
+                    }
+                ],
+            },
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "rank_forecast_calibration_reliability_blend_missing_source_scopes",
+        ):
+            finalize_pm_full_market_contracts(
+                generated=[("BU", state)],
+                config={"max_total_margin_ratio": 0.2},
+                portfolio=Portfolio(
+                    id="p1",
+                    cashflow=1_000_000.0,
+                    account_equity=1_000_000.0,
+                    positions={},
+                ),
+            )
+
     def test_step5_rejection_restores_zero_new_exposure_before_step6(self):
         state = _pm_state("BU", 0, 1, with_scorecard=False)
         result = finalize_pm_full_market_contracts(

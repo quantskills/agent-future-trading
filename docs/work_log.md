@@ -66,3 +66,10 @@
 ==========2026年08月18日==========
 
 （1）[预测校准作用域可靠性融合] `pm_signal_fusion.py`不再让最具体的ticker预测绩效无条件覆盖sector/global绩效，改按各层样本量、Brier、置信权重和既有作用域权重融合校准结果；当日手续费后预期收益进入既有Rank前同时按融合后的历史可靠性收缩。原因：10—11月前向结果中Rank 1—2净亏而低Rank盈利，且代码允许少量ticker样本覆盖更可靠的上层样本、未对Rank主导的当日预期收益做可靠性约束；本项仅修正现有`calibrated_forecast_value`输入，未修改Rank积分结构、资金层、交易机会、Trader和退出链。
+
+==========2026年08月19日==========
+
+（1）[预测校准Rank审计来源保真] `pm_full_market_capital_deployment.py`将实际进入`calibrated_forecast_value`的校准状态、期限、最终信号及逐分析师作用域来源精简写入现有`rank_input_components.forecast_calibration`，声明`reliability_blend`但缺少至少两层`source_scopes`时停止签约；`pm_contract_self_check.py`同步拒绝该来源不完整的最终FAC，`test_pm_atomic_contract_flow.py`覆盖Step5至Step6最终合约保真与缺失来源失败路径。原因：修复可靠性融合已参与Rank但Step5审计快照只保留最终分数、无法由自然回测证明实际融合来源的断点；融合公式、Rank积分、配置权重、资金层、候选、Trader和退出链均未修改。
+==========2026年8月20日=========
+
+【策略评估口径重构】`evaluation.py` 将账户日度绩效按结算毛盈亏减手续费分类，并按每日结算前权益计算日收益；策略绩效统一使用策略起源 FIFO 交易对，分离账户、策略与运营交易指标。`evaluation_helper.py` 与 `sqlite_setup_eval.py` 增加账户/策略毛净盈亏、日胜负、交易胜率和 Profit Factor 持久化字段；`evaluate_config.py` 输出账户与策略两套口径。`test_evaluation_unified_semantics.py` 增加手续费后日度分类与每日权益基准回归覆盖。

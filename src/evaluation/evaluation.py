@@ -702,7 +702,12 @@ def calculate_futures_trade_win_rate(
     start_date: str = None, end_date: str = None,
 ) -> Dict:
     """
-    Calculate futures win rate using daily settlement P&L.
+    Calculate account daily performance using settlement facts.
+
+    ``daily_settlement.daily_pnl`` is the gross marked-to-market result and
+    ``daily_settlement.commission`` is recorded separately by Accountant.  A
+    performance day is therefore classified on ``daily_pnl - commission``;
+    otherwise small gross gains can be reported as winning days after fees.
     """
     conn = None
     try:
@@ -712,7 +717,12 @@ def calculate_futures_trade_win_rate(
 
         # Fetch all daily settlement records for this config
         query = '''
-            SELECT ds.daily_pnl, ds.trading_date
+            SELECT
+                ds.daily_pnl,
+                ds.commission,
+                ds.previous_balance,
+                ds.previous_margin,
+                ds.trading_date
             FROM daily_settlement ds
             JOIN portfolio p ON ds.portfolio_id = p.id
             WHERE p.config_id = ?
@@ -742,7 +752,10 @@ def calculate_futures_trade_win_rate(
                 'avg_return_per_trade': 0.0,
                 'avg_return_per_day': 0.0,
                 'total_trades': 0,
-                'evaluated_days': 0
+                'evaluated_days': 0,
+                'gross_pnl': 0.0,
+                'total_commission': 0.0,
+                'net_pnl': 0.0
             }
 
         logger.info("Calculating futures trade win rate from daily settlements")
@@ -750,65 +763,51 @@ def calculate_futures_trade_win_rate(
             f"Settlement period: {settlements[0]['trading_date']} to {settlements[-1]['trading_date']}"
         )
         logger.info(f"Settlement days: {len(settlements)}")
-        # For futures: use previous_balance + previous_margin (account equity before first trading day)
-        initial_query = '''
-            SELECT ds.previous_balance, ds.previous_margin
-            FROM daily_settlement ds
-            JOIN portfolio p ON ds.portfolio_id = p.id
-            WHERE p.config_id = ?
-        '''
-        initial_params: list = [config_id]
-        if start_date:
-            initial_query += ' AND ds.trading_date >= ?'
-            initial_params.append(start_date)
-        if end_date:
-            initial_query += ' AND ds.trading_date <= ?'
-            initial_params.append(end_date + 'T23:59:59')
-        initial_query += ' ORDER BY ds.trading_date ASC LIMIT 1'
-        cursor.execute(initial_query, initial_params)
-
-        initial_row = cursor.fetchone()
-        initial_capital = None
-        if initial_row and initial_row['previous_balance'] is not None and initial_row['previous_margin'] is not None:
-            initial_capital = initial_row['previous_balance'] + initial_row['previous_margin']
-        else:
-            logger.warning(
-                "Missing initial settlement equity for futures win-rate calculation; "
-                "avg_return_per_trade will be reported as 0.0"
-            )
-
-        # Calculate win rate based on daily P&L
+        # Calculate win rate from net daily P&L (after recorded commission).
         winning_days = 0
         losing_days = 0
         daily_returns = []
 
-        total_pnl = 0
+        gross_pnl = 0.0
+        total_commission = 0.0
+        total_pnl = 0.0
         positive_pnl_days = 0
         negative_pnl_days = 0
         zero_pnl_days = 0
 
         for settlement in settlements:
-            daily_pnl = settlement['daily_pnl']
-            total_pnl += daily_pnl
+            daily_pnl = float(settlement['daily_pnl'] or 0.0)
+            commission = float(settlement['commission'] or 0.0)
+            net_daily_pnl = daily_pnl - commission
+            gross_pnl += daily_pnl
+            total_commission += commission
+            total_pnl += net_daily_pnl
 
-            if daily_pnl > 0:
+            if net_daily_pnl > 0:
                 winning_days += 1
                 positive_pnl_days += 1
-            elif daily_pnl < 0:
+            elif net_daily_pnl < 0:
                 losing_days += 1
                 negative_pnl_days += 1
             else:
                 zero_pnl_days += 1
 
-            # Calculate daily return
-            if initial_capital and initial_capital > 0:
-                daily_returns.append(daily_pnl / initial_capital)
+            # Normalize by equity at the start of the settlement day rather
+            # than reusing the period's initial capital for every day.
+            previous_equity = (
+                float(settlement['previous_balance'] or 0.0)
+                + float(settlement['previous_margin'] or 0.0)
+            )
+            if previous_equity > 0:
+                daily_returns.append(net_daily_pnl / previous_equity)
 
         logger.info("Daily settlement statistics:")
         logger.info(f"  Winning days: {winning_days}")
         logger.info(f"  Losing days: {losing_days}")
         logger.info(f"  Flat days: {zero_pnl_days}")
-        logger.info(f"  Total PnL: {total_pnl:+,.2f}")
+        logger.info(f"  Gross PnL: {gross_pnl:+,.2f}")
+        logger.info(f"  Commission: {total_commission:,.2f}")
+        logger.info(f"  Net PnL: {total_pnl:+,.2f}")
 
         # Calculate final metrics
         total_trades = winning_days + losing_days
@@ -829,7 +828,10 @@ def calculate_futures_trade_win_rate(
             'avg_return_per_trade': avg_return,
             'avg_return_per_day': avg_return,
             'total_trades': total_trades,
-            'evaluated_days': len(settlements)
+            'evaluated_days': len(settlements),
+            'gross_pnl': gross_pnl,
+            'total_commission': total_commission,
+            'net_pnl': total_pnl,
         }
 
     except Exception as e:
@@ -846,7 +848,10 @@ def calculate_futures_trade_win_rate(
             'avg_return_per_trade': 0.0,
             'avg_return_per_day': 0.0,
             'total_trades': 0,
-            'evaluated_days': 0
+            'evaluated_days': 0,
+            'gross_pnl': 0.0,
+            'total_commission': 0.0,
+            'net_pnl': 0.0,
         }
     finally:
         if conn:
@@ -882,6 +887,8 @@ def calculate_futures_transaction_win_rate(
         'avg_return_per_trade': 0.0,
         'total_trades': 0,
         'realized_trade_pnl': 0.0,
+        'strategy_gross_pnl': 0.0,
+        'strategy_commission': 0.0,
         'unmatched_close_lots': 0,
         'inherited_close_lots': 0,
         'rollover_transaction_count': 0,
@@ -984,6 +991,8 @@ def calculate_futures_transaction_win_rate(
         total_trades = int(summary["total_trades"])
         win_rate = float(summary["win_rate"])
         realized_trade_pnl = float(summary["total_pnl"])
+        strategy_gross_pnl = sum(float(pair.get("gross_pnl") or 0.0) for pair in strategy_pairs)
+        strategy_commission = sum(float(pair.get("commission") or 0.0) for pair in strategy_pairs)
         avg_return = float(np.mean(trade_returns)) if trade_returns else 0.0
 
         logger.info("Futures transaction win-rate statistics:")
@@ -1006,6 +1015,8 @@ def calculate_futures_transaction_win_rate(
             'avg_return_per_trade': avg_return,
             'total_trades': total_trades,
             'realized_trade_pnl': realized_trade_pnl,
+            'strategy_gross_pnl': strategy_gross_pnl,
+            'strategy_commission': strategy_commission,
             'unmatched_close_lots': unmatched_close_lots,
             'inherited_close_lots': inherited_close_lots,
             'rollover_transaction_count': rollover_transaction_count,
@@ -1059,9 +1070,20 @@ def calculate_futures_strategy_quality_metrics(
     start_date: str = None,
     end_date: str = None,
 ) -> Dict:
-    """Calculate futures strategy-quality metrics beyond headline P&L."""
+    """Calculate strategy-originated quality metrics beyond account P&L.
+
+    Settlement rows remain the account/equity ledger.  All trade quality and
+    ticker attribution here are computed from completed strategy-originated
+    FIFO pairs, so rollover/forced-risk operations can close a strategy
+    position without becoming an independent strategy signal.
+    """
     metrics = {
         "net_settlement_pnl": 0.0,
+        "account_gross_pnl": 0.0,
+        "account_net_pnl": 0.0,
+        "account_net_win_days": 0,
+        "account_net_loss_days": 0,
+        "account_net_flat_days": 0,
         "calmar_ratio": 0.0,
         "return_drawdown_ratio": 0.0,
         "profit_factor": 0.0,
@@ -1086,6 +1108,13 @@ def calculate_futures_strategy_quality_metrics(
         "long_trade_net_pnl": 0.0,
         "short_trade_net_pnl": 0.0,
         "ticker_net_pnl": {},
+        "strategy_total_trades": 0,
+        "strategy_winning_trades": 0,
+        "strategy_losing_trades": 0,
+        "strategy_flat_trades": 0,
+        "strategy_win_rate": 0.0,
+        "strategy_net_pnl": 0.0,
+        "strategy_profit_factor": 0.0,
     }
     metrics["calmar_ratio"] = (
         float(annualized_return) / float(max_drawdown)
@@ -1145,7 +1174,13 @@ def calculate_futures_strategy_quality_metrics(
                 gross_pnl_activity = sum(abs(value) for value in daily_pnls)
 
                 metrics["net_settlement_pnl"] = net_settlement_pnl
-                metrics["max_consecutive_losing_days"] = _max_negative_streak(daily_pnls)
+                net_daily_pnls = [pnl - commission for pnl, commission in zip(daily_pnls, commissions)]
+                metrics["account_gross_pnl"] = sum(daily_pnls)
+                metrics["account_net_pnl"] = net_settlement_pnl
+                metrics["account_net_win_days"] = sum(1 for value in net_daily_pnls if value > 0)
+                metrics["account_net_loss_days"] = sum(1 for value in net_daily_pnls if value < 0)
+                metrics["account_net_flat_days"] = sum(1 for value in net_daily_pnls if value == 0)
+                metrics["max_consecutive_losing_days"] = _max_negative_streak(net_daily_pnls)
                 metrics["return_on_avg_margin"] = float(np.mean(margin_returns)) if margin_returns else 0.0
                 metrics["commission_drag_ratio"] = sum(commissions) / gross_pnl_activity if gross_pnl_activity > 0 else 0.0
                 metrics["margin_cap_violation_days"] = sum(
@@ -1179,7 +1214,7 @@ def calculate_futures_strategy_quality_metrics(
             if end_date:
                 tx_query += " AND substr(trading_date, 1, 10) <= ?"
                 tx_params.append(end_date)
-            tx_query += " ORDER BY trading_date ASC, created_at ASC"
+            tx_query += " ORDER BY substr(trading_date, 1, 10) ASC, created_at ASC, id ASC"
             cursor.execute(tx_query, tx_params)
             pairs = build_strategy_originated_trade_pairs(cursor.fetchall())
             if start_date:
@@ -1201,6 +1236,13 @@ def calculate_futures_strategy_quality_metrics(
                 metrics["avg_loss_pnl"] = avg_loss
                 metrics["payoff_ratio"] = avg_win / abs(avg_loss) if avg_loss < 0 else 0.0
                 metrics["trade_expectancy"] = sum(pnls) / len(pnls)
+                metrics["strategy_total_trades"] = len(pairs)
+                metrics["strategy_winning_trades"] = len(wins)
+                metrics["strategy_losing_trades"] = len(losses)
+                metrics["strategy_flat_trades"] = len(pnls) - len(wins) - len(losses)
+                metrics["strategy_win_rate"] = len(wins) / len(pnls) if pnls else 0.0
+                metrics["strategy_net_pnl"] = sum(pnls)
+                metrics["strategy_profit_factor"] = gross_profit / gross_loss if gross_loss > 0 else 0.0
                 metrics["max_trade_gain"] = max(pnls)
                 metrics["max_trade_loss"] = min(pnls)
                 metrics["max_consecutive_losing_trades"] = _max_negative_streak(pnls)
@@ -1211,31 +1253,56 @@ def calculate_futures_strategy_quality_metrics(
                     float(row.get("net_pnl") or 0.0) for row in pairs if row.get("side") == "short"
                 )
 
-        if _sqlite_table_exists(cursor, "ticker_daily_pnl"):
-            tdp_columns = _sqlite_columns(cursor, "ticker_daily_pnl")
-            commission_expr = "COALESCE(tdp.commission, 0)" if "commission" in tdp_columns else "0"
-            ticker_query = f"""
-                SELECT
-                    UPPER(tdp.ticker) AS ticker,
-                    SUM(COALESCE(tdp.daily_pnl, 0) - {commission_expr}) AS net_pnl
-                FROM ticker_daily_pnl tdp
-                JOIN portfolio p ON tdp.portfolio_id = p.id
-                WHERE p.config_id = ?
+        if _sqlite_table_exists(cursor, "futures_transactions"):
+            # Product attribution follows the same strategy-originated FIFO
+            # pairs as win rate and profit factor.  ticker_daily_pnl is an
+            # account settlement fact and can contain rollover or other
+            # operational exposure; using it as strategy alpha attribution
+            # would mix the two ledgers.
+            tx_columns = _sqlite_columns(cursor, "futures_transactions")
+            select_parts = [
+                "id" if "id" in tx_columns else "NULL AS id",
+                "recommendation_id" if "recommendation_id" in tx_columns else "NULL AS recommendation_id",
+                "trading_date",
+                "created_at" if "created_at" in tx_columns else "trading_date AS created_at",
+                "ticker",
+                "contract_code" if "contract_code" in tx_columns else "ticker AS contract_code",
+                "action",
+                "lots",
+                "execution_price" if "execution_price" in tx_columns else "price AS execution_price",
+                "price" if "price" in tx_columns else "execution_price AS price",
+                "contract_multiplier" if "contract_multiplier" in tx_columns else "1.0 AS contract_multiplier",
+                "commission" if "commission" in tx_columns else "0.0 AS commission",
+                "source_type" if "source_type" in tx_columns else "'strategy' AS source_type",
+            ]
+            tx_query = f"""
+                SELECT {', '.join(select_parts)}
+                FROM futures_transactions
+                WHERE config_id = ?
+                  AND action IN ('open_long', 'open_short', 'close_long', 'close_short')
             """
-            ticker_params: List = [config_id]
-            if start_date:
-                ticker_query += " AND tdp.trading_date >= ?"
-                ticker_params.append(start_date)
+            tx_params: List = [config_id]
             if end_date:
-                ticker_query += " AND tdp.trading_date <= ?"
-                ticker_params.append(end_date + "T23:59:59")
-            ticker_query += " GROUP BY UPPER(tdp.ticker)"
-            cursor.execute(ticker_query, ticker_params)
-            ticker_pnl = {
-                str(row["ticker"] or "").upper(): float(row["net_pnl"] or 0.0)
-                for row in cursor.fetchall()
-                if row["ticker"]
-            }
+                tx_query += " AND substr(trading_date, 1, 10) <= ?"
+                tx_params.append(end_date)
+            tx_query += " ORDER BY substr(trading_date, 1, 10), created_at, id"
+            cursor.execute(tx_query, tx_params)
+            strategy_pairs = build_strategy_originated_trade_pairs(cursor.fetchall())
+            if start_date:
+                strategy_pairs = [
+                    pair for pair in strategy_pairs
+                    if str(pair.get("close_date") or "") >= start_date
+                ]
+            if end_date:
+                strategy_pairs = [
+                    pair for pair in strategy_pairs
+                    if str(pair.get("close_date") or "") <= end_date
+                ]
+            ticker_pnl: Dict[str, float] = {}
+            for pair in strategy_pairs:
+                ticker = str(pair.get("ticker") or "").upper()
+                if ticker:
+                    ticker_pnl[ticker] = ticker_pnl.get(ticker, 0.0) + float(pair.get("net_pnl") or 0.0)
             if ticker_pnl:
                 metrics["ticker_net_pnl"] = ticker_pnl
                 metrics["profitable_ticker_count"] = sum(1 for value in ticker_pnl.values() if value > 0)
@@ -2196,11 +2263,25 @@ def evaluate_config(
             'win_rate': win_rate_metrics['win_rate'],
             'win_rate_available': win_rate_metrics['total_trades'] > 0,
             'daily_win_rate': daily_win_rate_metrics['win_rate'],
+            'account_gross_pnl': daily_win_rate_metrics.get('gross_pnl', 0.0),
+            'account_net_pnl': daily_win_rate_metrics.get('net_pnl', 0.0),
+            'account_net_win_days': daily_win_rate_metrics.get('winning_days', 0),
+            'account_net_loss_days': daily_win_rate_metrics.get('losing_days', 0),
+            'account_net_flat_days': daily_win_rate_metrics.get('flat_days', 0),
             'avg_return_per_trade': win_rate_metrics['avg_return_per_trade'],
             'avg_return_per_day': daily_win_rate_metrics['avg_return_per_day'],
             'total_trades': win_rate_metrics['total_trades'],
             'evaluated_days': daily_win_rate_metrics['evaluated_days'],
             'realized_trade_pnl': win_rate_metrics['realized_trade_pnl'],
+            'strategy_gross_pnl': win_rate_metrics.get('strategy_gross_pnl', 0.0),
+            'strategy_commission': win_rate_metrics.get('strategy_commission', 0.0),
+            'strategy_total_trades': quality_metrics.get('strategy_total_trades', win_rate_metrics.get('total_trades', 0)),
+            'strategy_winning_trades': quality_metrics.get('strategy_winning_trades', win_rate_metrics.get('winning_trades', 0)),
+            'strategy_losing_trades': quality_metrics.get('strategy_losing_trades', win_rate_metrics.get('losing_trades', 0)),
+            'strategy_flat_trades': quality_metrics.get('strategy_flat_trades', win_rate_metrics.get('flat_trades', 0)),
+            'strategy_win_rate': quality_metrics.get('strategy_win_rate', win_rate_metrics.get('win_rate', 0.0)),
+            'strategy_net_pnl': quality_metrics.get('strategy_net_pnl', win_rate_metrics.get('realized_trade_pnl', 0.0)),
+            'strategy_profit_factor': quality_metrics.get('strategy_profit_factor', quality_metrics.get('profit_factor', 0.0)),
             'unmatched_close_lots': win_rate_metrics['unmatched_close_lots'],
             'inherited_close_lots': win_rate_metrics.get('inherited_close_lots', 0),
             'rollover_transaction_count': win_rate_metrics.get('rollover_transaction_count', 0),

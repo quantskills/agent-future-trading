@@ -465,7 +465,7 @@
 | `capital_layer` | `final_action_contract.evidence_used` / `capital_deployment` | rank 对应的既定资金层级。它只能从 rank 前已形成的 `final_entry_authority.authority_type` 和既有 alpha-release 资格映射：`exploration_probe` 使用既有 0.008 至 0.015 小探针资金区间，`real_budget_entry` 使用正常真实资金参数，`alpha_scale_entry` 使用已获准的强机会放大资金参数。rank 不得改变资金层；只允许在探索层既有区间内确定最终计划比例并决定全市场预算顺序。 |
 | `capital_ratio_source` | `final_action_contract.evidence_used` / `capital_deployment` | 当前资金层级引用的资金参数来源，例如 `probe_margin_ratio_0.008`、`normal_trade_margin_ratio`、`strong_opportunity_target_margin_ratio`。该字段只解释参数来源，不改参数值。 |
 | `rank_reason` | `final_action_contract.evidence_used` / `capital_deployment` | rank=1 或该候选排名位置的确定性原因摘要。watch/probe 层固定表达按证据、触发、学习、风险质量排序后的最佳小探针候选；真实资金层表达当前证据和产品级学习支持；放大层表达多次正向 alpha、触发质量和回撤约束均达标。 |
-| `rank_input_components` | `final_action_contract.evidence_used` / `capital_deployment` | 全市场资金 rank 的确定性输入快照，至少包含 `capital_priority_tier`、`capital_priority_score`、`watch_priority_score`、`opportunity_score`、证据质量、setup/trigger 质量和主要学习分项；用于证明 rank 不是旧局部排序或空字段补齐。 |
+| `rank_input_components` | `final_action_contract.evidence_used` / `capital_deployment` | 全市场资金 rank 的确定性输入快照，至少包含 `capital_priority_tier`、`capital_priority_score`、`watch_priority_score`、`opportunity_score`、证据质量、setup/trigger 质量、主要学习分项，以及实际进入 `calibrated_forecast_value` 的精简 `forecast_calibration` 追踪。后者固定保留状态、候选/匹配期限、最终 `rank_signal` 和逐分析师 `scope_level/sample_count/source_scopes`；声明 `scope_level=reliability_blend` 时必须有至少两层来源，否则 Step5 和 PM 最终合约自检 hard fail。该快照只证明最终 Rank 输入保真，不让 Auditor、Trader 或 daily PG 复算 PM 内部校准。 |
 | `lifecycle_learning_trace` | `final_action_contract.evidence_used` / `capital_deployment` | 学习路由轨迹。最终决策层 `decision_learning_rows` 必须来自 Step6 按最终 `final_action/current_lots/target_lots` 与合约权限重新路由出的 final lifecycle trace；Step1-Step5 的 router/diagnostic/provenance 不能直接复制为最终 `decision_learning_rows`。生命周期匹配规则见 `docs/matrix_action_canonical.md`。 |
 | `learning_impact_delta` | `final_action_contract.evidence_used` / `capital_deployment` | 学习对本次资金 rank 或生命周期决策的净影响拆解。rank 场景记录正向 open/add 学习、负向 open/add 学习、入场质量亏损、触发质量正负反馈等分项；非 rank 场景记录是否改变持仓解释、减仓/退出倾向、条件监控或 execution profile；`execution_profile_learning_direct_to_rank` 必须为 false。 |
 | `rank_cleanup_fields` | PM 全市场资金部署工具 / `final_action_semantics.canonicalize_final_action_contract_for_persistence()` | 非 full-market rank 清理只允许删除 rank 专属字段：`opportunity_rank`、`rank_source`、`rank_scope`、`capital_rank_generated_by`、`rank_capital_role`、`capital_layer`、`capital_ratio_source`、`rank_reason`、`rank_input_components`、`alpha_scale_eligible` 及其他 rank 语义布尔字段。`lifecycle_learning_trace`、`learning_impact_delta`、`pm_lifecycle_learning_trace`、`pm_lifecycle_learning_impact_delta` 是生命周期学习解释字段，不能因为合约不走 rank 而被清理。 |
@@ -790,6 +790,9 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `losing_trades` | 评估输出 | 亏损完成片段数量；默认只统计策略开仓发起并在评估区间内平仓的持仓片段。 |
 | `flat_trades` | 评估输出 | 盈亏为零的完成片段数量；默认只统计策略开仓发起并在评估区间内平仓的持仓片段。 |
 | `total_trades` | 评估输出 | 完成片段数量；默认只统计策略开仓发起并在评估区间内平仓的持仓片段。 |
+| `evaluated_days` | 评估输出 | 评估区间内实际存在 `daily_settlement` 的逻辑交易日数量。 |
+| `daily_win_rate` / `winning_days` / `losing_days` / `flat_days` | 评估输出 | 账户日度胜率及其日数分类；分类依据为每日 `daily_pnl - commission`，不是策略完成片段胜率。 |
+| `avg_return_per_day` | 评估输出 | 按每日结算前账户权益计算的手续费后平均日收益率；不把策略交易对收益率当作账户日收益率。 |
 | `avg_return_per_trade` | 评估输出 | 单个策略起源完成片段的平均收益率。 |
 | `realized_trade_pnl` | 评估输出 | 策略起源完成片段的已实现净盈亏，包含实际平仓手续费。 |
 | `unmatched_close_lots` | 评估输出 | 重放截至评估结束日的完整成交历史后仍找不到对应开仓的平仓手数。 |
@@ -799,6 +802,12 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `operational_transaction_count` | 评估输出 | `source_type != strategy` 的运营流水笔数。 |
 | `rollover_summary` | 归因报告 | 换月运营流水摘要。 |
 | `forced_risk_summary` | 归因报告 | 强平/强减风控运营流水摘要。 |
+| `account_gross_pnl` | 评估输出 | 结算账本在评估区间内的毛日度盈亏总和；不代表策略 Alpha。 |
+| `account_net_pnl` | 评估输出 | 账户结算毛盈亏减已记录手续费后的区间净盈亏。 |
+| `account_net_win_days` / `account_net_loss_days` / `account_net_flat_days` | 评估输出 | 按每日 `daily_pnl - commission` 分类的账户净盈利、净亏损和持平日数。 |
+| `strategy_gross_pnl` / `strategy_commission` | 评估输出 | 策略起源 FIFO 完成交易对的毛盈亏与配对开平仓手续费。 |
+| `strategy_total_trades` / `strategy_winning_trades` / `strategy_losing_trades` / `strategy_flat_trades` | 评估输出 | 策略起源完成持仓片段及其按配对净盈亏分类的数量。 |
+| `strategy_win_rate` / `strategy_net_pnl` / `strategy_profit_factor` | 评估输出 | 策略起源 FIFO 交易对的手续费后胜率、净盈亏和盈亏因子；运营换月/强风控流水不作为独立策略交易。 |
 
 ## 15. 资金部署字段
 

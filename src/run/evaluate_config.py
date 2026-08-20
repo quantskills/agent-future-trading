@@ -51,11 +51,15 @@ def print_futures_quality_summary(metrics: dict) -> None:
     print("【期货策略质量指标】")
     print(f"  卡玛比率:                 {metrics.get('calmar_ratio', 0):.4f}")
     print(f"  收益/最大回撤:            {metrics.get('return_drawdown_ratio', 0):.4f}")
-    print(f"  盈亏因子:                 {metrics.get('profit_factor', 0):.4f}")
-    print(f"  单笔期望盈亏:             {metrics.get('trade_expectancy', 0):>15,.2f}")
-    print(f"  平均盈利/平均亏损:        {metrics.get('avg_win_pnl', 0):>12,.2f} / {metrics.get('avg_loss_pnl', 0):>12,.2f}")
-    print(f"  盈亏比:                   {metrics.get('payoff_ratio', 0):.4f}")
-    print(f"  最大单笔盈利/亏损:        {metrics.get('max_trade_gain', 0):>12,.2f} / {metrics.get('max_trade_loss', 0):>12,.2f}")
+    print(f"  盈亏因子(策略起源交易对): {metrics.get('profit_factor', 0):.4f}")
+    print(f"  单笔期望净盈亏(策略):     {metrics.get('trade_expectancy', 0):>15,.2f}")
+    print(f"  平均盈利/平均亏损(策略):  {metrics.get('avg_win_pnl', 0):>12,.2f} / {metrics.get('avg_loss_pnl', 0):>12,.2f}")
+    print(f"  盈亏比(策略):             {metrics.get('payoff_ratio', 0):.4f}")
+    print(f"  最大单笔盈利/亏损(策略):  {metrics.get('max_trade_gain', 0):>12,.2f} / {metrics.get('max_trade_loss', 0):>12,.2f}")
+    print(
+        f"  策略毛盈亏/手续费/净盈亏: {metrics.get('strategy_gross_pnl', 0):>12,.2f} / "
+        f"{metrics.get('strategy_commission', 0):>10,.2f} / {metrics.get('strategy_net_pnl', 0):>12,.2f}"
+    )
     print(f"  最长连续亏损天数/交易数:  {metrics.get('max_consecutive_losing_days', 0)} / {metrics.get('max_consecutive_losing_trades', 0)}")
     print(f"  日均保证金净收益率:       {metrics.get('return_on_avg_margin', 0):.2%}")
     print(f"  手续费/总盈亏波动额:      {metrics.get('commission_drag_ratio', 0):.2%}")
@@ -104,7 +108,11 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
 
     print("【基础收益指标】")
     print(f"  总收益率:           {metrics.get('total_return', 0):.2%}")
-    print(f"  累计结算盈亏:       {metrics.get('total_settlement_pnl', 0):>15,.2f}")
+    print(f"  累计结算毛盈亏:     {metrics.get('total_settlement_pnl', 0):>15,.2f}")
+    print(
+        f"  账户日度毛/净盈亏:  {metrics.get('account_gross_pnl', 0):>12,.2f} / "
+        f"{metrics.get('account_net_pnl', 0):>12,.2f}"
+    )
     print(f"  日均盈亏:           {metrics.get('avg_daily_pnl', 0):>15,.2f}")
     if annualization_days and annualization_basis:
         annualized_label = f"(基于{annualization_days}个{annualization_basis}样本年化)"
@@ -150,10 +158,15 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
     if is_futures:
         print(f"  评估交易日数:       {metrics.get('evaluated_days', 0)} 天")
         print(f"  成交流水笔数:       {metrics.get('total_futures_trades', 0)} 笔")
-        print(f"  盈利天数:           {metrics.get('winning_days', 0)} 天")
-        print(f"  亏损天数:           {metrics.get('losing_days', 0)} 天")
-        print(f"  持平天数:           {metrics.get('flat_days', 0)} 天")
-        print(f"  日结算胜率:         {metrics.get('daily_win_rate', 0):.2%} (按日结算)")
+        print(f"  账户净盈利天数:     {metrics.get('account_net_win_days', 0)} 天")
+        print(f"  账户净亏损天数:     {metrics.get('account_net_loss_days', 0)} 天")
+        print(f"  账户净持平天数:     {metrics.get('account_net_flat_days', 0)} 天")
+        print(f"  账户日度净胜率:     {metrics.get('daily_win_rate', 0):.2%} (扣手续费)")
+        print(
+            f"  账户手续费后日胜负: {metrics.get('account_net_win_days', 0)}胜 "
+            f"{metrics.get('account_net_loss_days', 0)}负 "
+            f"{metrics.get('account_net_flat_days', 0)}平"
+        )
         print(f"  完整交易对数:       {metrics.get('total_trades', 0)} 笔")
         print(f"  盈利交易:           {metrics.get('winning_trades', 0)} 笔")
         print(f"  亏损交易:           {metrics.get('losing_trades', 0)} 笔")
@@ -279,6 +292,10 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
     print(f"  绝对收益:           {metrics.get('final_capital', 0) - metrics.get('initial_capital', 0):>+15,.2f}")
     if is_futures:
         print_futures_quality_summary(metrics)
+        print(
+            f"  策略起源净盈亏/胜率: {metrics.get('strategy_net_pnl', 0):>12,.2f} / "
+            f"{metrics.get('strategy_win_rate', 0):.2%}"
+        )
     print("=" * 80 + "\n")
 
 

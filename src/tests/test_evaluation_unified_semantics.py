@@ -14,6 +14,7 @@ from evaluation.analyze_strategy_attribution import build_attribution_report
 from evaluation.evaluation import (
     calculate_futures_strategy_quality_metrics,
     calculate_futures_transaction_win_rate,
+    calculate_futures_trade_win_rate,
 )
 from evaluation.plot_portfolio import PortfolioCurvePlotter
 from util.futures_trade_pairs import build_strategy_originated_trade_pairs
@@ -77,6 +78,38 @@ class EvaluationUnifiedSemanticsRegressionTest(unittest.TestCase):
         self.assertEqual(metrics["rollover_transaction_count"], 2)
         self.assertEqual(metrics["forced_risk_transaction_count"], 2)
         self.assertEqual(metrics["operational_transaction_count"], 4)
+
+    def test_daily_performance_is_after_fee_and_uses_daily_equity_base(self):
+        db_path = self._tmp_db()
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE portfolio (id TEXT, config_id TEXT);
+            CREATE TABLE daily_settlement (
+                portfolio_id TEXT, trading_date TEXT, daily_pnl REAL,
+                commission REAL, previous_balance REAL, previous_margin REAL
+            );
+            """
+        )
+        conn.execute("INSERT INTO portfolio VALUES ('p1', 'cfg')")
+        conn.executemany(
+            "INSERT INTO daily_settlement VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                ("p1", "2025-03-03", 1.0, 2.0, 100.0, 0.0),
+                ("p1", "2025-03-04", 10.0, 0.0, 99.0, 0.0),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        metrics = calculate_futures_trade_win_rate("cfg", db_path)
+
+        self.assertEqual(metrics["winning_days"], 1)
+        self.assertEqual(metrics["losing_days"], 1)
+        self.assertAlmostEqual(metrics["gross_pnl"], 11.0)
+        self.assertAlmostEqual(metrics["total_commission"], 2.0)
+        self.assertAlmostEqual(metrics["net_pnl"], 9.0)
+        self.assertAlmostEqual(metrics["avg_return_per_day"], (-1.0 / 100.0 + 10.0 / 99.0) / 2.0)
 
     def test_strategy_quality_metrics_exclude_operational_pairs(self):
         db_path = self._tmp_db()

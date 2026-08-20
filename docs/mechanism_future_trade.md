@@ -106,6 +106,7 @@
 - Phase3 会复核当日成交流水是否违反涨跌停限制；若发现理论上不可能成交的流水，会中断结算并报错，防止错误流水进入账务。
 - 已完成回测中，`futures_recommendation`、`futures_transactions`、`daily_settlement`、`ticker_daily_pnl` 和完整交易日志能相互追踪；交易动作覆盖开多、开空、平多、平空和 rollover。
 - 评估模块按最初策略开仓追踪持仓血缘；`rollover/forced_risk` 保留运营执行来源，其关闭策略起源持仓产生的净盈亏归入原策略绩效。指定区间先重放截至结束日的成交历史，再按平仓日截取完成片段，窗口结束仍持有的仓位不计作完成交易。
+- 评估报告同时输出账户口径和策略口径：账户净绩效按 `daily_settlement.daily_pnl - commission` 统计每日胜负，策略绩效按策略起源 FIFO 完成片段统计胜率、净盈亏和 Profit Factor；两者不能互相替代，运营流水不作为独立策略交易。
 
 ### 9. 回测与模拟盘运行方式
 

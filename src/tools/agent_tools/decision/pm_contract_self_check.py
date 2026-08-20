@@ -183,11 +183,12 @@ def _semantic_object_errors(contract: Mapping[str, Any]) -> List[str]:
 def _rank_score_trace_errors(contract: Mapping[str, Any]) -> List[str]:
     if not _contract_has_any_rank(contract):
         return []
+    errors: List[str] = []
     evidence = _mapping(contract.get("evidence_used"))
     deployment = _mapping(contract.get("capital_deployment"))
     evidence_inputs = _mapping(evidence.get("rank_input_components"))
     deployment_inputs = _mapping(deployment.get("rank_input_components"))
-    if any(
+    if not any(
         _present(value)
         for value in (
             deployment.get("rank_score"),
@@ -196,8 +197,25 @@ def _rank_score_trace_errors(contract: Mapping[str, Any]) -> List[str]:
             evidence_inputs.get("rank_score"),
         )
     ):
-        return []
-    return ["rank_trace.rank_score_missing"]
+        errors.append("rank_trace.rank_score_missing")
+
+    rank_inputs = deployment_inputs or evidence_inputs
+    forecast_calibration = _mapping(rank_inputs.get("forecast_calibration"))
+    source_rows = forecast_calibration.get("source_rows")
+    for row in source_rows if isinstance(source_rows, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("scope_level") or "").strip().lower() != "reliability_blend":
+            continue
+        source_scopes = row.get("source_scopes")
+        valid_scopes = [
+            scope
+            for scope in source_scopes if isinstance(scope, Mapping)
+        ] if isinstance(source_scopes, list) else []
+        if len(valid_scopes) < 2:
+            errors.append("rank_trace.reliability_blend_source_scopes_missing")
+            break
+    return errors
 
 
 def _learning_rows_present(value: Any) -> bool:
