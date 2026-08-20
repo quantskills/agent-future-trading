@@ -1,1 +1,1 @@
-"""Common infrastructure helpers shared across AgentQuant tools and agents."""
+"""Common infrastructure helpers shared across agent-future-trading tools and agents."""

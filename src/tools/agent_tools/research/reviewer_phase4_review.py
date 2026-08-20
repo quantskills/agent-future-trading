@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Phase4 fact replay, attribution, and daily transaction report helpers."""
 
@@ -979,7 +979,7 @@ def _build_daily_transaction_report(
     warnings_text = "yes" if (settlement_row and (settlement_row.get("is_warning") or settlement_row.get("is_liquidation"))) else "no"
 
     lines = [
-        f"AgentQuant {trading_date} 完整交易日志",
+        f"agent-future-trading {trading_date} 完整交易日志",
         "=" * 80,
         "",
     ]

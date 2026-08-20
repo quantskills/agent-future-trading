@@ -8,7 +8,7 @@ Usage:
     python src/evaluation/plot_portfolio.py --config src/config/dev.yaml
 
 Output:
-    Generates a PNG file at: AgentQuant/image/{exp_name}_portfolio_curve.png
+    Generates a PNG file at: agent-future-trading/image/{exp_name}_portfolio_curve.png
 """
 
 import argparse
@@ -461,7 +461,7 @@ def main():
         '--output-dir',
         type=str,
         default=None,
-        help='Directory for generated plot images (default: AgentQuant/image)'
+        help='Directory for generated plot images (default: agent-future-trading/image)'
     )
     parser.add_argument(
         '--db-path',

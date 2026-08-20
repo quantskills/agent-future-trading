@@ -10,7 +10,7 @@ Usage:
     python src/evaluation/plot_future.py --config src/config/dev.yaml --ticker M
 
 Output:
-    Generates a PNG file at: AgentQuant/image/{exp_name}_{ticker}_curve.png
+    Generates a PNG file at: agent-future-trading/image/{exp_name}_{ticker}_curve.png
 """
 
 import argparse
@@ -878,7 +878,7 @@ def main():
         '--output-dir',
         type=str,
         default=None,
-        help='Directory for generated plot images (default: AgentQuant/image)'
+        help='Directory for generated plot images (default: agent-future-trading/image)'
     )
     parser.add_argument(
         '--db-path',

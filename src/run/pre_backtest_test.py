@@ -20,7 +20,7 @@ from agents.control_team.protocol_governor import ProtocolGovernor
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run AgentQuant pre-backtest readiness checks.")
+    parser = argparse.ArgumentParser(description="Run agent-future-trading pre-backtest readiness checks.")
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--local-db", action="store_true")
     parser.add_argument("--start-date", type=str, default=None)
@@ -59,7 +59,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print("AgentQuant pre-backtest readiness gate")
+        print("agent-future-trading pre-backtest readiness gate")
         print(f"  status: {report['status']}")
         for check in report["checks"]:
             print(f"  {check['check_name']}: {check['status']}")

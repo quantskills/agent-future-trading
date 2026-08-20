@@ -1,6 +1,6 @@
-# AgentQuant
+# agent-future-trading
 
-AgentQuant 是一个面向中国期货主力合约的多智能体交易策略系统。系统核心目标是在回测、模拟盘和后续实盘迁移中发现并扩大手续费后 alpha，形成可持续的正净收益；风险、审计和学习机制用于保证这条收益链路真实、可追溯，而不是通过少交易或机械保守伪造稳定性。当前代码重点服务两个核心功能：
+agent-future-trading 是一个面向中国期货主力合约的多智能体交易策略系统。系统核心目标是在回测、模拟盘和后续实盘迁移中发现并扩大手续费后 alpha，形成可持续的正净收益；风险、审计和学习机制用于保证这条收益链路真实、可追溯，而不是通过少交易或机械保守伪造稳定性。当前代码重点服务两个核心功能：
 
 1. **期货策略回测**：按历史交易日复刻“盘前策略、盘中执行、日终结算、复盘研究”的完整运行链路。
 2. **模拟盘/模拟交易**：与回测共用同一套推荐、执行、结算、日志和学习机制，使回测生成的策略尽量可以一比一迁移到模拟盘。
@@ -11,7 +11,7 @@ AgentQuant 是一个面向中国期货主力合约的多智能体交易策略系
 
 ## 一、系统运行总览
 
-AgentQuant 以交易日为最小运行单元，每个交易日分为四个阶段：
+agent-future-trading 以交易日为最小运行单元，每个交易日分为四个阶段：
 
 1. **Phase1 策略生成**  
    技术面、基本面、新闻面分析师读取盘前可见数据，生成含 1/3/5/10 日方向概率、预期收益区间、驱动和预测失效条件的结构化预测证据；信号收集员汇总三类分析师证据，输出 `signal_collection_contract`；投资组合经理按六步机制连续更新同一个内存状态，Step4 读取过去已到期的预测校准，只有新增风险路径进入 Step5 全市场 rank、预算和 sizing，最后由 Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract`。Step1–5 不输出 artifact 和合约草稿。
@@ -120,7 +120,7 @@ max_total_margin_ratio = 0.20
 
 ## 五、记忆与研究机制
 
-AgentQuant 的学习目标不是写死更多交易规则，而是让智能体从历史交易和未交易样本中探索期货交易规律，并把研究结论变成下一轮可用记忆。
+agent-future-trading 的学习目标不是写死更多交易规则，而是让智能体从历史交易和未交易样本中探索期货交易规律，并把研究结论变成下一轮可用记忆。
 
 当前学习链路包括：
 
@@ -172,7 +172,7 @@ TQX_LLM_API_KEY=...
 初始化主数据库和评估表：
 
 ```powershell
-cd D:\research\AgentQuant\src
+cd D:\research\agent-future-trading\src
 python database\sqlite_setup.py
 python database\sqlite_setup_eval.py
 ```
@@ -185,7 +185,7 @@ python database\build_check_db.py
 
 ## 七、运行方式
 
-以下命令默认已激活 `deepfund` 环境，并从 `D:\research\AgentQuant\src` 目录执行；自动化开发与验收固定使用 `C:\ProgramData\miniconda3\envs\deepfund\python.exe`。
+以下命令默认已激活 `deepfund` 环境，并从 `D:\research\agent-future-trading\src` 目录执行；自动化开发与验收固定使用 `C:\ProgramData\miniconda3\envs\deepfund\python.exe`。
 
 ### 1. 跑完整回测窗口
 
@@ -331,7 +331,7 @@ python -m compileall src
 
 ## 十三、设计边界
 
-AgentQuant 当前不是盘口级撮合系统，也不是自动训练新模型的机器学习平台。它更接近一个可审计的期货策略生成、执行、结算和研究闭环系统。
+agent-future-trading 当前不是盘口级撮合系统，也不是自动训练新模型的机器学习平台。它更接近一个可审计的期货策略生成、执行、结算和研究闭环系统。
 
 系统设计底线：
 

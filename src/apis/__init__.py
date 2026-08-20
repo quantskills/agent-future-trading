@@ -1,4 +1,4 @@
-"""Lazy exports for AgentQuant API clients."""
+"""Lazy exports for agent-future-trading API clients."""
 
 from importlib import import_module
 from typing import Any

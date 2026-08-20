@@ -1,8 +1,8 @@
-# AgentQuant 数据与模型调用机制
+# agent-future-trading 数据与模型调用机制
 
 更新时间：2026-06-27
 
-本文档记录 AgentQuant 当前数据入口、模型调用边界、结构化输出要求和回测验收要求。它和 `docs/mechanism_multiagents.md`、`docs/matrix_field_semantics.md` 共同约束代码、提示词、工具和审计。
+本文档记录 agent-future-trading 当前数据入口、模型调用边界、结构化输出要求和回测验收要求。它和 `docs/mechanism_multiagents.md`、`docs/matrix_field_semantics.md` 共同约束代码、提示词、工具和审计。
 
 ## 一、数据调用原则
 

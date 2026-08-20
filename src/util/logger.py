@@ -10,7 +10,7 @@ from util.text_sanitize import sanitize_visible_text
 
 
 class AgentQuantLogger:
-    """Logger for the AgentQuant application."""
+    """Logger for the agent-future-trading application."""
 
     def __init__(self, log_level: str = "INFO"):
         configured_log_dir = os.getenv("AGENTQUANT_LOG_DIR")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Local artifact-contract helpers.
 
-AgentQuant is not migrating to an A2A runtime. These helpers apply the useful
+agent-future-trading is not migrating to an A2A runtime. These helpers apply the useful
 part of A2A for this codebase: each phase writes structured, auditable
 artifacts with a stable header.
 """

@@ -1,4 +1,4 @@
-"""Default deterministic unittest discovery entry for AgentQuant.
+"""Default deterministic unittest discovery entry for agent-future-trading.
 
 Running `python -m unittest` from the repository root only discovers test files
 in the current directory by default. The real test suite lives under

@@ -29,7 +29,7 @@ load_dotenv()
 
 def accountant_agent(argv: Optional[List[str]] = None) -> None:
     """Run the futures accountant agent from CLI-style arguments."""
-    parser = argparse.ArgumentParser(description="Run AgentQuant futures accountant agent for Phase3 settlement")
+    parser = argparse.ArgumentParser(description="Run agent-future-trading futures accountant agent for Phase3 settlement")
     parser.add_argument("--config", type=str, required=True, help="Path to configuration file")
     parser.add_argument("--trading-date", type=str, required=True, help="Trading date in format YYYY-MM-DD")
     parser.add_argument("--local-db", action="store_true", help="Use local SQLite database")

@@ -27,8 +27,8 @@ class Router():
         Initialize Router with API source and market type.
 
         Args:
-            source: API source. AgentQuant currently supports PandaAI for futures market data.
-            market_type: Current runtime market type. AgentQuant now runs in china_futures mode.
+            source: API source. agent-future-trading currently supports PandaAI for futures market data.
+            market_type: Current runtime market type. agent-future-trading now runs in china_futures mode.
             config: Optional runtime config; used to resolve local Finoview/news paths.
         """
         self.market_type = market_type
@@ -37,7 +37,7 @@ class Router():
             from apis.pandaai import PandaAIAPI
             self.api = PandaAIAPI()
         else:
-            raise ValueError(f"Unsupported API source for AgentQuant futures mode: {source}")
+            raise ValueError(f"Unsupported API source for agent-future-trading futures mode: {source}")
         self.last_fundamentals_metadata = None
         self.last_news_metadata = None
 
@@ -65,7 +65,7 @@ class Router():
     
     def get_us_economic_indicators(self):
         raise RuntimeError(
-            "Router.get_us_economic_indicators is retired. AgentQuant futures mode uses PandaAI and local Finoview data only."
+            "Router.get_us_economic_indicators is retired. agent-future-trading futures mode uses PandaAI and local Finoview data only."
         )
 
     # China futures helpers backed by the configured futures market data provider.

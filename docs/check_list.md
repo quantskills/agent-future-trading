@@ -1,4 +1,4 @@
-# AgentQuant 回测后待验收清单
+# agent-future-trading 回测后待验收清单
 
 ## 使用边界
 

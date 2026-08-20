@@ -1377,7 +1377,7 @@ class Finoview_data():
         #重置dataframe
         df.reset_index(drop=True,inplace=True)
         #保存成feather
-        df.to_feather(r'd:\research\AgentQuant\data\Fundamental_data\Finoview_data\{}.feather'.format(index))
+        df.to_feather(r'd:\research\agent-future-trading\data\Fundamental_data\Finoview_data\{}.feather'.format(index))
         #保存成feather(回测系统)
         #df.to_feather('E:/czk/XtechFuture/Backtest_system/Xtech Futures Backtest System_out_of_sample/DATA/Fundamental_data/Finoview_data/{}.feather'.format(index))
 

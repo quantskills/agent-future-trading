@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import sys
 from pathlib import Path
 
@@ -21,10 +21,10 @@ from util.db_helper import db_initialize, get_db
 load_dotenv()
 
 def main():
-    """Proposal entry point for AgentQuant Phase1 strategy generation."""
+    """Proposal entry point for agent-future-trading Phase1 strategy generation."""
 
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Run AgentQuant Phase1 proposal generation")
+    parser = argparse.ArgumentParser(description="Run agent-future-trading Phase1 proposal generation")
     parser.add_argument("--config", type=str, required=True, help="Path to configuration file")
     parser.add_argument("--trading-date", type=str, required=True, help="Trading date in format YYYY-MM-DD")
     parser.add_argument("--local-db", action="store_true", help="Use local SQLite database")
@@ -54,7 +54,7 @@ def main():
     logger.info(f"Loading config for {cfg['exp_name']}, trading date: {args.trading_date}")
     config_id = load_portfolio_config(cfg, db, reset_portfolio=args.reset_config)
     ensure_seed_settled_portfolio(cfg, db, config_id)
-    logger.info("Init AgentQuant proposal workflow and run")
+    logger.info("Init agent-future-trading proposal workflow and run")
 
     # make sure trading date is in chronological order in DB portfolio table
     latest_trading_date = db.get_latest_trading_date(config_id)
@@ -83,7 +83,7 @@ def main():
                 f"Phase1 completed for {cfg['exp_name']} on {trading_day_value}: "
                 f"elapsed={time_cost:.2f}s"
             )
-        logger.info(f"AgentQuant run completed in {time_cost:.2f} seconds")
+        logger.info(f"agent-future-trading run completed in {time_cost:.2f} seconds")
     except Exception as e:
         if cfg.get("market_type") == "china_futures":
             db.complete_trading_day_phase(config_id, trading_day_value, phase_name, "failed", str(e))

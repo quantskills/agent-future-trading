@@ -1,1 +1,1 @@
-"""AgentQuant runtime entry points."""
+"""agent-future-trading runtime entry points."""

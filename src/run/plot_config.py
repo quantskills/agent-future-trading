@@ -1,7 +1,7 @@
 """
 Configuration Plot Runner
 
-Generate all visualization charts for one AgentQuant futures config:
+Generate all visualization charts for one agent-future-trading futures config:
 - strategy net value curve
 - one single-future chart per traded ticker
   - upper panel: single ticker contribution net value curve
@@ -11,7 +11,7 @@ Usage:
     python src/run/plot_config.py --config src/config/dev.yaml
 
 Output:
-    Generates PNG files under AgentQuant/image by default. If the portfolio
+    Generates PNG files under agent-future-trading/image by default. If the portfolio
     and 15 traded futures tickers exist, this runner produces 16 charts.
 """
 
@@ -194,7 +194,7 @@ class ConfigPlotRunner:
 
     def run(self) -> bool:
         print("\n" + "=" * 72)
-        print("AgentQuant Config Plot Runner")
+        print("agent-future-trading Config Plot Runner")
         print("=" * 72)
         print(f"Config: {self.config_path}")
         print(f"exp_name: {self.exp_name}")
@@ -231,7 +231,7 @@ class ConfigPlotRunner:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate strategy and traded-ticker charts for one AgentQuant config"
+        description="Generate strategy and traded-ticker charts for one agent-future-trading config"
     )
     parser.add_argument(
         "--config",
@@ -243,7 +243,7 @@ def main() -> None:
         "--output-dir",
         type=str,
         default=None,
-        help="Directory for generated plot images (default: AgentQuant/image)",
+        help="Directory for generated plot images (default: agent-future-trading/image)",
     )
     parser.add_argument(
         "--db-path",

@@ -302,7 +302,7 @@ def externalize_text_for_db(
     rel_path = _project_relative(path)
     summary = summarize_payload(text)
     return ExternalizedValue(
-        f"[AgentQuant external artifact] path={rel_path} sha256={sha256} size_bytes={size_bytes}",
+        f"[agent-future-trading external artifact] path={rel_path} sha256={sha256} size_bytes={size_bytes}",
         rel_path,
         sha256,
         size_bytes,

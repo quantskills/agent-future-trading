@@ -1,4 +1,4 @@
-﻿"""Trader agent for futures Phase2 execution.
+"""Trader agent for futures Phase2 execution.
 
 The trader owns the order-execution role: it translates Phase1 futures
 recommendations into Phase2 orders, applies intraday execution confirmation,
@@ -2053,7 +2053,7 @@ def _process_strategy_recommendations(
 
 def trader_agent(argv: Optional[List[str]] = None) -> None:
     """Run the futures trader agent from CLI-style arguments."""
-    parser = argparse.ArgumentParser(description="Run AgentQuant futures trader agent for Phase2 execution")
+    parser = argparse.ArgumentParser(description="Run agent-future-trading futures trader agent for Phase2 execution")
     parser.add_argument("--config", type=str, required=True, help="Path to configuration file")
     parser.add_argument("--trading-date", type=str, required=True, help="Trading date in format YYYY-MM-DD")
     parser.add_argument("--local-db", action="store_true", help="Use local SQLite database")

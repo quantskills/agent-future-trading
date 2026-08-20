@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -167,7 +167,7 @@ def validate_artifacts(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate AgentQuant external artifact paths and checksums.")
+    parser = argparse.ArgumentParser(description="Validate agent-future-trading external artifact paths and checksums.")
     parser.add_argument("--db", default=DB_PATH, help="Runtime agentquant.db path.")
     parser.add_argument("--start-date", default=None, help="Only validate artifacts from this trading date or later.")
     parser.add_argument("--end-date", default=None, help="Only validate artifacts through this trading date.")

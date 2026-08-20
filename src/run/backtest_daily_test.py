@@ -21,7 +21,7 @@ from util.config_normalizer import normalize_config
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run AgentQuant daily post-backtest checks.")
+    parser = argparse.ArgumentParser(description="Run agent-future-trading daily post-backtest checks.")
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--config-id", type=str, default=None)
     parser.add_argument("--start-date", type=str, default=None)
@@ -61,7 +61,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print("AgentQuant daily post-backtest gate")
+        print("agent-future-trading daily post-backtest gate")
         print(f"  status: {report['status']}")
         for check in report["checks"]:
             print(f"  {check['check_name']}: {check['status']}")

@@ -1,8 +1,8 @@
-# AgentQuant 多智能体运行机制
+# agent-future-trading 多智能体运行机制
 
 更新时间：2026-08-07
 
-本文是 AgentQuant 多智能体链路总纲，只定义启用智能体、阶段顺序、权限边界、事实入口总原则和文档分工。字段级生产/落盘/消费/审计矩阵不写在本文，避免和 `docs/matrix_chain_contract.md` 重复。
+本文是 agent-future-trading 多智能体链路总纲，只定义启用智能体、阶段顺序、权限边界、事实入口总原则和文档分工。字段级生产/落盘/消费/审计矩阵不写在本文，避免和 `docs/matrix_chain_contract.md` 重复。
 全链路契约的可执行依据固定为 `docs/matrix_chain_contract.md`；contract coverage、pre-backtest failure fixture 和 daily PG audit 均按该矩阵执行。
 
 ## 1. 文档职责
@@ -42,7 +42,7 @@
 
 ## 2. 系统目标与底线
 
-AgentQuant 是以发现并扩大手续费后alpha、形成稳定正净收益为核心目标的多智能体期货交易系统。LLM 只用于分析师和研究员形成结构化预测证据与结构化研究成果；LLM 不直接决定方向、手数、资金部署、审计结论、成交、结算和最终交易合约。限制交易或机械保守不是独立优化目标。
+agent-future-trading 是以发现并扩大手续费后alpha、形成稳定正净收益为核心目标的多智能体期货交易系统。LLM 只用于分析师和研究员形成结构化预测证据与结构化研究成果；LLM 不直接决定方向、手数、资金部署、审计结论、成交、结算和最终交易合约。限制交易或机械保守不是独立优化目标。
 
 系统底线：
 

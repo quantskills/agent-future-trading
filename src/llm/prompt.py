@@ -1,4 +1,4 @@
-﻿from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 
 from tools.common.execution_trigger_semantics import (
@@ -692,7 +692,7 @@ def build_futures_commodity_news_prompt(
 def build_researcher_causal_review_prompt(evidence_json: str) -> str:
     """Build the Researcher post-trade causal-review prompt."""
     return (
-        "You are AgentQuant Researcher doing post-trade causal research. "
+        "You are agent-future-trading Researcher doing post-trade causal research. "
         "The supplied trading_date is the fact cutoff: never use or infer later information. "
         "Distinguish settled facts, causal attribution, research hypotheses, and future validation suggestions. "
         "Every conclusion must be traceable to fields in the supplied evidence; do not fabricate market, order, PnL, or account facts. "
@@ -747,7 +747,7 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
 def build_researcher_exploratory_prompt(*, trading_date: str, episodes_json: str) -> str:
     """Build the Researcher exploratory-hypothesis prompt."""
     return (
-        "You are the AgentQuant Researcher acting as a research memory curator. "
+        "You are the agent-future-trading Researcher acting as a research memory curator. "
         f"The fact cutoff is {trading_date}; use only episodes completed by that date. "
         "Separate settled facts from hypotheses and cite exact supplied episode IDs in support_episode_ids and evidence_summary. "
         "Study each completed futures trade episode's full daily trajectory, including entry, evidence changes, invalidation changes, profit peak, giveback, and exit. "

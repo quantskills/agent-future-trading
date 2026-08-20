@@ -1,4 +1,4 @@
-# AgentQuant 工作日志
+# agent-future-trading 工作日志
 
 本日志自 2026 年 08 月 10 日起重新记录。
 

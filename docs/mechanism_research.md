@@ -1,10 +1,10 @@
-# AgentQuant 记忆与研究机制
+# agent-future-trading 记忆与研究机制
 
 研究链路的生产端、DB 落点、下游消费、PG 审计、pre-backtest fixture 与 diagnostics 边界统一锚定 `docs/matrix_chain_contract.md`；本文只说明研究与复盘机制细节。
 
 更新时间：2026-08-07
 
-本文档定义 AgentQuant 的复盘、研究、记忆持久化和未来学习消费机制。它必须与 `docs/mechanism_multiagents.md` 的固定工作流一致，并以 `docs/matrix_field_semantics.md` 作为唯一字段语义矩阵。若本文与多智能体运行机制冲突，以固定工作流、智能体边界和字段语义矩阵为准。
+本文档定义 agent-future-trading 的复盘、研究、记忆持久化和未来学习消费机制。它必须与 `docs/mechanism_multiagents.md` 的固定工作流一致，并以 `docs/matrix_field_semantics.md` 作为唯一字段语义矩阵。若本文与多智能体运行机制冲突，以固定工作流、智能体边界和字段语义矩阵为准。
 
 研究机制只服务未来交易日的结构化学习，不产生当天交易动作，不改写当天合约、成交、结算或收益。
 

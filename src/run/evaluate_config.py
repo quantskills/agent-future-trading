@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import sys
 from pathlib import Path
 
@@ -304,7 +304,7 @@ def main():
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(
-        description="Evaluate AgentQuant config performance metrics"
+        description="Evaluate agent-future-trading config performance metrics"
     )
     parser.add_argument("--config", type=str, required=True, help="Path to configuration file")
     parser.add_argument("--local-db", action="store_true", help="Use local SQLite database")

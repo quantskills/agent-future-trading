@@ -1,4 +1,4 @@
-// Database schema for AgentQuant (based on DeepFund)
+// Database schema for agent-future-trading (based on DeepFund)
 
 Table config {
   id varchar(36) [pk]

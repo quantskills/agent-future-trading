@@ -1,5 +1,5 @@
 """
-PandaAI futures data models used by AgentQuant.
+PandaAI futures data models used by agent-future-trading.
 """
 
 from pydantic import BaseModel, Field

@@ -104,7 +104,7 @@ def is_pandaai_daily_quota_exhausted(exc: BaseException) -> bool:
 
 
 class PandaAIAPI:
-    """PandaAI API wrapper with the futures methods AgentQuant already uses."""
+    """PandaAI API wrapper with the futures methods agent-future-trading already uses."""
 
     _request_lock = threading.Lock()
     _last_request_at = 0.0
@@ -245,11 +245,13 @@ class PandaAIAPI:
             return Path(raw)
         local_app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if local_app_data:
+            # Keep the existing SDK cache location so a project rename does not
+            # invalidate an already-authenticated PandaAI client.
             return Path(local_app_data) / "AgentQuant" / "pandaai_sdk_auth"
         return Path.home() / ".agentquant" / "pandaai_sdk_auth"
 
     def _configure_panda_data_user_cache(self) -> None:
-        """Keep PandaAI SDK token cache inside AgentQuant's writable runtime area."""
+        """Keep PandaAI SDK token cache inside agent-future-trading's writable runtime area."""
         if self.__class__._shared_sdk_user_cache_configured:
             return
         cache_root = getattr(self, "_sdk_user_cache_root", None)
@@ -1133,7 +1135,7 @@ class PandaAIAPI:
         row: dict[str, Any],
         reference_date: Optional[Any],
     ) -> str:
-        """Return the single concrete contract identity exposed to AgentQuant."""
+        """Return the single concrete contract identity exposed to agent-future-trading."""
         record = self._coerce_record(row)
         raw_symbol = record.get("symbol")
         symbol_text = "" if self._is_missing(raw_symbol) else str(raw_symbol).strip()

@@ -560,7 +560,7 @@ def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditRepor
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Audit AgentQuant runtime contract coverage.")
+    parser = argparse.ArgumentParser(description="Audit agent-future-trading runtime contract coverage.")
     parser.add_argument("--repo-root", default=str(PROJECT_ROOT))
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)

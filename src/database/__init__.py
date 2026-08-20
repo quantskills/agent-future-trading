@@ -1,1 +1,1 @@
-"""AgentQuant database package."""
+"""agent-future-trading database package."""
