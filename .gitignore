@@ -53,6 +53,7 @@ assets/
 # Private/local market data and generated reports
 data/
 image/
+docs/
 *.feather
 *.parquet
 *.csv
