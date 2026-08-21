@@ -1,7 +1,7 @@
 [project]
 name = "agent-future-trading"
 version = "0.1.0"
-description = "Add your description here"
+description = "LangGraph-orchestrated multi-agent futures research and backtesting workflow"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
