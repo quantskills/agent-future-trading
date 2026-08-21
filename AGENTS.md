@@ -1,6 +1,6 @@
 ---
 name: agent-future-trading
-description: A LangGraph-orchestrated multi-agent futures research and backtesting workflow. Use when you need structured market analysis, portfolio decisions, historical replay, execution checks, settlement, and research feedback.
+description: 基于 LangGraph 编排的多智能体期货研究与回测工作流，适用于结构化市场分析、组合决策、历史复刻、执行检查、结算和研究反馈。
 quantSkills:
   schema_version: "2.0.0"
   organization: quantskills
@@ -50,37 +50,29 @@ quantSkills:
     mode: natural-language
 ---
 
-# Public project declaration
+# 公共项目声明
 
-`agent-future-trading` is a QUANTSKILLS community project. It is not an
-official, certified, verified, endorsed, or production-ready QUANTSKILLS
-project, and it is not investment advice.
+`agent-future-trading` 是 QUANTSKILLS 社区项目，尚未获得官方认证、验证、背书或生产就绪声明，也不构成投资建议。
 
-## Scope
+## 项目范围
 
-This repository contains the public source for a multi-agent futures research
-and backtesting workflow. It is intended for research, education, and local
-experimentation with legally obtained data.
+本仓库提供多智能体期货研究与回测工作流的公开源代码，面向研究、教学和使用合法取得数据的本地实验。
 
-The public release contains source code, configuration templates, tests, and
-setup instructions. Private credentials, local databases, market-data files,
-logs, and internal research documents are not part of the public release.
+公共版本包含源代码、配置模板、测试和安装说明；私有凭据、本地数据库、行情文件、日志和内部研究文档不属于公共发布内容。
 
-## Operating boundaries
+## 工作边界
 
-- Analysts produce structured technical, fundamental, and futures-news evidence.
-- The signal collector packages analyst evidence for the portfolio manager.
-- The portfolio manager is the only component that signs the final action contract.
-- The auditor checks the signed contract; the trader executes only approved actions.
-- The accountant records settlement and PnL facts.
-- The reviewer and researcher create future-facing feedback after the trading day.
-- Historical replay and live-style execution use the same phase boundaries.
+- 三名分析师分别生成结构化的技术面、基本面和期货新闻面证据。
+- 信号收集员把分析师证据整理成统一证据包，交给投资组合经理。
+- 只有投资组合经理可以签发最终交易行动契约。
+- 审计员检查已签发的契约，交易员只执行审计通过的行动。
+- 会计师记录成交、结算、账户权益、手续费和盈亏事实。
+- 复盘员与研究员在交易日结束后生成面向未来交易日的反馈。
+- 历史回测与模拟盘执行使用相同的阶段边界。
 
-Research feedback is allowed to affect future trading dates only. The system
-must not use future data, private credentials, or research conclusions to
-rewrite past trading facts.
+研究反馈只能影响未来交易日，系统不得使用未来数据、私有凭据或研究结论改写已经发生的交易事实。
 
-## Upstream
+## 上游项目
 
-- Organization: https://github.com/quantskills
-- Repository: https://github.com/quantskills/agent-future-trading
+- 组织：https://github.com/quantskills
+- 仓库：https://github.com/quantskills/agent-future-trading
