@@ -108,3 +108,6 @@ python -m unittest
 ## License
 
 本项目采用 GPL-3.0-only，详见 [LICENSE](LICENSE)。
+
+
+Pandadata 兼容维护：[abgyjaguo](https://github.com/abgyjaguo)，保留原项目作者署名。

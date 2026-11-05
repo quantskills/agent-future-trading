@@ -21,6 +21,6 @@ dependencies:
     - langchain-ollama
     - langchain-fireworks
     - uqer
-    - panda-data==0.0.7
+    - panda-data==1.0.6
     - matplotlib
     - pyarrow
