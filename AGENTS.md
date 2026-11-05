@@ -76,3 +76,7 @@ quantSkills:
 
 - 组织：https://github.com/quantskills
 - 仓库：https://github.com/quantskills/agent-future-trading
+
+## Pandadata compatibility
+
+[Pandadata 1.0.6 compatibility](references/pandadata-compatibility.md) — exact SDK baseline, validation scope, and shared guidance for all supported agent runtimes.
